@@ -1,0 +1,147 @@
+# Cozytrack
+
+Self-hosted podcast recording studio. A Riverside.fm alternative focused on local-first audio recording with optional video preview.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        Browser                               │
+│                                                              │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────────┐  │
+│  │  LiveKit SDK  │  │  RecordRTC   │  │   Upload Client   │  │
+│  │ (WebRTC room) │  │ (local mic   │  │ (chunked upload   │  │
+│  │              │  │  recording)  │  │  to S3 via        │  │
+│  │  Audio/Video  │  │  WebM/Opus   │  │  presigned URLs)  │  │
+│  │  Preview      │  │              │  │                   │  │
+│  └──────┬───────┘  └──────┬───────┘  └────────┬──────────┘  │
+│         │                 │                    │              │
+└─────────┼─────────────────┼────────────────────┼──────────────┘
+          │                 │                    │
+          ▼                 │                    ▼
+┌──────────────────┐        │          ┌──────────────────┐
+│   LiveKit Server │        │          │     AWS S3       │
+│   (WebRTC SFU)   │        │          │  (audio storage) │
+│   Port: 7880     │        │          │                  │
+└──────────────────┘        │          └──────────────────┘
+                            │
+                            ▼
+                  ┌──────────────────┐
+                  │   Next.js App    │
+                  │   (API routes)   │
+                  │                  │
+                  │  - Token gen     │
+                  │  - Presigned URLs│
+                  │  - Session CRUD  │
+                  └────────┬─────────┘
+                           │
+                           ▼
+                  ┌──────────────────┐
+                  │    PostgreSQL    │
+                  │  (metadata)     │
+                  └──────────────────┘
+```
+
+### How It Works
+
+1. **Local-first recording**: Each participant records their own microphone locally using RecordRTC. Audio never passes through the server — it goes straight from the browser to S3.
+2. **Live preview via WebRTC**: LiveKit provides real-time audio/video preview between participants so everyone can hear each other during recording.
+3. **Crash-safe uploads**: Audio is chunked every 5 seconds and uploaded to S3 via presigned URLs. If the browser crashes, you only lose the last few seconds.
+4. **No transcoding needed**: Each track is stored as a separate WebM/Opus file. Download individual tracks and mix in your DAW.
+
+## Tech Stack
+
+- **Next.js 15** (App Router, TypeScript) — Frontend + API
+- **LiveKit** — WebRTC rooms for live audio/video preview
+- **RecordRTC** — Local browser audio recording
+- **AWS S3** — Audio file storage
+- **PostgreSQL** — Session and track metadata
+- **Prisma** — Database ORM
+- **Tailwind CSS** — Styling
+- **Docker Compose** — Local dev services (LiveKit, Postgres, Redis)
+
+## Quick Start
+
+### Prerequisites
+
+- Node.js 18+
+- Docker & Docker Compose
+- AWS account with S3 bucket configured
+
+### Setup
+
+1. **Clone and install dependencies:**
+
+   ```bash
+   git clone <repo-url>
+   cd cozytrack
+   npm install
+   ```
+
+2. **Configure environment:**
+
+   ```bash
+   cp .env.example .env
+   # Edit .env with your AWS credentials and S3 bucket name
+   ```
+
+3. **Start infrastructure:**
+
+   ```bash
+   docker compose up -d
+   ```
+
+4. **Run database migrations:**
+
+   ```bash
+   npx prisma migrate dev --name init
+   ```
+
+5. **Start the dev server:**
+
+   ```bash
+   npm run dev
+   ```
+
+6. **Open** [http://localhost:3000](http://localhost:3000)
+
+## Project Structure
+
+```
+src/
+├── app/
+│   ├── api/
+│   │   ├── sessions/          # Session CRUD
+│   │   ├── livekit-token/     # LiveKit JWT generation
+│   │   ├── upload/            # Presigned URLs + completion
+│   │   └── tracks/            # Track download
+│   ├── dashboard/             # Session list
+│   ├── session/[id]/          # Session detail + track downloads
+│   ├── studio/[id]/           # Recording room
+│   ├── layout.tsx
+│   └── page.tsx               # Landing page
+├── lib/
+│   ├── db.ts                  # Prisma client singleton
+│   ├── livekit.ts             # LiveKit client helper
+│   ├── recorder.ts            # CozyRecorder (RecordRTC wrapper)
+│   ├── s3.ts                  # S3 client + presigned URL helpers
+│   └── upload.ts              # Client-side upload functions
+prisma/
+│   └── schema.prisma          # Database schema
+docker-compose.yml             # LiveKit + Postgres + Redis
+livekit.yaml                   # LiveKit server config
+```
+
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DATABASE_URL` | PostgreSQL connection string | `postgresql://cozytrack:cozytrack@localhost:5432/cozytrack` |
+| `LIVEKIT_API_KEY` | LiveKit API key | `devkey` |
+| `LIVEKIT_API_SECRET` | LiveKit API secret | `secret` |
+| `LIVEKIT_URL` | LiveKit server URL (server-side) | `ws://localhost:7880` |
+| `NEXT_PUBLIC_LIVEKIT_URL` | LiveKit server URL (client-side) | `ws://localhost:7880` |
+| `AWS_ACCESS_KEY_ID` | AWS access key | — |
+| `AWS_SECRET_ACCESS_KEY` | AWS secret key | — |
+| `AWS_REGION` | AWS region | `us-east-1` |
+| `S3_BUCKET_NAME` | S3 bucket for recordings | `cozytrack-recordings` |

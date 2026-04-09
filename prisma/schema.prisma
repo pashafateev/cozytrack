@@ -1,0 +1,29 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  tracks    Track[]
+}
+
+model Track {
+  id              String   @id @default(uuid())
+  sessionId       String
+  session         Session  @relation(fields: [sessionId], references: [id])
+  participantName String
+  s3Key           String
+  durationMs      Int?
+  format          String   @default("webm")
+  status          String   @default("recording") // recording | uploading | complete | failed
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
