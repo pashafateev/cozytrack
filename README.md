@@ -82,7 +82,7 @@ Self-hosted podcast recording studio. A Riverside.fm alternative focused on loca
 
    ```bash
    cp .env.example .env
-   # Edit .env with your AWS credentials and S3 bucket name
+    # Edit .env with your AWS credentials or ensure your local AWS profile is configured
    ```
 
 3. **Start infrastructure:**
@@ -163,5 +163,7 @@ livekit.yaml                   # LiveKit server config
 | `LIVEKIT_API_SECRET` | LiveKit API secret | `cozytrack-local-livekit-secret-32` |
 | `LIVEKIT_URL` | LiveKit server URL (server-side) | `ws://localhost:7880` |
 | `NEXT_PUBLIC_LIVEKIT_URL` | LiveKit server URL (client-side) | `ws://localhost:7880` |
+| `AWS_ACCESS_KEY_ID` | Optional AWS access key for local env-based auth | — |
+| `AWS_SECRET_ACCESS_KEY` | Optional AWS secret key for local env-based auth | — |
 | `AWS_REGION` | AWS region | `us-west-2` |
 | `S3_BUCKET_NAME` | S3 bucket for recordings | `cozytrack-dev-pasha` |
