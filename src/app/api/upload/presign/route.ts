@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { trackPartKey, getPresignedPutUrl } from "@/lib/s3";
+import { db } from "@/lib/db";
+import { trackPartKey, trackRecordingKey, getPresignedPutUrl } from "@/lib/s3";
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { sessionId, trackId, partNumber } = body;
+    const { sessionId, trackId, partNumber, participantName } = body;
 
     if (!sessionId || !trackId || partNumber === undefined) {
       return NextResponse.json(
@@ -13,7 +14,35 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const key = trackPartKey(sessionId, trackId, partNumber);
+    if (partNumber === 0) {
+      const existingTrack = await db.track.findUnique({
+        where: { id: trackId },
+        select: { id: true },
+      });
+
+      if (!existingTrack) {
+        if (!participantName || typeof participantName !== "string") {
+          return NextResponse.json(
+            { error: "participantName is required to start an upload" },
+            { status: 400 }
+          );
+        }
+
+        await db.track.create({
+          data: {
+            id: trackId,
+            sessionId,
+            participantName,
+            s3Key: trackRecordingKey(sessionId, trackId),
+          },
+        });
+      }
+    }
+
+    const key =
+      partNumber === 9999
+        ? trackRecordingKey(sessionId, trackId)
+        : trackPartKey(sessionId, trackId, partNumber);
     const url = await getPresignedPutUrl(key);
 
     return NextResponse.json({ url, key });
