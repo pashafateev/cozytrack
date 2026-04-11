@@ -6,6 +6,6 @@ rtc:
 redis:
   address: redis:6379
 keys:
-  devkey: secret
+  devkey: cozytrack-local-livekit-secret-32
 logging:
   level: info

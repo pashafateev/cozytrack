@@ -81,11 +81,13 @@ function ParticipantTile({
 function RoomContent({
   sessionId,
   participantName,
+  selectedMic,
   studioState,
   setStudioState,
 }: {
   sessionId: string;
   participantName: string;
+  selectedMic: string;
   studioState: StudioState;
   setStudioState: (state: StudioState) => void;
 }) {
@@ -95,31 +97,80 @@ function RoomContent({
   const recorderRef = useRef<CozyRecorder | null>(null);
   const trackIdRef = useRef<string>("");
   const streamRef = useRef<MediaStream | null>(null);
+  const [recordingStream, setRecordingStream] = useState<MediaStream | null>(null);
   const [audioLevels, setAudioLevels] = useState<Map<string, number>>(new Map());
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animFrameRef = useRef<number>(0);
   const recordingStartRef = useRef<number>(0);
+  const localLevelRef = useRef(0);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function getRecordingStream() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: selectedMic ? { deviceId: { exact: selectedMic } } : true,
+        });
+
+        if (cancelled) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+
+        streamRef.current?.getTracks().forEach((track) => track.stop());
+        streamRef.current = stream;
+        setRecordingStream(stream);
+      } catch (err) {
+        console.error("Failed to get recording stream:", err);
+      }
+    }
+
+    void getRecordingStream();
+
+    return () => {
+      cancelled = true;
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+      setRecordingStream(null);
+    };
+  }, [selectedMic]);
 
   // Monitor local audio levels
   useEffect(() => {
-    if (!streamRef.current) return;
+    if (!recordingStream) return;
 
     const audioCtx = new AudioContext();
-    const source = audioCtx.createMediaStreamSource(streamRef.current);
+    const source = audioCtx.createMediaStreamSource(recordingStream);
     const analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 256;
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.85;
     source.connect(analyser);
     analyserRef.current = analyser;
 
-    const dataArray = new Uint8Array(analyser.frequencyBinCount);
+    const dataArray = new Uint8Array(analyser.fftSize);
 
     function tick() {
       if (!analyserRef.current) return;
-      analyserRef.current.getByteFrequencyData(dataArray);
-      const avg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+      analyserRef.current.getByteTimeDomainData(dataArray);
+
+      let sumSquares = 0;
+      for (const value of dataArray) {
+        const centeredSample = (value - 128) / 128;
+        sumSquares += centeredSample * centeredSample;
+      }
+
+      const rms = Math.sqrt(sumSquares / dataArray.length);
+      const normalized = Math.min(1, Math.max(0, (rms - 0.01) / 0.12));
+      const targetLevel = Math.round(Math.pow(normalized, 0.6) * 255);
+      const smoothedLevel = Math.round(
+        localLevelRef.current * 0.7 + targetLevel * 0.3
+      );
+      localLevelRef.current = smoothedLevel;
+
       setAudioLevels((prev) => {
         const next = new Map(prev);
-        next.set(participantName, avg);
+        next.set(participantName, smoothedLevel);
         return next;
       });
       animFrameRef.current = requestAnimationFrame(tick);
@@ -129,9 +180,10 @@ function RoomContent({
 
     return () => {
       cancelAnimationFrame(animFrameRef.current);
+      localLevelRef.current = 0;
       audioCtx.close();
     };
-  }, [participantName]);
+  }, [participantName, recordingStream]);
 
   // Listen for remote audio level data via data channel
   useEffect(() => {
@@ -163,18 +215,10 @@ function RoomContent({
     trackIdRef.current = uuidv4();
     const trackId = trackIdRef.current;
 
-    // Create the track in the database
-    await fetch("/api/sessions/" + sessionId, { method: "GET" });
-
-    // Create a DB track record
-    const trackRes = await fetch("/api/upload/presign", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId, trackId, partNumber: 0 }),
-    });
-
-    if (!trackRes.ok) {
-      console.error("Failed to initialize upload");
+    try {
+      await getPresignedUploadUrl(sessionId, trackId, 0, participantName);
+    } catch (err) {
+      console.error("Failed to initialize upload:", err);
       return;
     }
 
@@ -191,7 +235,15 @@ function RoomContent({
 
     recorderRef.current = recorder;
     recordingStartRef.current = Date.now();
-    recorder.start(5000);
+
+    try {
+      await recorder.start(5000);
+    } catch (err) {
+      console.error("Failed to start recorder:", err);
+      recorderRef.current = null;
+      return;
+    }
+
     setStudioState("recording");
 
     // Notify other participants via data channel
@@ -213,7 +265,7 @@ function RoomContent({
       // Upload the final complete blob
       const url = await getPresignedUploadUrl(sessionId, trackId, 9999);
       await uploadChunk(url, blob);
-      await completeUpload(sessionId, trackId);
+      await completeUpload(sessionId, trackId, durationMs);
 
       // Notify other participants
       const encoder = new TextEncoder();
@@ -425,6 +477,7 @@ export default function StudioPage() {
           <RoomContent
             sessionId={sessionId}
             participantName={participantName}
+            selectedMic={selectedMic}
             studioState={studioState}
             setStudioState={setStudioState}
           />

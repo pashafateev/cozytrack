@@ -82,7 +82,7 @@ Self-hosted podcast recording studio. A Riverside.fm alternative focused on loca
 
    ```bash
    cp .env.example .env
-   # Edit .env with your AWS credentials and S3 bucket name
+    # Edit .env with your AWS credentials or ensure your local AWS profile is configured
    ```
 
 3. **Start infrastructure:**
@@ -103,7 +103,29 @@ Self-hosted podcast recording studio. A Riverside.fm alternative focused on loca
    npm run dev
    ```
 
-6. **Open** [http://localhost:3000](http://localhost:3000)
+6. **Open** [http://localhost:3001](http://localhost:3001)
+
+### Local Reset
+
+Use this when you want a clean local slate:
+
+```bash
+npm run reset:local
+```
+
+This will:
+- start local Docker services if needed
+- reset the local Prisma database
+- fully empty the configured S3 bucket, including versioned objects and delete markers
+
+Safety guard:
+- the reset script refuses to run unless `S3_BUCKET_NAME` contains `dev`, `local`, or `test`
+
+To reset everything and immediately start the app:
+
+```bash
+npm run init:local
+```
 
 ## Project Structure
 
@@ -136,12 +158,12 @@ livekit.yaml                   # LiveKit server config
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DATABASE_URL` | PostgreSQL connection string | `postgresql://cozytrack:cozytrack@localhost:5432/cozytrack` |
+| `DATABASE_URL` | PostgreSQL connection string | `postgresql://cozytrack:cozytrack@localhost:5433/cozytrack` |
 | `LIVEKIT_API_KEY` | LiveKit API key | `devkey` |
-| `LIVEKIT_API_SECRET` | LiveKit API secret | `secret` |
+| `LIVEKIT_API_SECRET` | LiveKit API secret | `cozytrack-local-livekit-secret-32` |
 | `LIVEKIT_URL` | LiveKit server URL (server-side) | `ws://localhost:7880` |
 | `NEXT_PUBLIC_LIVEKIT_URL` | LiveKit server URL (client-side) | `ws://localhost:7880` |
-| `AWS_ACCESS_KEY_ID` | AWS access key | — |
-| `AWS_SECRET_ACCESS_KEY` | AWS secret key | — |
-| `AWS_REGION` | AWS region | `us-east-1` |
-| `S3_BUCKET_NAME` | S3 bucket for recordings | `cozytrack-recordings` |
+| `AWS_ACCESS_KEY_ID` | Optional AWS access key for local env-based auth | — |
+| `AWS_SECRET_ACCESS_KEY` | Optional AWS secret key for local env-based auth | — |
+| `AWS_REGION` | AWS region | `us-west-2` |
+| `S3_BUCKET_NAME` | S3 bucket for recordings | `cozytrack-dev-pasha` |
