@@ -3,12 +3,13 @@
 export async function getPresignedUploadUrl(
   sessionId: string,
   trackId: string,
-  partNumber: number
+  partNumber: number,
+  participantName?: string
 ): Promise<string> {
   const res = await fetch("/api/upload/presign", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sessionId, trackId, partNumber }),
+    body: JSON.stringify({ sessionId, trackId, partNumber, participantName }),
   });
 
   if (!res.ok) {
@@ -35,12 +36,13 @@ export async function uploadChunk(url: string, chunk: Blob): Promise<void> {
 
 export async function completeUpload(
   sessionId: string,
-  trackId: string
+  trackId: string,
+  durationMs?: number
 ): Promise<void> {
   const res = await fetch("/api/upload/complete", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sessionId, trackId }),
+    body: JSON.stringify({ sessionId, trackId, durationMs }),
   });
 
   if (!res.ok) {

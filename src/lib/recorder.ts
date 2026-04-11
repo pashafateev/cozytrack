@@ -1,11 +1,15 @@
 "use client";
 
-import RecordRTC, { StereoAudioRecorder } from "recordrtc";
-
 export type ChunkCallback = (chunk: Blob, index: number) => void;
 
+type RecorderInstance = {
+  startRecording: () => void;
+  stopRecording: (callback: () => void) => void;
+  getBlob: () => Blob;
+};
+
 export class CozyRecorder {
-  private recorder: RecordRTC | null = null;
+  private recorder: RecorderInstance | null = null;
   private stream: MediaStream;
   private chunkCallbacks: ChunkCallback[] = [];
   private chunkIndex = 0;
@@ -24,13 +28,15 @@ export class CozyRecorder {
     this.chunkCallbacks.push(callback);
   }
 
-  start(timeSlice = 5000): void {
+  async start(timeSlice = 5000): Promise<void> {
     this.chunkIndex = 0;
     this.allChunks = [];
 
+    const { default: RecordRTC, StereoAudioRecorder } = await import("recordrtc");
+
     this.recorder = new RecordRTC(this.stream, {
       type: "audio",
-      mimeType: "audio/webm" as RecordRTC.Options["mimeType"],
+      mimeType: "audio/webm",
       recorderType: StereoAudioRecorder,
       timeSlice,
       ondataavailable: (blob: Blob) => {

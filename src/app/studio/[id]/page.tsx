@@ -81,11 +81,13 @@ function ParticipantTile({
 function RoomContent({
   sessionId,
   participantName,
+  selectedMic,
   studioState,
   setStudioState,
 }: {
   sessionId: string;
   participantName: string;
+  selectedMic: string;
   studioState: StudioState;
   setStudioState: (state: StudioState) => void;
 }) {
@@ -99,6 +101,36 @@ function RoomContent({
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animFrameRef = useRef<number>(0);
   const recordingStartRef = useRef<number>(0);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function getRecordingStream() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: selectedMic ? { deviceId: { exact: selectedMic } } : true,
+        });
+
+        if (cancelled) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+
+        streamRef.current?.getTracks().forEach((track) => track.stop());
+        streamRef.current = stream;
+      } catch (err) {
+        console.error("Failed to get recording stream:", err);
+      }
+    }
+
+    void getRecordingStream();
+
+    return () => {
+      cancelled = true;
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    };
+  }, [selectedMic]);
 
   // Monitor local audio levels
   useEffect(() => {
@@ -163,18 +195,10 @@ function RoomContent({
     trackIdRef.current = uuidv4();
     const trackId = trackIdRef.current;
 
-    // Create the track in the database
-    await fetch("/api/sessions/" + sessionId, { method: "GET" });
-
-    // Create a DB track record
-    const trackRes = await fetch("/api/upload/presign", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId, trackId, partNumber: 0 }),
-    });
-
-    if (!trackRes.ok) {
-      console.error("Failed to initialize upload");
+    try {
+      await getPresignedUploadUrl(sessionId, trackId, 0, participantName);
+    } catch (err) {
+      console.error("Failed to initialize upload:", err);
       return;
     }
 
@@ -191,7 +215,15 @@ function RoomContent({
 
     recorderRef.current = recorder;
     recordingStartRef.current = Date.now();
-    recorder.start(5000);
+
+    try {
+      await recorder.start(5000);
+    } catch (err) {
+      console.error("Failed to start recorder:", err);
+      recorderRef.current = null;
+      return;
+    }
+
     setStudioState("recording");
 
     // Notify other participants via data channel
@@ -213,7 +245,7 @@ function RoomContent({
       // Upload the final complete blob
       const url = await getPresignedUploadUrl(sessionId, trackId, 9999);
       await uploadChunk(url, blob);
-      await completeUpload(sessionId, trackId);
+      await completeUpload(sessionId, trackId, durationMs);
 
       // Notify other participants
       const encoder = new TextEncoder();
@@ -425,6 +457,7 @@ export default function StudioPage() {
           <RoomContent
             sessionId={sessionId}
             participantName={participantName}
+            selectedMic={selectedMic}
             studioState={studioState}
             setStudioState={setStudioState}
           />
