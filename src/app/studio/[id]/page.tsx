@@ -116,6 +116,8 @@ function RoomContent({
   const animFrameRef = useRef<number>(0);
   const recordingStartRef = useRef<number>(0);
   const localLevelRef = useRef(0);
+  const chunkUploadPromisesRef = useRef(new Set<Promise<void>>());
+
   const [audioQualityMode, setAudioQualityMode] = useState<AudioQualityMode>("full");
   const [notification, setNotification] = useState<string | null>(null);
   const notificationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -149,6 +151,19 @@ function RoomContent({
     },
     [localParticipant],
   );
+
+  const trackChunkUpload = useCallback((uploadPromise: Promise<void>) => {
+    chunkUploadPromisesRef.current.add(uploadPromise);
+    uploadPromise.finally(() => {
+      chunkUploadPromisesRef.current.delete(uploadPromise);
+    });
+  }, []);
+
+  const waitForChunkUploads = useCallback(async () => {
+    while (chunkUploadPromisesRef.current.size > 0) {
+      await Promise.allSettled(Array.from(chunkUploadPromisesRef.current));
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -270,13 +285,17 @@ function RoomContent({
 
     const recorder = new CozyRecorder(streamRef.current);
 
-    recorder.onChunk(async (chunk, index) => {
-      try {
-        const url = await getPresignedUploadUrl(sessionId, trackId, index);
-        await uploadChunk(url, chunk);
-      } catch (err) {
-        console.error("Failed to upload chunk:", err);
-      }
+    recorder.onChunk((chunk, index) => {
+      const uploadPromise = (async () => {
+        try {
+          const url = await getPresignedUploadUrl(sessionId, trackId, index);
+          await uploadChunk(url, chunk);
+        } catch (err) {
+          console.error("Failed to upload chunk:", err);
+        }
+      })();
+
+      trackChunkUpload(uploadPromise);
     });
 
     recorderRef.current = recorder;
@@ -306,7 +325,15 @@ function RoomContent({
       JSON.stringify({ type: "recording_started", participant: participantName })
     );
     localParticipant.publishData(data, { reliable: true });
-  }, [sessionId, participantName, localParticipant, setStudioState, switchAudioQuality, showNotification]);
+  }, [
+    sessionId,
+    participantName,
+    localParticipant,
+    setStudioState,
+    showNotification,
+    switchAudioQuality,
+    trackChunkUpload,
+  ]);
 
   const stopRecording = useCallback(async () => {
     if (!recorderRef.current) return;
@@ -319,6 +346,7 @@ function RoomContent({
       // Upload the final complete blob
       const url = await getPresignedUploadUrl(sessionId, trackId, 9999);
       await uploadChunk(url, blob);
+      await waitForChunkUploads();
       await completeUpload(sessionId, trackId, durationMs);
 
       // Notify other participants
@@ -337,7 +365,14 @@ function RoomContent({
     }
 
     recorderRef.current = null;
-  }, [sessionId, participantName, localParticipant, setStudioState, switchAudioQuality]);
+  }, [
+    sessionId,
+    participantName,
+    localParticipant,
+    setStudioState,
+    switchAudioQuality,
+    waitForChunkUploads,
+  ]);
 
   // Get mic stream on mount
   useEffect(() => {
