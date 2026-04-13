@@ -25,6 +25,8 @@ export async function POST(req: NextRequest) {
       },
     });
 
+    // After completion, recording.webm is the only authoritative artifact.
+    // Chunk files are temporary crash-safety uploads and can be discarded.
     await deleteTrackChunks(sessionId, trackId);
 
     return NextResponse.json(track);
