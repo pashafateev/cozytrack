@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { trackRecordingKey } from "@/lib/s3";
+import { deleteTrackChunks, trackRecordingKey } from "@/lib/s3";
 
 export async function POST(req: NextRequest) {
   try {
@@ -24,6 +24,8 @@ export async function POST(req: NextRequest) {
         durationMs: durationMs ?? null,
       },
     });
+
+    await deleteTrackChunks(sessionId, trackId);
 
     return NextResponse.json(track);
   } catch (error) {
