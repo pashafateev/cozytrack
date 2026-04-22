@@ -103,6 +103,9 @@ Self-hosted podcast recording studio. A Riverside.fm alternative focused on loca
    npm run dev
    ```
 
+   `npm run dev` now checks local AWS auth up front and fails fast if the current session is expired.
+   Reauthenticate with `aws login` and rerun the command if needed.
+
 6. **Open** [http://localhost:3001](http://localhost:3001)
 
 ### Local Reset
