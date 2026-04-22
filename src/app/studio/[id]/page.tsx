@@ -662,7 +662,7 @@ export default function StudioPage() {
             sessionId={sessionId}
             participantName={participantName}
             selectedMic={selectedMic}
-            selectedMicLabel={selectedMicDevice?.label}
+            selectedMicLabel={selectedMicDevice?.label || undefined}
             selectedMicIsBuiltIn={selectedMicDevice ? isBuiltInMic(selectedMicDevice.label) : false}
             studioState={studioState}
             setStudioState={setStudioState}

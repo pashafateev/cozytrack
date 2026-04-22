@@ -57,7 +57,7 @@ export async function POST(req: NextRequest) {
 
         const safeDeviceLabel = typeof deviceLabel === "string" && deviceLabel.length > 0 ? deviceLabel : null;
         const safeDeviceId = typeof deviceId === "string" && deviceId.length > 0 ? deviceId : null;
-        const safeIsBuiltInMic = isBuiltInMic === true;
+        const safeIsBuiltInMic = typeof isBuiltInMic === "boolean" ? isBuiltInMic : false;
 
         await db.track.create({
           data: {
