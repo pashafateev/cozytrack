@@ -9,13 +9,13 @@ const config: Config = {
   theme: {
     extend: {
       keyframes: {
-        "fade-in": {
+        "toast-fade-in": {
           "0%": { opacity: "0", transform: "translate(-50%, -8px)" },
           "100%": { opacity: "1", transform: "translate(-50%, 0)" },
         },
       },
       animation: {
-        "fade-in": "fade-in 0.2s ease-out",
+        "toast-fade-in": "toast-fade-in 0.2s ease-out",
       },
       colors: {
         cozy: {

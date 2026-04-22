@@ -118,20 +118,33 @@ function RoomContent({
   const localLevelRef = useRef(0);
   const [audioQualityMode, setAudioQualityMode] = useState<AudioQualityMode>("full");
   const [notification, setNotification] = useState<string | null>(null);
+  const notificationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showNotification = useCallback((message: string) => {
+    if (notificationTimerRef.current) clearTimeout(notificationTimerRef.current);
     setNotification(message);
-    setTimeout(() => setNotification(null), 4000);
+    notificationTimerRef.current = setTimeout(() => {
+      setNotification(null);
+      notificationTimerRef.current = null;
+    }, 4000);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (notificationTimerRef.current) clearTimeout(notificationTimerRef.current);
+    };
   }, []);
 
   const switchAudioQuality = useCallback(
-    async (mode: AudioQualityMode) => {
+    async (mode: AudioQualityMode): Promise<boolean> => {
       const opts = mode === "full" ? FULL_QUALITY_PUBLISH : BANDWIDTH_SAVING_PUBLISH;
       try {
         await localParticipant.republishAllTracks(opts, false);
         setAudioQualityMode(mode);
+        return true;
       } catch (err) {
         console.error("Failed to switch audio quality:", err);
+        return false;
       }
     },
     [localParticipant],
@@ -280,8 +293,12 @@ function RoomContent({
     setStudioState("recording");
 
     // Auto-switch to bandwidth-saving mode for the LiveKit preview
-    await switchAudioQuality("bandwidth-saving");
-    showNotification("Preview quality reduced — local recording is unaffected");
+    const switched = await switchAudioQuality("bandwidth-saving");
+    if (switched) {
+      showNotification("Preview quality reduced — local recording is unaffected");
+    } else {
+      showNotification("Couldn't switch audio quality — check console");
+    }
 
     // Notify other participants via data channel
     const encoder = new TextEncoder();
@@ -335,7 +352,7 @@ function RoomContent({
     <div className="space-y-8">
       {/* Notification Toast */}
       {notification && (
-        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg bg-cozy-800 border border-cozy-600 text-sm text-gray-200 shadow-lg animate-fade-in">
+        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg bg-cozy-800 border border-cozy-600 text-sm text-gray-200 shadow-lg animate-toast-fade-in">
           {notification}
         </div>
       )}
