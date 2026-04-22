@@ -150,7 +150,10 @@ export default function SessionDetailPage() {
                             title={`Recorded with built-in mic${track.deviceLabel ? `: ${track.deviceLabel}` : ""}`}
                             className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-yellow-900/40 text-yellow-400 border border-yellow-800 cursor-help"
                           >
-                            ⚠ Built-in mic
+                            <span aria-hidden="true">⚠ Built-in mic</span>
+                            <span className="sr-only">
+                              Recorded with built-in mic{track.deviceLabel ? `: ${track.deviceLabel}` : ""}
+                            </span>
                           </span>
                         )}
                       </div>

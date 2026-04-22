@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useParams } from "next/navigation";
 import {
   LiveKitRoom,
@@ -105,7 +105,7 @@ function RoomContent({
   sessionId: string;
   participantName: string;
   selectedMic: string;
-  selectedMicLabel: string;
+  selectedMicLabel: string | undefined;
   selectedMicIsBuiltIn: boolean;
   studioState: StudioState;
   setStudioState: (state: StudioState) => void;
@@ -504,6 +504,10 @@ export default function StudioPage() {
     () => new Set(),
   );
   const micSelectRef = useRef<HTMLSelectElement>(null);
+  const selectedMicDevice = useMemo(
+    () => mics.find((m) => m.deviceId === selectedMic),
+    [mics, selectedMic],
+  );
 
   // Enumerate mic devices
   useEffect(() => {
@@ -542,8 +546,7 @@ export default function StudioPage() {
   function handleJoin() {
     if (!participantName.trim()) return;
 
-    const mic = mics.find((m) => m.deviceId === selectedMic);
-    if (mic && isBuiltInMic(mic.label) && !acknowledgedDevices.has(selectedMic)) {
+    if (selectedMicDevice && isBuiltInMic(selectedMicDevice.label) && !acknowledgedDevices.has(selectedMic)) {
       setShowMicWarning(true);
       return;
     }
@@ -659,8 +662,8 @@ export default function StudioPage() {
             sessionId={sessionId}
             participantName={participantName}
             selectedMic={selectedMic}
-            selectedMicLabel={mics.find((m) => m.deviceId === selectedMic)?.label ?? ""}
-            selectedMicIsBuiltIn={isBuiltInMic(mics.find((m) => m.deviceId === selectedMic)?.label ?? "")}
+            selectedMicLabel={selectedMicDevice?.label}
+            selectedMicIsBuiltIn={selectedMicDevice ? isBuiltInMic(selectedMicDevice.label) : false}
             studioState={studioState}
             setStudioState={setStudioState}
           />

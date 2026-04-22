@@ -1,7 +1,7 @@
 "use client";
 
 export interface DeviceInfo {
-  deviceLabel: string;
+  deviceLabel: string | undefined;
   deviceId: string;
   isBuiltInMic: boolean;
 }
@@ -21,7 +21,7 @@ export async function getPresignedUploadUrl(
       trackId,
       partNumber,
       participantName,
-      ...deviceInfo,
+      ...(deviceInfo ?? {}),
     }),
   });
 

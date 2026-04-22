@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 
 interface BuiltInMicWarningModalProps {
   onAcknowledge: () => void;
@@ -12,16 +12,21 @@ export function BuiltInMicWarningModal({
   onSwitchMic,
 }: BuiltInMicWarningModalProps) {
   const [checked, setChecked] = useState(false);
+  const checkboxRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    checkboxRef.current?.focus();
+  }, []);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-      <div className="max-w-md w-full rounded-xl bg-cozy-900 border border-cozy-700 p-6 shadow-2xl space-y-5">
+      <div role="dialog" aria-modal="true" aria-labelledby="builtin-mic-modal-title" className="max-w-md w-full rounded-xl bg-cozy-900 border border-cozy-700 p-6 shadow-2xl space-y-5">
         <div className="flex items-start gap-3">
           <span className="text-2xl leading-none" aria-hidden="true">
             ⚠️
           </span>
           <div>
-            <h2 className="text-lg font-semibold text-white">
+            <h2 id="builtin-mic-modal-title" className="text-lg font-semibold text-white">
               You&apos;re using your built-in microphone
             </h2>
             <p className="text-sm text-gray-400 mt-2 leading-relaxed">
@@ -33,6 +38,7 @@ export function BuiltInMicWarningModal({
 
         <label className="flex items-center gap-3 cursor-pointer select-none">
           <input
+            ref={checkboxRef}
             type="checkbox"
             checked={checked}
             onChange={(e) => setChecked(e.target.checked)}

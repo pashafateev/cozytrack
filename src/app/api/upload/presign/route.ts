@@ -28,15 +28,19 @@ export async function POST(req: NextRequest) {
           );
         }
 
+        const safeDeviceLabel = typeof deviceLabel === "string" && deviceLabel.length > 0 ? deviceLabel : null;
+        const safeDeviceId = typeof deviceId === "string" && deviceId.length > 0 ? deviceId : null;
+        const safeIsBuiltInMic = isBuiltInMic === true;
+
         await db.track.create({
           data: {
             id: trackId,
             sessionId,
             participantName,
             s3Key: trackRecordingKey(sessionId, trackId),
-            deviceLabel: deviceLabel ?? null,
-            deviceId: deviceId ?? null,
-            isBuiltInMic: isBuiltInMic ?? false,
+            deviceLabel: safeDeviceLabel,
+            deviceId: safeDeviceId,
+            isBuiltInMic: safeIsBuiltInMic,
           },
         });
       }
