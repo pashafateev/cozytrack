@@ -13,7 +13,18 @@ export async function getPresignedUploadUrl(
   });
 
   if (!res.ok) {
-    throw new Error(`Failed to get presigned URL: ${res.statusText}`);
+    let message = res.statusText;
+
+    try {
+      const data = await res.json();
+      if (typeof data?.error === "string") {
+        message = data.error;
+      }
+    } catch {
+      // Fall back to the HTTP status text when the response isn't JSON.
+    }
+
+    throw new Error(`Failed to get presigned URL: ${message}`);
   }
 
   const data = await res.json();

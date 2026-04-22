@@ -15,6 +15,18 @@ export async function POST(req: NextRequest) {
     }
 
     if (partNumber === 0) {
+      const existingSession = await db.session.findUnique({
+        where: { id: sessionId },
+        select: { id: true },
+      });
+
+      if (!existingSession) {
+        return NextResponse.json(
+          { error: `Session ${sessionId} was not found` },
+          { status: 404 }
+        );
+      }
+
       const existingTrack = await db.track.findUnique({
         where: { id: trackId },
         select: { id: true },
