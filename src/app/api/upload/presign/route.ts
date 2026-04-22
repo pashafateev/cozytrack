@@ -5,7 +5,7 @@ import { trackPartKey, trackRecordingKey, getPresignedPutUrl } from "@/lib/s3";
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { sessionId, trackId, partNumber, participantName } = body;
+    const { sessionId, trackId, partNumber, participantName, deviceLabel, deviceId, isBuiltInMic } = body;
 
     if (!sessionId || !trackId || partNumber === undefined) {
       return NextResponse.json(
@@ -34,6 +34,9 @@ export async function POST(req: NextRequest) {
             sessionId,
             participantName,
             s3Key: trackRecordingKey(sessionId, trackId),
+            deviceLabel: deviceLabel ?? null,
+            deviceId: deviceId ?? null,
+            isBuiltInMic: isBuiltInMic ?? false,
           },
         });
       }

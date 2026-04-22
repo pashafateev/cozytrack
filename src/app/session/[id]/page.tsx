@@ -12,6 +12,8 @@ interface Track {
   format: string;
   status: string;
   createdAt: string;
+  deviceLabel: string | null;
+  isBuiltInMic: boolean;
 }
 
 interface Session {
@@ -139,9 +141,19 @@ export default function SessionDetailPage() {
                       {track.participantName.charAt(0).toUpperCase()}
                     </div>
                     <div>
-                      <p className="font-medium text-white">
-                        {track.participantName}
-                      </p>
+                      <div className="flex items-center gap-2">
+                        <p className="font-medium text-white">
+                          {track.participantName}
+                        </p>
+                        {track.isBuiltInMic && (
+                          <span
+                            title={`Recorded with built-in mic${track.deviceLabel ? `: ${track.deviceLabel}` : ""}`}
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-yellow-900/40 text-yellow-400 border border-yellow-800 cursor-help"
+                          >
+                            ⚠ Built-in mic
+                          </span>
+                        )}
+                      </div>
                       <div className="flex items-center gap-3 mt-1 text-sm text-gray-400">
                         <span>{formatDuration(track.durationMs)}</span>
                         <span>{track.format.toUpperCase()}</span>

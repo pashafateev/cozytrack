@@ -1,15 +1,28 @@
 "use client";
 
+export interface DeviceInfo {
+  deviceLabel: string;
+  deviceId: string;
+  isBuiltInMic: boolean;
+}
+
 export async function getPresignedUploadUrl(
   sessionId: string,
   trackId: string,
   partNumber: number,
-  participantName?: string
+  participantName?: string,
+  deviceInfo?: DeviceInfo,
 ): Promise<string> {
   const res = await fetch("/api/upload/presign", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sessionId, trackId, partNumber, participantName }),
+    body: JSON.stringify({
+      sessionId,
+      trackId,
+      partNumber,
+      participantName,
+      ...deviceInfo,
+    }),
   });
 
   if (!res.ok) {
