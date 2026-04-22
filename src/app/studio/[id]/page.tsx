@@ -4,6 +4,7 @@ import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useParams } from "next/navigation";
 import {
   LiveKitRoom,
+  RoomAudioRenderer,
   useRemoteParticipants,
   useLocalParticipant,
   useRoomContext,
@@ -15,6 +16,12 @@ import { getPresignedUploadUrl, uploadChunk, completeUpload } from "@/lib/upload
 import { getToken, LIVEKIT_URL } from "@/lib/livekit";
 import { isBuiltInMic } from "@/lib/devices";
 import { BuiltInMicWarningModal } from "@/components/BuiltInMicWarningModal";
+import {
+  MicMonitorToggle,
+  getStoredMonitorEnabled,
+  getStoredMonitorVolume,
+} from "@/components/MicMonitorToggle";
+import { useMicMonitor } from "@/hooks/useMicMonitor";
 
 // ---------- Types ----------
 
@@ -101,6 +108,10 @@ function RoomContent({
   selectedMicIsBuiltIn,
   studioState,
   setStudioState,
+  monitorEnabled,
+  monitorVolume,
+  onMonitorEnabledChange,
+  onMonitorVolumeChange,
 }: {
   sessionId: string;
   participantName: string;
@@ -109,6 +120,10 @@ function RoomContent({
   selectedMicIsBuiltIn: boolean;
   studioState: StudioState;
   setStudioState: (state: StudioState) => void;
+  monitorEnabled: boolean;
+  monitorVolume: number;
+  onMonitorEnabledChange: (enabled: boolean) => void;
+  onMonitorVolumeChange: (volume: number) => void;
 }) {
   const room = useRoomContext();
   const remoteParticipants = useRemoteParticipants();
@@ -117,6 +132,10 @@ function RoomContent({
   const trackIdRef = useRef<string>("");
   const streamRef = useRef<MediaStream | null>(null);
   const [recordingStream, setRecordingStream] = useState<MediaStream | null>(null);
+
+  // Sidetone: let the user hear themselves without affecting the recording
+  useMicMonitor({ stream: recordingStream, enabled: monitorEnabled, volume: monitorVolume });
+
   const [audioLevels, setAudioLevels] = useState<Map<string, number>>(new Map());
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animFrameRef = useRef<number>(0);
@@ -455,6 +474,16 @@ function RoomContent({
         ))}
       </div>
 
+      {/* Mic Monitor */}
+      <div className="flex justify-center">
+        <MicMonitorToggle
+          enabled={monitorEnabled}
+          volume={monitorVolume}
+          onEnabledChange={onMonitorEnabledChange}
+          onVolumeChange={onMonitorVolumeChange}
+        />
+      </div>
+
       {/* Recording Controls */}
       <div className="flex justify-center">
         {studioState === "connected" && (
@@ -499,11 +528,15 @@ export default function StudioPage() {
   const [mics, setMics] = useState<MediaDeviceInfo[]>([]);
   const [token, setToken] = useState("");
   const [connecting, setConnecting] = useState(false);
+  const [monitorEnabled, setMonitorEnabled] = useState(getStoredMonitorEnabled);
+  const [monitorVolume, setMonitorVolume] = useState(getStoredMonitorVolume);
   const [showMicWarning, setShowMicWarning] = useState(false);
   const [acknowledgedDevices, setAcknowledgedDevices] = useState<Set<string>>(
     () => new Set(),
   );
   const micSelectRef = useRef<HTMLSelectElement>(null);
+  const prejoinStreamRef = useRef<MediaStream | null>(null);
+  const [prejoinStream, setPrejoinStream] = useState<MediaStream | null>(null);
   const selectedMicDevice = useMemo(
     () => mics.find((m) => m.deviceId === selectedMic),
     [mics, selectedMic],
@@ -530,6 +563,46 @@ export default function StudioPage() {
 
     getMics();
   }, []);
+
+  // Acquire a mic stream for prejoin monitoring (sidetone)
+  useEffect(() => {
+    if (studioState !== "prejoin" || !selectedMic) return;
+
+    let cancelled = false;
+
+    async function acquire() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { deviceId: { exact: selectedMic } },
+        });
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        prejoinStreamRef.current?.getTracks().forEach((t) => t.stop());
+        prejoinStreamRef.current = stream;
+        setPrejoinStream(stream);
+      } catch {
+        // Ignore — mic permission may not be granted yet
+      }
+    }
+
+    void acquire();
+
+    return () => {
+      cancelled = true;
+      prejoinStreamRef.current?.getTracks().forEach((t) => t.stop());
+      prejoinStreamRef.current = null;
+      setPrejoinStream(null);
+    };
+  }, [studioState, selectedMic]);
+
+  // Prejoin sidetone
+  useMicMonitor({
+    stream: studioState === "prejoin" ? prejoinStream : null,
+    enabled: monitorEnabled,
+    volume: monitorVolume,
+  });
 
   async function proceedToJoin() {
     setConnecting(true);
@@ -611,6 +684,13 @@ export default function StudioPage() {
               </select>
             </div>
 
+            <MicMonitorToggle
+              enabled={monitorEnabled}
+              volume={monitorVolume}
+              onEnabledChange={setMonitorEnabled}
+              onVolumeChange={setMonitorVolume}
+            />
+
             <button
               onClick={handleJoin}
               disabled={!participantName.trim() || connecting}
@@ -658,6 +738,7 @@ export default function StudioPage() {
           }}
           connect={true}
         >
+          <RoomAudioRenderer />
           <RoomContent
             sessionId={sessionId}
             participantName={participantName}
@@ -666,6 +747,10 @@ export default function StudioPage() {
             selectedMicIsBuiltIn={selectedMicDevice ? isBuiltInMic(selectedMicDevice.label) : false}
             studioState={studioState}
             setStudioState={setStudioState}
+            monitorEnabled={monitorEnabled}
+            monitorVolume={monitorVolume}
+            onMonitorEnabledChange={setMonitorEnabled}
+            onMonitorVolumeChange={setMonitorVolume}
           />
         </LiveKitRoom>
       </div>
