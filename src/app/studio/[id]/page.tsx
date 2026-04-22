@@ -8,7 +8,7 @@ import {
   useLocalParticipant,
   useRoomContext,
 } from "@livekit/components-react";
-import { RoomEvent, DataPacket_Kind } from "livekit-client";
+import { RoomEvent, type TrackPublishOptions } from "livekit-client";
 import { v4 as uuidv4 } from "uuid";
 import { CozyRecorder } from "@/lib/recorder";
 import { getPresignedUploadUrl, uploadChunk, completeUpload } from "@/lib/upload";
@@ -17,11 +17,24 @@ import { getToken, LIVEKIT_URL } from "@/lib/livekit";
 // ---------- Types ----------
 
 type StudioState = "prejoin" | "connected" | "recording";
+type AudioQualityMode = "full" | "bandwidth-saving";
 
 interface AudioLevel {
   identity: string;
   level: number;
 }
+
+// ---------- Audio Quality Presets ----------
+
+const FULL_QUALITY_PUBLISH: TrackPublishOptions = {
+  audioPreset: { maxBitrate: 128_000 },
+  dtx: false,
+};
+
+const BANDWIDTH_SAVING_PUBLISH: TrackPublishOptions = {
+  audioPreset: { maxBitrate: 48_000 },
+  dtx: true,
+};
 
 // ---------- Audio Level Meter ----------
 
@@ -103,6 +116,26 @@ function RoomContent({
   const animFrameRef = useRef<number>(0);
   const recordingStartRef = useRef<number>(0);
   const localLevelRef = useRef(0);
+  const [audioQualityMode, setAudioQualityMode] = useState<AudioQualityMode>("full");
+  const [notification, setNotification] = useState<string | null>(null);
+
+  const showNotification = useCallback((message: string) => {
+    setNotification(message);
+    setTimeout(() => setNotification(null), 4000);
+  }, []);
+
+  const switchAudioQuality = useCallback(
+    async (mode: AudioQualityMode) => {
+      const opts = mode === "full" ? FULL_QUALITY_PUBLISH : BANDWIDTH_SAVING_PUBLISH;
+      try {
+        await localParticipant.republishAllTracks(opts, false);
+        setAudioQualityMode(mode);
+      } catch (err) {
+        console.error("Failed to switch audio quality:", err);
+      }
+    },
+    [localParticipant],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -246,13 +279,17 @@ function RoomContent({
 
     setStudioState("recording");
 
+    // Auto-switch to bandwidth-saving mode for the LiveKit preview
+    await switchAudioQuality("bandwidth-saving");
+    showNotification("Preview quality reduced — local recording is unaffected");
+
     // Notify other participants via data channel
     const encoder = new TextEncoder();
     const data = encoder.encode(
       JSON.stringify({ type: "recording_started", participant: participantName })
     );
     localParticipant.publishData(data, { reliable: true });
-  }, [sessionId, participantName, localParticipant, setStudioState]);
+  }, [sessionId, participantName, localParticipant, setStudioState, switchAudioQuality, showNotification]);
 
   const stopRecording = useCallback(async () => {
     if (!recorderRef.current) return;
@@ -275,12 +312,15 @@ function RoomContent({
       localParticipant.publishData(data, { reliable: true });
 
       setStudioState("connected");
+
+      // Restore full-quality preview
+      await switchAudioQuality("full");
     } catch (err) {
       console.error("Failed to stop recording:", err);
     }
 
     recorderRef.current = null;
-  }, [sessionId, participantName, localParticipant, setStudioState]);
+  }, [sessionId, participantName, localParticipant, setStudioState, switchAudioQuality]);
 
   // Get mic stream on mount
   useEffect(() => {
@@ -293,6 +333,47 @@ function RoomContent({
 
   return (
     <div className="space-y-8">
+      {/* Notification Toast */}
+      {notification && (
+        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg bg-cozy-800 border border-cozy-600 text-sm text-gray-200 shadow-lg animate-fade-in">
+          {notification}
+        </div>
+      )}
+
+      {/* Audio Quality Badge */}
+      <div className="flex items-center justify-center gap-3">
+        <span
+          className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${
+            audioQualityMode === "full"
+              ? "bg-green-900/50 text-green-400 border border-green-700"
+              : "bg-yellow-900/50 text-yellow-400 border border-yellow-700"
+          }`}
+        >
+          <span
+            className={`w-1.5 h-1.5 rounded-full ${
+              audioQualityMode === "full" ? "bg-green-400" : "bg-yellow-400"
+            }`}
+          />
+          {audioQualityMode === "full"
+            ? "Full Quality Preview"
+            : "Bandwidth-Saving Mode"}
+        </span>
+        {studioState === "recording" && (
+          <button
+            onClick={() =>
+              switchAudioQuality(
+                audioQualityMode === "full" ? "bandwidth-saving" : "full",
+              )
+            }
+            className="text-xs text-gray-400 hover:text-white underline underline-offset-2 transition-colors"
+          >
+            {audioQualityMode === "full"
+              ? "Switch to bandwidth-saving"
+              : "Switch to full quality"}
+          </button>
+        )}
+      </div>
+
       {/* Participants Grid */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
         <ParticipantTile
@@ -471,6 +552,12 @@ export default function StudioPage() {
           token={token}
           audio={{
             deviceId: selectedMic ? { exact: selectedMic } : undefined,
+          }}
+          options={{
+            publishDefaults: {
+              audioPreset: { maxBitrate: 128_000 },
+              dtx: false,
+            },
           }}
           connect={true}
         >
