@@ -2,6 +2,21 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { trackPartKey, trackRecordingKey, getPresignedPutUrl } from "@/lib/s3";
 
+function getUploadErrorMessage(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return "Failed to generate presigned URL";
+  }
+
+  if (
+    error.name === "CredentialsProviderError" ||
+    error.message.includes("session has expired")
+  ) {
+    return "AWS session expired. Reauthenticate with `aws login` and try again.";
+  }
+
+  return "Failed to generate presigned URL";
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -61,7 +76,7 @@ export async function POST(req: NextRequest) {
   } catch (error) {
     console.error("Failed to generate presigned URL:", error);
     return NextResponse.json(
-      { error: "Failed to generate presigned URL" },
+      { error: getUploadErrorMessage(error) },
       { status: 500 }
     );
   }
