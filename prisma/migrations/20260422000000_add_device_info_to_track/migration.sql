@@ -1,0 +1,4 @@
+-- AlterTable
+ALTER TABLE "Track" ADD COLUMN "deviceLabel" TEXT;
+ALTER TABLE "Track" ADD COLUMN "deviceId" TEXT;
+ALTER TABLE "Track" ADD COLUMN "isBuiltInMic" BOOLEAN NOT NULL DEFAULT false;

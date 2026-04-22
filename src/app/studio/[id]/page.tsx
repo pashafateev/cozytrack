@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useParams } from "next/navigation";
 import {
   LiveKitRoom,
@@ -13,6 +13,8 @@ import { v4 as uuidv4 } from "uuid";
 import { CozyRecorder } from "@/lib/recorder";
 import { getPresignedUploadUrl, uploadChunk, completeUpload } from "@/lib/upload";
 import { getToken, LIVEKIT_URL } from "@/lib/livekit";
+import { isBuiltInMic } from "@/lib/devices";
+import { BuiltInMicWarningModal } from "@/components/BuiltInMicWarningModal";
 
 // ---------- Types ----------
 
@@ -95,12 +97,16 @@ function RoomContent({
   sessionId,
   participantName,
   selectedMic,
+  selectedMicLabel,
+  selectedMicIsBuiltIn,
   studioState,
   setStudioState,
 }: {
   sessionId: string;
   participantName: string;
   selectedMic: string;
+  selectedMicLabel: string | undefined;
+  selectedMicIsBuiltIn: boolean;
   studioState: StudioState;
   setStudioState: (state: StudioState) => void;
 }) {
@@ -277,7 +283,11 @@ function RoomContent({
     const trackId = trackIdRef.current;
 
     try {
-      await getPresignedUploadUrl(sessionId, trackId, 0, participantName);
+      await getPresignedUploadUrl(sessionId, trackId, 0, participantName, {
+        deviceLabel: selectedMicLabel,
+        deviceId: selectedMic,
+        isBuiltInMic: selectedMicIsBuiltIn,
+      });
     } catch (err) {
       console.error("Failed to initialize upload:", err);
       return;
@@ -328,6 +338,9 @@ function RoomContent({
   }, [
     sessionId,
     participantName,
+    selectedMic,
+    selectedMicLabel,
+    selectedMicIsBuiltIn,
     localParticipant,
     setStudioState,
     showNotification,
@@ -486,6 +499,15 @@ export default function StudioPage() {
   const [mics, setMics] = useState<MediaDeviceInfo[]>([]);
   const [token, setToken] = useState("");
   const [connecting, setConnecting] = useState(false);
+  const [showMicWarning, setShowMicWarning] = useState(false);
+  const [acknowledgedDevices, setAcknowledgedDevices] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const micSelectRef = useRef<HTMLSelectElement>(null);
+  const selectedMicDevice = useMemo(
+    () => mics.find((m) => m.deviceId === selectedMic),
+    [mics, selectedMic],
+  );
 
   // Enumerate mic devices
   useEffect(() => {
@@ -509,9 +531,7 @@ export default function StudioPage() {
     getMics();
   }, []);
 
-  async function handleJoin() {
-    if (!participantName.trim()) return;
-
+  async function proceedToJoin() {
     setConnecting(true);
     try {
       const jwt = await getToken(sessionId, participantName.trim());
@@ -523,11 +543,35 @@ export default function StudioPage() {
     }
   }
 
+  function handleJoin() {
+    if (!participantName.trim()) return;
+
+    if (selectedMicDevice && isBuiltInMic(selectedMicDevice.label) && !acknowledgedDevices.has(selectedMic)) {
+      setShowMicWarning(true);
+      return;
+    }
+
+    proceedToJoin();
+  }
+
   // ---------- Pre-join screen ----------
 
   if (studioState === "prejoin") {
     return (
       <div className="min-h-screen flex items-center justify-center px-4">
+        {showMicWarning && (
+          <BuiltInMicWarningModal
+            onAcknowledge={() => {
+              setAcknowledgedDevices((prev) => new Set(prev).add(selectedMic));
+              setShowMicWarning(false);
+              proceedToJoin();
+            }}
+            onSwitchMic={() => {
+              setShowMicWarning(false);
+              micSelectRef.current?.focus();
+            }}
+          />
+        )}
         <div className="max-w-md w-full space-y-6">
           <div className="text-center">
             <h1 className="text-3xl font-bold text-white">Join Studio</h1>
@@ -554,6 +598,7 @@ export default function StudioPage() {
                 Microphone
               </label>
               <select
+                ref={micSelectRef}
                 value={selectedMic}
                 onChange={(e) => setSelectedMic(e.target.value)}
                 className="w-full px-4 py-3 rounded-lg bg-cozy-900 border border-cozy-700 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
@@ -617,6 +662,8 @@ export default function StudioPage() {
             sessionId={sessionId}
             participantName={participantName}
             selectedMic={selectedMic}
+            selectedMicLabel={selectedMicDevice?.label}
+            selectedMicIsBuiltIn={selectedMicDevice ? isBuiltInMic(selectedMicDevice.label) : false}
             studioState={studioState}
             setStudioState={setStudioState}
           />
