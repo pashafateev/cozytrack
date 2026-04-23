@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, type ChangeEvent } from "react";
 
 const LS_ENABLED = "cozytrack:monitor-enabled";
 const LS_VOLUME = "cozytrack:monitor-volume";
@@ -38,7 +38,7 @@ export function MicMonitorToggle({
   }, [enabled, onEnabledChange]);
 
   const handleVolume = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
+    (e: ChangeEvent<HTMLInputElement>) => {
       const v = Number(e.target.value);
       localStorage.setItem(LS_VOLUME, String(v));
       onVolumeChange(v);
@@ -52,6 +52,7 @@ export function MicMonitorToggle({
         type="button"
         role="switch"
         aria-checked={enabled}
+        aria-labelledby="mic-monitor-label"
         onClick={handleToggle}
         className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
           enabled ? "bg-indigo-600" : "bg-cozy-700"
@@ -63,7 +64,9 @@ export function MicMonitorToggle({
           }`}
         />
       </button>
-      <span className="text-sm text-gray-300 select-none">Monitor my mic</span>
+      <span id="mic-monitor-label" className="text-sm text-gray-300 select-none">
+        Monitor my mic
+      </span>
 
       {enabled && (
         <input
@@ -78,8 +81,19 @@ export function MicMonitorToggle({
       )}
 
       <div className="relative group">
-        <span className="text-gray-500 cursor-help text-xs">&#9432;</span>
-        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block w-56 px-3 py-2 rounded-lg bg-cozy-800 border border-cozy-600 text-xs text-gray-300 shadow-lg z-50">
+        <button
+          type="button"
+          aria-label="Headphone warning"
+          aria-describedby="monitor-headphone-warning"
+          className="text-gray-500 cursor-help text-xs bg-transparent border-0 p-0"
+        >
+          &#9432;
+        </button>
+        <div
+          id="monitor-headphone-warning"
+          role="tooltip"
+          className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block group-focus-within:block w-56 px-3 py-2 rounded-lg bg-cozy-800 border border-cozy-600 text-xs text-gray-300 shadow-lg z-50"
+        >
           Use headphones &mdash; monitoring without headphones will cause
           feedback
         </div>

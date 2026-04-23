@@ -528,8 +528,13 @@ export default function StudioPage() {
   const [mics, setMics] = useState<MediaDeviceInfo[]>([]);
   const [token, setToken] = useState("");
   const [connecting, setConnecting] = useState(false);
-  const [monitorEnabled, setMonitorEnabled] = useState(getStoredMonitorEnabled);
-  const [monitorVolume, setMonitorVolume] = useState(getStoredMonitorVolume);
+  const [monitorEnabled, setMonitorEnabled] = useState(false);
+  const [monitorVolume, setMonitorVolume] = useState(70);
+
+  useEffect(() => {
+    setMonitorEnabled(getStoredMonitorEnabled());
+    setMonitorVolume(getStoredMonitorVolume());
+  }, []);
   const [showMicWarning, setShowMicWarning] = useState(false);
   const [acknowledgedDevices, setAcknowledgedDevices] = useState<Set<string>>(
     () => new Set(),
@@ -566,7 +571,7 @@ export default function StudioPage() {
 
   // Acquire a mic stream for prejoin monitoring (sidetone)
   useEffect(() => {
-    if (studioState !== "prejoin" || !selectedMic) return;
+    if (studioState !== "prejoin" || !selectedMic || !monitorEnabled) return;
 
     let cancelled = false;
 
@@ -595,7 +600,7 @@ export default function StudioPage() {
       prejoinStreamRef.current = null;
       setPrejoinStream(null);
     };
-  }, [studioState, selectedMic]);
+  }, [studioState, selectedMic, monitorEnabled]);
 
   // Prejoin sidetone
   useMicMonitor({
