@@ -32,12 +32,12 @@ export class CozyRecorder {
     this.chunkIndex = 0;
     this.allChunks = [];
 
-    const { default: RecordRTC, StereoAudioRecorder } = await import("recordrtc");
+    const { default: RecordRTC, MediaStreamRecorder } = await import("recordrtc");
 
     this.recorder = new RecordRTC(this.stream, {
       type: "audio",
-      mimeType: "audio/webm",
-      recorderType: StereoAudioRecorder,
+      mimeType: this.mimeType as "audio/webm",
+      recorderType: MediaStreamRecorder,
       timeSlice,
       ondataavailable: (blob: Blob) => {
         this.allChunks.push(blob);
@@ -46,8 +46,6 @@ export class CozyRecorder {
           cb(blob, idx);
         }
       },
-      desiredSampRate: 48000,
-      numberOfAudioChannels: 1,
     });
 
     this.recorder.startRecording();
