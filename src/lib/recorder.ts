@@ -36,7 +36,7 @@ export class CozyRecorder {
 
     this.recorder = new RecordRTC(this.stream, {
       type: "audio",
-      mimeType: "audio/webm;codecs=opus" as "audio/webm",
+      mimeType: this.mimeType as "audio/webm",
       recorderType: MediaStreamRecorder,
       timeSlice,
       ondataavailable: (blob: Blob) => {
