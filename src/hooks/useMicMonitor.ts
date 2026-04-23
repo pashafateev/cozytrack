@@ -25,7 +25,10 @@ export function useMicMonitor({ stream, enabled, volume }: UseMicMonitorOptions)
   useEffect(() => {
     if (!enabled || !stream) return;
 
-    const ctx = new AudioContext();
+    const ctx = new AudioContext({
+      latencyHint: "interactive",
+      sampleRate: 48000,
+    });
     const source = ctx.createMediaStreamSource(stream);
     const gain = ctx.createGain();
     gain.gain.value = volume / 100;

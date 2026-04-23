@@ -196,7 +196,14 @@ function RoomContent({
     async function getRecordingStream() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          audio: selectedMic ? { deviceId: { exact: selectedMic } } : true,
+          audio: {
+            deviceId: selectedMic ? { exact: selectedMic } : undefined,
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 48000,
+            channelCount: 1,
+          },
         });
 
         if (cancelled) {
@@ -552,7 +559,15 @@ export default function StudioPage() {
     async function getMics() {
       try {
         // Need to request permission first to get device labels
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 48000,
+            channelCount: 1,
+          },
+        });
         stream.getTracks().forEach((t) => t.stop());
 
         const devices = await navigator.mediaDevices.enumerateDevices();
@@ -578,7 +593,14 @@ export default function StudioPage() {
     async function acquire() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          audio: { deviceId: { exact: selectedMic } },
+          audio: {
+            deviceId: { exact: selectedMic },
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 48000,
+            channelCount: 1,
+          },
         });
         if (cancelled) {
           stream.getTracks().forEach((t) => t.stop());
@@ -734,6 +756,11 @@ export default function StudioPage() {
           token={token}
           audio={{
             deviceId: selectedMic ? { exact: selectedMic } : undefined,
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 48000,
+            channelCount: 1,
           }}
           options={{
             publishDefaults: {
