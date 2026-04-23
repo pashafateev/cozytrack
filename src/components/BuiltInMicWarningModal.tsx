@@ -13,20 +13,53 @@ export function BuiltInMicWarningModal({
 }: BuiltInMicWarningModalProps) {
   const [checked, setChecked] = useState(false);
   const checkboxRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     checkboxRef.current?.focus();
   }, []);
 
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key !== "Tab") return;
+      const container = dialogRef.current;
+      if (!container) return;
+
+      const focusable = Array.from(
+        container.querySelectorAll<HTMLElement>("button, input"),
+      ).filter((el) => !el.hasAttribute("disabled"));
+      if (focusable.length === 0) return;
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+
+      if (e.shiftKey) {
+        if (active === first || !container.contains(active)) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else {
+        if (active === last || !container.contains(active)) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-      <div role="dialog" aria-modal="true" aria-labelledby="builtin-mic-modal-title" className="max-w-md w-full rounded-xl bg-cozy-900 border border-cozy-700 p-6 shadow-2xl space-y-5">
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="builtin-mic-warning-title" className="max-w-md w-full rounded-xl bg-cozy-900 border border-cozy-700 p-6 shadow-2xl space-y-5">
         <div className="flex items-start gap-3">
           <span className="text-2xl leading-none" aria-hidden="true">
             ⚠️
           </span>
           <div>
-            <h2 id="builtin-mic-modal-title" className="text-lg font-semibold text-white">
+            <h2 id="builtin-mic-warning-title" className="text-lg font-semibold text-white">
               You&apos;re using your built-in microphone
             </h2>
             <p className="text-sm text-gray-400 mt-2 leading-relaxed">
