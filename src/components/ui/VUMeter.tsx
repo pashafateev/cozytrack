@@ -3,23 +3,26 @@
 /**
  * VUMeter — a segmented level meter that fills proportionally to loudness.
  *
- * All segments light up together up to the current level (not each bar moving
- * independently). A peak-hold indicator sits at the loudest recent segment.
+ * All segments light up together up to the current level, with a peak-hold
+ * indicator on the loudest recent segment.
  *
  * Two modes:
  *   1. Data-driven: pass `level` (0..1). The meter fills to that level with
- *      fast-attack / slow-release smoothing. Used once a real mic stream is
- *      wired up in the studio.
- *   2. Idle simulation: omit `level` and the meter simulates voice-like
- *      dynamics so it has something to show before mic permission is granted.
+ *      fast-attack / slow-release smoothing.
+ *   2. Idle: omit `level` and the meter simulates voice-like dynamics so it
+ *      has something to show before mic permission is granted.
  *
  * When `active` is false the meter decays toward silence and dims.
  *
- * Color thresholds match the design tokens — green below roughly -9 dB,
- * yellow -9..-1 dB, red at the very top.
+ * Color thresholds: green below roughly -9 dB, yellow -9..-1 dB, red at the top.
+ *
+ * Perf note: this component intentionally does NOT call setState on every
+ * animation frame. The rAF loop mutates DOM styles directly through refs and
+ * only calls setState when the lit segment index changes — so a busy meter
+ * re-renders a handful of times per second instead of ~60.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 interface VUMeterProps {
   /** Live RMS level in [0, 1]. Optional — omit for idle simulation. */
@@ -42,12 +45,11 @@ export function VUMeter({
   const levelRef = useRef(0.08);
   const targetRef = useRef(0.12);
   const peakRef = useRef(0.08);
-  const peakHoldRef = useRef(0); // frames remaining to hold the peak
+  const peakHoldRef = useRef(0);
   const tRef = useRef(0);
   const rafRef = useRef<number | undefined>(undefined);
 
-  // Keep the latest props in refs so the animation effect never needs to
-  // tear down its requestAnimationFrame loop when `level`/`active` changes.
+  // Props fed into the animation loop via refs so the effect never tears down.
   const liveLevelRef = useRef<number | undefined>(level);
   const activeRef = useRef<boolean>(active);
   useEffect(() => {
@@ -57,8 +59,28 @@ export function VUMeter({
     activeRef.current = active;
   }, [active]);
 
-  const [display, setDisplay] = useState<{ level: number; peak: number }>(
-    { level: levelRef.current, peak: peakRef.current },
+  // One ref per segment — the animation loop flips their background/opacity
+  // directly. We still need *some* reactive state so the component can mount
+  // with a valid initial paint and update when the lit count crosses an
+  // integer boundary, but that happens at a small handful of Hz, not 60.
+  const segRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const [litCount, setLitCount] = useState(0);
+  const [peakIdx, setPeakIdx] = useState(-1);
+  const lastLitRef = useRef(0);
+  const lastPeakRef = useRef(-1);
+
+  // Precompute per-segment color (doesn't depend on level)
+  const segColors = useMemo(
+    () =>
+      Array.from({ length: segments }, (_, i) => {
+        const frac = i / segments;
+        return frac >= 0.88
+          ? "var(--rec)"
+          : frac >= 0.7
+            ? "var(--warn)"
+            : "var(--ok)";
+      }),
+    [segments],
   );
 
   useEffect(() => {
@@ -69,17 +91,13 @@ export function VUMeter({
       const isActive = activeRef.current;
 
       if (!isActive) {
-        // Decay to silence
         levelRef.current *= 0.85;
         peakRef.current *= 0.96;
       } else if (typeof live === "number") {
-        // Real data — clamp and set as the attack/release target
         targetRef.current = Math.max(0, Math.min(1, live));
         const diff = targetRef.current - levelRef.current;
-        // Fast attack, slower release
         levelRef.current += diff * (diff > 0 ? 0.35 : 0.09);
 
-        // Peak hold
         if (levelRef.current >= peakRef.current) {
           peakRef.current = levelRef.current;
           peakHoldRef.current = 55;
@@ -89,7 +107,7 @@ export function VUMeter({
           peakRef.current *= 0.975;
         }
       } else {
-        // Idle simulation — voice-like dynamics
+        // Idle — voice-like dynamics
         if (Math.random() < 0.07) {
           const base = Math.abs(
             Math.sin(t * 0.9) * 0.48 +
@@ -114,7 +132,49 @@ export function VUMeter({
         }
       }
 
-      setDisplay({ level: levelRef.current, peak: peakRef.current });
+      const lvl = levelRef.current;
+      const pk = peakRef.current;
+      const nextLit = Math.round(lvl * segments);
+      const nextPeak = pk > 0.08 ? Math.min(segments - 1, Math.round(pk * segments)) : -1;
+
+      // Only reconcile through React when the integer indices actually change.
+      if (nextLit !== lastLitRef.current || nextPeak !== lastPeakRef.current) {
+        const prevLit = lastLitRef.current;
+        const prevPeak = lastPeakRef.current;
+        lastLitRef.current = nextLit;
+        lastPeakRef.current = nextPeak;
+
+        // Fast path — mutate the affected segments directly
+        const lo = Math.min(prevLit, nextLit);
+        const hi = Math.max(prevLit, nextLit);
+        for (let i = lo; i < hi; i++) {
+          const el = segRefs.current[i];
+          if (!el) continue;
+          const on = i < nextLit || i === nextPeak;
+          el.style.background = on ? segColors[i] : "rgba(255,240,210,0.05)";
+          el.style.boxShadow = on && isActive ? `0 0 4px ${segColors[i]}60` : "none";
+        }
+        if (prevPeak >= 0 && prevPeak !== nextPeak && prevPeak >= nextLit) {
+          const el = segRefs.current[prevPeak];
+          if (el) {
+            el.style.background = "rgba(255,240,210,0.05)";
+            el.style.boxShadow = "none";
+          }
+        }
+        if (nextPeak >= 0 && nextPeak !== prevPeak && nextPeak >= nextLit) {
+          const el = segRefs.current[nextPeak];
+          if (el) {
+            el.style.background = segColors[nextPeak];
+            el.style.boxShadow = isActive ? `0 0 4px ${segColors[nextPeak]}60` : "none";
+          }
+        }
+
+        // Keep reactive state in sync for correct re-hydration after other
+        // re-renders (e.g. prop changes). This runs at most a few Hz.
+        setLitCount(nextLit);
+        setPeakIdx(nextPeak);
+      }
+
       rafRef.current = requestAnimationFrame(animate);
     };
 
@@ -122,37 +182,24 @@ export function VUMeter({
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-    // Intentionally empty deps — the loop runs for the life of the component
-    // and reads level/active from refs on every frame.
-  }, []);
-
-  const { level: lvl, peak } = display;
-  const litCount = Math.round(lvl * segments);
-  const peakIdx = Math.min(segments - 1, Math.round(peak * segments));
-  const showPeak = peak > 0.08;
+  }, [segments, segColors]);
 
   return (
     <div className="flex items-stretch gap-[2px]" style={{ height }}>
       {Array.from({ length: segments }).map((_, i) => {
-        const frac = i / segments;
-        const isLit = i < litCount;
-        const isPeak = showPeak && i === peakIdx;
-        const color =
-          frac >= 0.88
-            ? "var(--rec)"
-            : frac >= 0.7
-              ? "var(--warn)"
-              : "var(--ok)";
-        const on = isLit || isPeak;
+        const on = i < litCount || i === peakIdx;
         return (
           <div
             key={i}
+            ref={(el) => {
+              segRefs.current[i] = el;
+            }}
             className="flex-1 rounded-[2px]"
             style={{
-              background: on ? color : "rgba(255,240,210,0.05)",
-              opacity: on ? (active ? 1 : 0.35) : 1,
+              background: on ? segColors[i] : "rgba(255,240,210,0.05)",
+              opacity: active ? 1 : 0.35,
               transition: "background 60ms ease",
-              boxShadow: on && active ? `0 0 4px ${color}60` : "none",
+              boxShadow: on && active ? `0 0 4px ${segColors[i]}60` : "none",
             }}
           />
         );

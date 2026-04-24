@@ -46,7 +46,13 @@ button, a, [role="button"] {
     opacity 120ms ease;
 }
 
-/* Record button outer pulse ring */
+/* Record button outer pulse ring
+ *  .rec-ring establishes its own positioning context so the ::after
+ *  pseudo-element anchors to the ring host (not some ancestor). Previously
+ *  this only worked because a parent happened to be `.relative`. */
+.rec-ring {
+  position: relative;
+}
 .rec-ring::after {
   content: '';
   position: absolute;

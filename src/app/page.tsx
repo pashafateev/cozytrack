@@ -32,7 +32,10 @@ export default function HomePage() {
     }
   }
 
-  const canSubmit = sessionName.trim().length > 0 && !creating;
+  // Name is optional — handleCreateSession() falls back to a dated default
+  // when the user leaves the field blank. We only block the submit while a
+  // create request is already in flight.
+  const canSubmit = !creating;
 
   return (
     <div className="animate-page-enter min-h-screen flex flex-col items-center justify-center relative overflow-hidden bg-bg">

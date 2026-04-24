@@ -590,7 +590,11 @@ function RoomContent({
               micLabel={undefined /* Remote mic label — needs #28 (LiveKit metadata propagation). */}
               isBuiltIn={false /* Remote built-in detection — needs #28. */}
               level={audioLevels.get(p.identity) ?? 0}
-              status={localStatus}
+              // studioState is local-only, so showing localStatus on remote
+              // strips was misleading (guests appeared to be "Recording" whenever
+              // the host hit record). Remote per-participant status is tracked
+              // in #30; until then we show a stable "connected" for remotes.
+              status="connected"
             />
           ))}
 

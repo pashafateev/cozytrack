@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { Topbar } from "@/components/ui/Topbar";
-import { Button } from "@/components/ui/Button";
+import { Button, ButtonLink } from "@/components/ui/Button";
 import { Waveform } from "@/components/ui/Waveform";
 import {
   IcoChevron,
@@ -166,9 +166,9 @@ export default function SessionDetailPage() {
         </div>
 
         <div className="flex gap-2 mb-7">
-          <Link href={`/studio/${session.id}`}>
-            <Button variant="ghost" size="md">Open Studio</Button>
-          </Link>
+          <ButtonLink href={`/studio/${session.id}`} variant="ghost" size="md">
+            Open Studio
+          </ButtonLink>
         </div>
 
         {/* Notes (local-only for now) */}

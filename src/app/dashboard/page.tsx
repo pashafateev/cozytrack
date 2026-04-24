@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Topbar } from "@/components/ui/Topbar";
-import { Button } from "@/components/ui/Button";
+import { Button, ButtonLink } from "@/components/ui/Button";
 import { Waveform } from "@/components/ui/Waveform";
 import { IcoDownload, IcoPlus } from "@/components/ui/Icon";
 
@@ -113,24 +113,19 @@ export default function DashboardPage() {
         ) : (
           <div className="flex flex-col gap-2">
             {sessions.map((s) => (
-              <Link
+              <div
                 key={s.id}
-                href={`/session/${s.id}`}
-                className="group block rounded-lg p-4 border transition-[border-color,background-color] duration-150"
-                style={{
-                  background: "var(--card)",
-                  borderColor: "var(--border)",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.borderColor = "var(--border-hi)";
-                  e.currentTarget.style.background = "var(--card-hi)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.borderColor = "var(--border)";
-                  e.currentTarget.style.background = "var(--card)";
-                }}
+                className="group relative rounded-lg p-4 border transition-[border-color,background-color] duration-150 bg-card border-[color:var(--border)] hover:bg-card-hi hover:border-[color:var(--border-hi)] focus-within:border-[color:var(--border-hi)]"
               >
-                <div className="flex items-start justify-between mb-3">
+                {/* Card-wide navigation overlay. Sits below interactive controls
+                 *  via z-index so they stay clickable without nesting buttons in
+                 *  an <a>. Screen readers get the session name from aria-label. */}
+                <Link
+                  href={`/session/${s.id}`}
+                  aria-label={`Open session ${s.name}`}
+                  className="absolute inset-0 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--amber)]"
+                />
+                <div className="relative flex items-start justify-between mb-3">
                   <div>
                     <div className="text-sm font-semibold text-text mb-1">{s.name}</div>
                     <div className="flex gap-3 flex-wrap">
@@ -141,14 +136,16 @@ export default function DashboardPage() {
                       </span>
                     </div>
                   </div>
-                  <div className="flex gap-1.5 flex-shrink-0">
-                    <Button variant="ghost" size="sm">View</Button>
+                  <div className="relative flex gap-1.5 flex-shrink-0">
+                    <ButtonLink href={`/session/${s.id}`} variant="ghost" size="sm">
+                      View
+                    </ButtonLink>
                     <Button
                       variant="ghost"
                       size="sm"
                       onClick={(e) => {
                         // Bulk zip download is tracked in #26. Keep the button inert for now
-                        // but still capture the click so card navigation doesn't fire.
+                        // but stop propagation so the overlay <Link> doesn't navigate.
                         e.preventDefault();
                         e.stopPropagation();
                       }}
@@ -158,8 +155,10 @@ export default function DashboardPage() {
                     </Button>
                   </div>
                 </div>
-                <Waveform height={24} seed={seedFromId(s.id)} played={0} />
-              </Link>
+                <div className="relative pointer-events-none">
+                  <Waveform height={24} seed={seedFromId(s.id)} played={0} />
+                </div>
+              </div>
             ))}
           </div>
         )}

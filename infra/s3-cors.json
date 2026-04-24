@@ -1,0 +1,17 @@
+{
+  "CORSRules": [
+    {
+      "AllowedOrigins": [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://cozytrack.vercel.app",
+        "https://cozytrack-w8fm.vercel.app",
+        "https://*.vercel.app"
+      ],
+      "AllowedMethods": ["GET", "PUT", "POST", "HEAD"],
+      "AllowedHeaders": ["*"],
+      "ExposeHeaders": ["ETag", "x-amz-checksum-crc32"],
+      "MaxAgeSeconds": 3000
+    }
+  ]
+}
