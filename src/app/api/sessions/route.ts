@@ -20,9 +20,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(session, { status: 201 });
   } catch (error) {
     console.error("Failed to create session:", error);
-    const message = error instanceof Error ? error.message : String(error);
     return NextResponse.json(
-      { error: "Failed to create session", detail: message },
+      { error: "Failed to create session" },
       { status: 500 }
     );
   }
@@ -42,9 +41,8 @@ export async function GET() {
     return NextResponse.json(sessions);
   } catch (error) {
     console.error("Failed to list sessions:", error);
-    const message = error instanceof Error ? error.message : String(error);
     return NextResponse.json(
-      { error: "Failed to list sessions", detail: message },
+      { error: "Failed to list sessions" },
       { status: 500 }
     );
   }

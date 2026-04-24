@@ -35,6 +35,17 @@ export function VUMeter({ level, active = true, bars = 24, height = 44 }: VUMete
   const rafRef = useRef<number | undefined>(undefined);
   const tRef = useRef(0);
 
+  // Keep the latest level / active in refs so the animation effect doesn't
+  // need to depend on them (re-running the effect every frame would kill rAF).
+  const levelRef = useRef<number | undefined>(level);
+  const activeRef = useRef<boolean>(active);
+  useEffect(() => {
+    levelRef.current = level;
+  }, [level]);
+  useEffect(() => {
+    activeRef.current = active;
+  }, [active]);
+
   useEffect(() => {
     // Resize if consumer changes `bars` at runtime
     if (levelsRef.current.length !== bars) {
@@ -44,15 +55,17 @@ export function VUMeter({ level, active = true, bars = 24, height = 44 }: VUMete
     const animate = () => {
       tRef.current += 0.035;
       const t = tRef.current;
+      const currentLevel = levelRef.current;
+      const currentActive = activeRef.current;
       const targetBase =
-        !active ? 0.04
-        : typeof level === "number"
-            ? Math.max(0.04, Math.min(1, level))
+        !currentActive ? 0.04
+        : typeof currentLevel === "number"
+            ? Math.max(0.04, Math.min(1, currentLevel))
             : Math.abs(Math.sin(t * 1.1) * 0.45 + Math.sin(t * 0.7) * 0.2);
 
       levelsRef.current = levelsRef.current.map((v, i) => {
         // Add per-bar variation so columns don't move in lockstep
-        const jitter = typeof level === "number"
+        const jitter = typeof currentLevel === "number"
           ? (Math.sin(t * 2.1 + i * 0.9) * 0.08) + (Math.random() - 0.5) * 0.03
           : (Math.sin(t * 1.3 + i * 0.28) * 0.25);
         const target = Math.max(0.04, Math.min(1, targetBase + jitter));
@@ -65,7 +78,7 @@ export function VUMeter({ level, active = true, bars = 24, height = 44 }: VUMete
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-  }, [active, level, bars]);
+  }, [bars]);
 
   return (
     <div className="flex items-end gap-0.5" style={{ height }}>
