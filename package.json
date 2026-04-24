@@ -2,6 +2,9 @@
   "name": "cozytrack",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "bash ./scripts/check-aws-auth.sh && next dev -p 3001",
     "dev:local": "docker compose up -d && npm run db:push && npm run dev",
