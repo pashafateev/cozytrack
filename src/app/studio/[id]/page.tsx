@@ -133,7 +133,7 @@ function ParticipantStrip({
         </div>
         <StatusDot status={status} />
       </div>
-      <VUMeter level={normalized} active={status !== "idle"} bars={28} height={52} />
+      <VUMeter level={normalized} active={status !== "idle"} segments={32} height={52} />
       <DbScale />
     </div>
   );
