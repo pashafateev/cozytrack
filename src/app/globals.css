@@ -2,6 +2,83 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --bg:       #0d0b08;
+  --surface:  #141209;
+  --card:     #1c1812;
+  --card-hi:  #231f16;
+  --text:     #ede7db;
+  --text-2:   #9a8f7e;
+  --text-3:   #574f44;
+  --amber:    #c87840;
+  --amber-hi: #dc9050;
+  --ok:       #52c97a;
+  --warn:     #e8a830;
+  --rec:      #e85050;
+  --border:    rgba(255,240,210,0.07);
+  --border-hi: rgba(255,240,210,0.13);
+}
+
+html, body {
+  height: 100%;
+}
+
 body {
-  @apply bg-cozy-950 text-gray-100;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-jakarta), system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,240,210,0.1); border-radius: 3px; }
+
+/* Shared transitions — applied liberally so interactive surfaces feel alive */
+button, a, [role="button"] {
+  transition:
+    background-color 120ms ease,
+    color 120ms ease,
+    border-color 120ms ease,
+    opacity 120ms ease;
+}
+
+/* Record button outer pulse ring
+ *  .rec-ring establishes its own positioning context so the ::after
+ *  pseudo-element anchors to the ring host (not some ancestor). Previously
+ *  this only worked because a parent happened to be `.relative`. */
+.rec-ring {
+  position: relative;
+}
+.rec-ring::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  border: 2px solid var(--rec);
+  animation: rec-pulse 1.4s ease-out infinite;
+  pointer-events: none;
+}
+
+@keyframes rec-pulse {
+  0%   { transform: scale(1);    opacity: 0.6; }
+  50%  { transform: scale(1.55); opacity: 0;   }
+  100% { transform: scale(1.55); opacity: 0;   }
+}
+
+/* Subtle film-grain overlay — pure CSS, no image assets */
+.grain::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: repeating-conic-gradient(
+    rgba(255,240,210,0.015) 0% 25%,
+    transparent 0% 50%
+  );
+  background-size: 3px 3px;
+  pointer-events: none;
+  z-index: 9999;
 }

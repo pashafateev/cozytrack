@@ -32,7 +32,12 @@ export async function GET() {
     const sessions = await db.session.findMany({
       include: {
         tracks: {
-          select: { id: true, participantName: true, status: true },
+          select: {
+            id: true,
+            participantName: true,
+            status: true,
+            durationMs: true,
+          },
         },
       },
       orderBy: { createdAt: "desc" },

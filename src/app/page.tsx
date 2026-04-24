@@ -3,11 +3,13 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import Link from "next/link";
+import { IcoMic } from "@/components/ui/Icon";
 
 export default function HomePage() {
   const router = useRouter();
   const [creating, setCreating] = useState(false);
   const [sessionName, setSessionName] = useState("");
+  const [focused, setFocused] = useState(false);
 
   async function handleCreateSession() {
     const name = sessionName.trim() || `Session ${new Date().toLocaleDateString()}`;
@@ -30,43 +32,83 @@ export default function HomePage() {
     }
   }
 
+  // Name is optional — handleCreateSession() falls back to a dated default
+  // when the user leaves the field blank. We only block the submit while a
+  // create request is already in flight.
+  const canSubmit = !creating;
+
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center px-4">
-      <div className="max-w-md w-full space-y-8 text-center">
-        <div>
-          <h1 className="text-5xl font-bold tracking-tight text-white">
-            Cozytrack
-          </h1>
-          <p className="mt-3 text-lg text-gray-400">
-            Self-hosted podcast recording studio. Local-first audio,
-            crystal-clear quality.
-          </p>
+    <div className="animate-page-enter min-h-screen flex flex-col items-center justify-center relative overflow-hidden bg-bg">
+      {/* Ambient amber glow behind the wordmark — sets the mood on first load */}
+      <div
+        aria-hidden
+        className="absolute pointer-events-none"
+        style={{
+          top: "38%",
+          left: "50%",
+          transform: "translate(-50%, -50%)",
+          width: 500,
+          height: 500,
+          background:
+            "radial-gradient(ellipse, rgba(200,120,64,0.18) 0%, transparent 65%)",
+        }}
+      />
+      <div
+        aria-hidden
+        className="absolute inset-x-0 bottom-0 pointer-events-none"
+        style={{
+          height: 200,
+          background:
+            "linear-gradient(to top, rgba(13,11,8,0.8), transparent)",
+        }}
+      />
+
+      <div className="relative z-10 flex flex-col items-center w-[340px]">
+        <div className="mb-7 opacity-40">
+          <IcoMic size={36} color="var(--text)" />
         </div>
 
-        <div className="space-y-4">
+        <h1 className="text-[28px] font-bold tracking-[-0.04em] mb-2 text-text">
+          cozy<span style={{ color: "var(--amber)" }}>track</span>
+        </h1>
+        <p className="text-[13px] text-text-3 mb-9">a home for your recordings</p>
+
+        <div className="w-full mb-2.5">
           <input
             type="text"
-            placeholder="Session name (optional)"
+            placeholder="Name this session…"
             value={sessionName}
             onChange={(e) => setSessionName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleCreateSession()}
-            className="w-full px-4 py-3 rounded-lg bg-cozy-900 border border-cozy-700 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
+            onKeyDown={(e) => e.key === "Enter" && canSubmit && handleCreateSession()}
+            className="w-full px-3.5 py-[11px] text-sm font-sans bg-card text-text rounded-md outline-none border transition-[border-color] duration-150"
+            style={{
+              borderColor: focused ? "var(--border-hi)" : "var(--border)",
+            }}
           />
-
-          <button
-            onClick={handleCreateSession}
-            disabled={creating}
-            className="w-full px-6 py-3 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {creating ? "Creating..." : "Create New Session"}
-          </button>
         </div>
+
+        <button
+          onClick={handleCreateSession}
+          disabled={!canSubmit}
+          className="w-full py-[11px] text-[15px] font-semibold font-sans rounded-md border transition-all duration-200"
+          style={{
+            background: canSubmit ? "var(--amber)" : "var(--card)",
+            color: canSubmit ? "var(--bg)" : "var(--text-3)",
+            borderColor: canSubmit ? "var(--amber)" : "var(--border)",
+            cursor: canSubmit ? "pointer" : "default",
+          }}
+        >
+          {creating ? "Creating…" : "Record →"}
+        </button>
 
         <Link
           href="/dashboard"
-          className="inline-block text-gray-400 hover:text-white transition-colors"
+          className="mt-[18px] text-[12px] text-text-3 underline underline-offset-2 hover:text-text-2"
+          style={{ textDecorationColor: "rgba(87,79,68,0.6)" }}
         >
-          View Dashboard
+          past sessions
         </Link>
       </div>
     </div>
