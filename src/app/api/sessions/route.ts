@@ -41,7 +41,10 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
   try {
+    const statusFilter = req.nextUrl.searchParams.get("status");
+
     const sessions = await db.session.findMany({
+      where: statusFilter ? { status: statusFilter } : undefined,
       include: {
         tracks: {
           select: {
