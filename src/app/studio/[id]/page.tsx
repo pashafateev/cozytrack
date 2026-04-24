@@ -1,5 +1,11 @@
 "use client";
 
+// UI components from @livekit/components-react are intentionally not wrapped
+// by the Transport abstraction. If migrating off LiveKit, these components
+// (LiveKitRoom, RoomAudioRenderer, useLocalParticipant, useRemoteParticipants,
+// useSpeakingParticipants, etc.) would be replaced entirely, not adapted.
+// See src/lib/transport/ for the imperative transport wrapper.
+
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useParams } from "next/navigation";
 import {
@@ -7,9 +13,8 @@ import {
   RoomAudioRenderer,
   useRemoteParticipants,
   useLocalParticipant,
-  useRoomContext,
+  useSpeakingParticipants,
 } from "@livekit/components-react";
-import { RoomEvent, type TrackPublishOptions } from "livekit-client";
 import { v4 as uuidv4 } from "uuid";
 import { CozyRecorder } from "@/lib/recorder";
 import { getPresignedUploadUrl, uploadChunk, completeUpload } from "@/lib/upload";
@@ -35,15 +40,15 @@ interface AudioLevel {
 
 // ---------- Audio Quality Presets ----------
 
-const FULL_QUALITY_PUBLISH: TrackPublishOptions = {
+const FULL_QUALITY_PUBLISH = {
   audioPreset: { maxBitrate: 128_000 },
   dtx: false,
-};
+} as const;
 
-const BANDWIDTH_SAVING_PUBLISH: TrackPublishOptions = {
+const BANDWIDTH_SAVING_PUBLISH = {
   audioPreset: { maxBitrate: 48_000 },
   dtx: true,
-};
+} as const;
 
 // ---------- Audio Level Meter ----------
 
@@ -125,8 +130,8 @@ function RoomContent({
   onMonitorEnabledChange: (enabled: boolean) => void;
   onMonitorVolumeChange: (volume: number) => void;
 }) {
-  const room = useRoomContext();
   const remoteParticipants = useRemoteParticipants();
+  const speakingParticipants = useSpeakingParticipants();
   const { localParticipant } = useLocalParticipant();
   const recorderRef = useRef<CozyRecorder | null>(null);
   const trackIdRef = useRef<string>("");
@@ -278,29 +283,19 @@ function RoomContent({
     };
   }, [participantName, recordingStream]);
 
-  // Listen for remote audio level data via data channel
+  // Track remote audio levels via the speaking-participants hook
   useEffect(() => {
-    if (!room) return;
-
-    function handleActiveSpeakers() {
-      const speakers = room.activeSpeakers;
-      setAudioLevels((prev) => {
-        const next = new Map(prev);
-        for (const s of speakers) {
-          next.set(
-            s.identity ?? "unknown",
-            Math.round((s.audioLevel ?? 0) * 255)
-          );
-        }
-        return next;
-      });
-    }
-
-    room.on(RoomEvent.ActiveSpeakersChanged, handleActiveSpeakers);
-    return () => {
-      room.off(RoomEvent.ActiveSpeakersChanged, handleActiveSpeakers);
-    };
-  }, [room]);
+    setAudioLevels((prev) => {
+      const next = new Map(prev);
+      for (const s of speakingParticipants) {
+        next.set(
+          s.identity ?? "unknown",
+          Math.round((s.audioLevel ?? 0) * 255),
+        );
+      }
+      return next;
+    });
+  }, [speakingParticipants]);
 
   const startRecording = useCallback(async () => {
     if (!streamRef.current) return;
