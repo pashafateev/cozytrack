@@ -36,7 +36,7 @@ aws s3api get-bucket-cors --bucket cozytrack --region us-west-2
 
 ### What's allowed
 
-- `http://localhost:3000` and `http://127.0.0.1:3000` — local dev
+- `http://localhost:3000` / `127.0.0.1:3000` and `http://localhost:3001` / `127.0.0.1:3001` — local dev (the `npm run dev` script binds to 3001; 3000 is kept for ad-hoc runs)
 - `https://cozytrack.vercel.app` / `https://cozytrack-w8fm.vercel.app` — production aliases
 - `https://*.vercel.app` — every preview/branch URL Vercel generates
 

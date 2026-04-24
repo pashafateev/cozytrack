@@ -117,15 +117,18 @@ export default function DashboardPage() {
                 key={s.id}
                 className="group relative rounded-lg p-4 border transition-[border-color,background-color] duration-150 bg-card border-[color:var(--border)] hover:bg-card-hi hover:border-[color:var(--border-hi)] focus-within:border-[color:var(--border-hi)]"
               >
-                {/* Card-wide navigation overlay. Sits below interactive controls
-                 *  via z-index so they stay clickable without nesting buttons in
-                 *  an <a>. Screen readers get the session name from aria-label. */}
+                {/* Card-wide navigation overlay. `z-10` lifts it above the
+                 *  card's text content (which sits at auto z-index) so clicks
+                 *  on the title/meta navigate. The action-button row sits
+                 *  higher still (`z-20`) so those stay clickable. The Waveform
+                 *  row uses pointer-events-none so the overlay catches clicks
+                 *  through it. */}
                 <Link
                   href={`/session/${s.id}`}
                   aria-label={`Open session ${s.name}`}
-                  className="absolute inset-0 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--amber)]"
+                  className="absolute inset-0 z-10 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--amber)]"
                 />
-                <div className="relative flex items-start justify-between mb-3">
+                <div className="relative flex items-start justify-between mb-3 pointer-events-none">
                   <div>
                     <div className="text-sm font-semibold text-text mb-1">{s.name}</div>
                     <div className="flex gap-3 flex-wrap">
@@ -136,7 +139,7 @@ export default function DashboardPage() {
                       </span>
                     </div>
                   </div>
-                  <div className="relative flex gap-1.5 flex-shrink-0">
+                  <div className="relative z-20 flex gap-1.5 flex-shrink-0 pointer-events-auto">
                     <ButtonLink href={`/session/${s.id}`} variant="ghost" size="sm">
                       View
                     </ButtonLink>
