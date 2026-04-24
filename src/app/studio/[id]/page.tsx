@@ -33,15 +33,20 @@ import {
 } from "@/components/MicMonitorToggle";
 import { useMicMonitor } from "@/hooks/useMicMonitor";
 
+import { Topbar } from "@/components/ui/Topbar";
+import { VUMeter, DbScale } from "@/components/ui/VUMeter";
+import { StatusDot, type Status } from "@/components/ui/StatusDot";
+import {
+  IcoAlert,
+  IcoLink,
+  IcoMic,
+  IcoPlus,
+} from "@/components/ui/Icon";
+
 // ---------- Types ----------
 
 type StudioState = "prejoin" | "connected" | "recording";
 type AudioQualityMode = "full" | "bandwidth-saving";
-
-interface AudioLevel {
-  identity: string;
-  level: number;
-}
 
 // ---------- Audio Quality Presets ----------
 
@@ -55,55 +60,91 @@ const BANDWIDTH_SAVING_PUBLISH = {
   dtx: true,
 } as const;
 
-// ---------- Audio Level Meter ----------
+// ---------- Helpers ----------
 
-function AudioLevelMeter({ level }: { level: number }) {
-  const barCount = 12;
-  const filledBars = Math.round((level / 255) * barCount);
-
-  return (
-    <div className="flex items-end gap-0.5 h-6">
-      {Array.from({ length: barCount }, (_, i) => (
-        <div
-          key={i}
-          className={`w-1 rounded-full transition-all duration-75 ${
-            i < filledBars
-              ? i < barCount * 0.6
-                ? "bg-green-400"
-                : i < barCount * 0.85
-                  ? "bg-yellow-400"
-                  : "bg-red-400"
-              : "bg-cozy-700"
-          }`}
-          style={{ height: `${((i + 1) / barCount) * 100}%` }}
-        />
-      ))}
-    </div>
-  );
+function formatElapsed(totalMs: number): string {
+  const totalSec = Math.floor(totalMs / 1000);
+  const h = Math.floor(totalSec / 3600).toString().padStart(2, "0");
+  const m = Math.floor((totalSec % 3600) / 60).toString().padStart(2, "0");
+  const s = (totalSec % 60).toString().padStart(2, "0");
+  return `${h}:${m}:${s}`;
 }
 
-// ---------- Participant Tile ----------
+// ---------- Participant Strip ----------
 
-function ParticipantTile({
-  name,
-  level,
-  isSelf,
-}: {
+interface ParticipantStripProps {
   name: string;
-  level: number;
-  isSelf?: boolean;
-}) {
+  role: "host" | "guest";
+  micLabel: string | undefined;
+  isBuiltIn: boolean;
+  level: number; // 0..255
+  status: Status;
+}
+
+function ParticipantStrip({
+  name,
+  role,
+  micLabel,
+  isBuiltIn,
+  level,
+  status,
+}: ParticipantStripProps) {
+  const normalized = Math.max(0, Math.min(1, level / 255));
   return (
-    <div className="flex flex-col items-center gap-3 p-6 rounded-xl bg-cozy-900 border border-cozy-700">
-      <div
-        className={`w-16 h-16 rounded-full flex items-center justify-center text-xl font-bold ${
-          isSelf ? "bg-indigo-600" : "bg-cozy-600"
-        }`}
-      >
-        {name.charAt(0).toUpperCase()}
+    <div
+      className="rounded-lg px-4 py-3.5 border flex flex-col gap-2.5"
+      style={{
+        background: "var(--card)",
+        borderColor: "var(--border)",
+      }}
+    >
+      <div className="flex items-center gap-2.5">
+        <div
+          className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 border"
+          style={{
+            background: "var(--card-hi)",
+            borderColor: "var(--border-hi)",
+          }}
+        >
+          <span className="text-xs font-semibold text-text-2">
+            {name.charAt(0).toUpperCase()}
+          </span>
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-[13px] font-semibold text-text truncate">{name}</span>
+            {role === "host" && (
+              <span
+                className="inline-flex items-center font-mono text-[11px] font-semibold px-2 py-0.5 rounded-[4px]"
+                style={{
+                  background: "rgba(200,120,64,0.09)",
+                  color: "var(--amber)",
+                  border: "1px solid rgba(200,120,64,0.16)",
+                  letterSpacing: "0.03em",
+                }}
+              >
+                host
+              </span>
+            )}
+            {isBuiltIn && (
+              <span
+                title="Using built-in laptop mic"
+                aria-label="Using built-in laptop mic"
+                className="inline-flex"
+              >
+                <IcoAlert size={11} color="var(--warn)" />
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-1 text-[11px] text-text-3 mt-0.5">
+            <IcoMic size={10} color="currentColor" />
+            <span className="font-mono truncate">{micLabel ?? "—"}</span>
+          </div>
+        </div>
+        <StatusDot status={status} />
       </div>
-      <span className="text-sm font-medium text-white">{name}</span>
-      <AudioLevelMeter level={level} />
+      <VUMeter level={normalized} active={status !== "idle"} segments={32} height={52} />
+      <DbScale />
     </div>
   );
 }
@@ -146,10 +187,23 @@ function RoomContent({
   // Mirror of studioState so callbacks invoked from transport subscriptions
   // (which close over the value at subscription time) can check current state
   // without re-subscribing on every render.
+  //
+  // The ref is updated *synchronously* via setStudioStateSync at every
+  // recording-state transition below. Relying on a useEffect alone to sync
+  // would run after paint, so a freshly-rendered button could re-fire a
+  // handler that reads a stale ref and early-returns. The useEffect is kept
+  // as a fallback for any external setStudioState updates we don't control.
   const studioStateRef = useRef<StudioState>(studioState);
   useEffect(() => {
     studioStateRef.current = studioState;
   }, [studioState]);
+  const setStudioStateSync = useCallback(
+    (next: StudioState) => {
+      studioStateRef.current = next;
+      setStudioState(next);
+    },
+    [setStudioState],
+  );
 
   // Sidetone: let the user hear themselves without affecting the recording
   useMicMonitor({ stream: recordingStream, enabled: monitorEnabled, volume: monitorVolume });
@@ -164,6 +218,10 @@ function RoomContent({
   const [audioQualityMode, setAudioQualityMode] = useState<AudioQualityMode>("full");
   const [notification, setNotification] = useState<string | null>(null);
   const notificationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Elapsed recording timer
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const showNotification = useCallback((message: string) => {
     if (notificationTimerRef.current) clearTimeout(notificationTimerRef.current);
@@ -310,6 +368,29 @@ function RoomContent({
     });
   }, [speakingParticipants]);
 
+  // Tick the elapsed-time display while recording
+  useEffect(() => {
+    if (studioState === "recording") {
+      setElapsedMs(0);
+      const started = Date.now();
+      elapsedTimerRef.current = setInterval(() => {
+        setElapsedMs(Date.now() - started);
+      }, 250);
+    } else {
+      setElapsedMs(0);
+      if (elapsedTimerRef.current) {
+        clearInterval(elapsedTimerRef.current);
+        elapsedTimerRef.current = null;
+      }
+    }
+    return () => {
+      if (elapsedTimerRef.current) {
+        clearInterval(elapsedTimerRef.current);
+        elapsedTimerRef.current = null;
+      }
+    };
+  }, [studioState]);
+
   // Core recording start. Idempotent against double-invocation: if we're
   // already recording (our own click echoed via a later remote message, or the
   // button pressed twice), this is a no-op.
@@ -361,7 +442,7 @@ function RoomContent({
         return;
       }
 
-      setStudioState("recording");
+      setStudioStateSync("recording");
 
       // Auto-switch to bandwidth-saving mode for the LiveKit preview
       const switched = await switchAudioQuality("bandwidth-saving");
@@ -377,7 +458,7 @@ function RoomContent({
       selectedMic,
       selectedMicLabel,
       selectedMicIsBuiltIn,
-      setStudioState,
+      setStudioStateSync,
       showNotification,
       switchAudioQuality,
       trackChunkUpload,
@@ -398,7 +479,7 @@ function RoomContent({
       await waitForChunkUploads();
       await completeUpload(sessionId, trackId, durationMs);
 
-      setStudioState("connected");
+      setStudioStateSync("connected");
 
       await switchAudioQuality("full");
     } catch (err) {
@@ -406,7 +487,7 @@ function RoomContent({
     }
 
     recorderRef.current = null;
-  }, [sessionId, setStudioState, switchAudioQuality, waitForChunkUploads]);
+  }, [sessionId, setStudioStateSync, switchAudioQuality, waitForChunkUploads]);
 
   // Button handler: broadcast first so remote participants start close to our
   // own start time, then start locally. sessionStartedAt uses our local clock
@@ -452,7 +533,6 @@ function RoomContent({
   }, [transport, startRecordingLocal, stopRecordingLocal, showNotification]);
 
 
-  // Get mic stream on mount
   useEffect(() => {
     return () => {
       if (streamRef.current) {
@@ -461,41 +541,79 @@ function RoomContent({
     };
   }, []);
 
+  // Dismissable warning banner — surfaces when the local mic is built-in.
+  // Remote-participant warnings will reuse this banner once #28 propagates
+  // isBuiltInMic via LiveKit metadata.
+  const [bannerDismissed, setBannerDismissed] = useState(false);
+  const showLocalMicWarning = selectedMicIsBuiltIn && !bannerDismissed;
+
+  const isRecording = studioState === "recording";
+
+  const localStatus: Status = isRecording ? "recording" : "connected";
+
   return (
-    <div className="space-y-8">
-      {/* Notification Toast */}
+    <div className="flex flex-col flex-1 min-h-0">
+      {/* Notification toast */}
       {notification && (
-        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg bg-cozy-800 border border-cozy-600 text-sm text-gray-200 shadow-lg animate-toast-fade-in">
+        <div
+          className="fixed top-[68px] left-1/2 -translate-x-1/2 z-50 px-3.5 py-2 rounded-lg text-[12px] text-text-2 shadow-lg animate-toast-fade-in border"
+          style={{
+            background: "var(--card-hi)",
+            borderColor: "var(--border-hi)",
+          }}
+        >
           {notification}
         </div>
       )}
 
-      {/* Audio Quality Badge */}
-      <div className="flex items-center justify-center gap-3">
+      {/* Local built-in mic warning banner */}
+      {showLocalMicWarning && (
+        <div
+          className="flex items-center gap-2.5 py-2.5 px-5 border-b"
+          style={{
+            background: "rgba(232,168,48,0.07)",
+            borderBottomColor: "rgba(232,168,48,0.18)",
+          }}
+        >
+          <IcoAlert size={14} color="var(--warn)" />
+          <span className="text-[12px] text-warn flex-1">
+            You&apos;re using a built-in laptop mic — audio quality may be lower than expected
+          </span>
+          <button
+            onClick={() => setBannerDismissed(true)}
+            className="text-[11px] text-warn/70 hover:text-warn underline font-sans"
+          >
+            dismiss
+          </button>
+        </div>
+      )}
+
+      {/* Audio quality pill (preview) */}
+      <div className="flex items-center justify-center gap-3 px-5 py-3 border-b" style={{ borderBottomColor: "var(--border)" }}>
         <span
-          className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${
-            audioQualityMode === "full"
-              ? "bg-green-900/50 text-green-400 border border-green-700"
-              : "bg-yellow-900/50 text-yellow-400 border border-yellow-700"
-          }`}
+          className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium border font-mono"
+          style={{
+            color: audioQualityMode === "full" ? "var(--ok)" : "var(--warn)",
+            borderColor: audioQualityMode === "full" ? "rgba(82,201,122,0.3)" : "rgba(232,168,48,0.3)",
+            background: audioQualityMode === "full" ? "rgba(82,201,122,0.08)" : "rgba(232,168,48,0.08)",
+          }}
         >
           <span
-            className={`w-1.5 h-1.5 rounded-full ${
-              audioQualityMode === "full" ? "bg-green-400" : "bg-yellow-400"
-            }`}
+            className="w-1.5 h-1.5 rounded-full"
+            style={{
+              background: audioQualityMode === "full" ? "var(--ok)" : "var(--warn)",
+            }}
           />
-          {audioQualityMode === "full"
-            ? "Full Quality Preview"
-            : "Bandwidth-Saving Mode"}
+          {audioQualityMode === "full" ? "Full Quality Preview" : "Bandwidth-Saving Mode"}
         </span>
-        {studioState === "recording" && (
+        {isRecording && (
           <button
             onClick={() =>
               switchAudioQuality(
                 audioQualityMode === "full" ? "bandwidth-saving" : "full",
               )
             }
-            className="text-xs text-gray-400 hover:text-white underline underline-offset-2 transition-colors"
+            className="text-[11px] text-text-3 hover:text-text-2 underline underline-offset-2 font-sans"
           >
             {audioQualityMode === "full"
               ? "Switch to bandwidth-saving"
@@ -504,60 +622,138 @@ function RoomContent({
         )}
       </div>
 
-      {/* Participants Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-        <ParticipantTile
-          name={participantName}
-          level={audioLevels.get(participantName) ?? 0}
-          isSelf
-        />
-        {remoteParticipants.map((p) => (
-          <ParticipantTile
-            key={p.identity}
-            name={p.identity}
-            level={audioLevels.get(p.identity) ?? 0}
+      {/* Main layout: strips + right sidebar */}
+      <div className="flex flex-1 min-h-0">
+        <div className="flex-1 p-5 flex flex-col gap-2.5 overflow-y-auto">
+          <ParticipantStrip
+            name={participantName}
+            role="host"
+            micLabel={selectedMicLabel ?? "Unknown mic"}
+            isBuiltIn={selectedMicIsBuiltIn}
+            level={audioLevels.get(participantName) ?? 0}
+            status={localStatus}
           />
-        ))}
-      </div>
 
-      {/* Mic Monitor */}
-      <div className="flex justify-center">
-        <MicMonitorToggle
-          enabled={monitorEnabled}
-          volume={monitorVolume}
-          onEnabledChange={onMonitorEnabledChange}
-          onVolumeChange={onMonitorVolumeChange}
-        />
-      </div>
+          {remoteParticipants.map((p) => (
+            <ParticipantStrip
+              key={p.identity}
+              name={p.identity}
+              role="guest"
+              micLabel={undefined /* Remote mic label — needs #28 (LiveKit metadata propagation). */}
+              isBuiltIn={false /* Remote built-in detection — needs #28. */}
+              level={audioLevels.get(p.identity) ?? 0}
+              // studioState is local-only, so showing localStatus on remote
+              // strips was misleading (guests appeared to be "Recording" whenever
+              // the host hit record). Remote per-participant status is tracked
+              // in #30; until then we show a stable "connected" for remotes.
+              status="connected"
+            />
+          ))}
 
-      {/* Recording Controls */}
-      <div className="flex justify-center">
-        {studioState === "connected" && (
-          <button
-            onClick={handleStartRecording}
-            className="px-8 py-3 rounded-full bg-red-600 hover:bg-red-700 text-white font-medium transition-colors flex items-center gap-3"
+          {/* Invite tile — blocked on cozytrack#23 (invite tokens). */}
+          <div
+            className="rounded-lg px-4 py-3.5 flex items-center gap-3 opacity-50 cursor-not-allowed border border-dashed"
+            style={{ borderColor: "var(--border)" }}
+            title="Cohost invite links tracked in #23"
           >
-            <span className="w-3 h-3 rounded-full bg-white" />
-            Start Recording
-          </button>
-        )}
-        {studioState === "recording" && (
-          <button
-            onClick={handleStopRecording}
-            className="px-8 py-3 rounded-full bg-cozy-700 hover:bg-cozy-600 text-white font-medium transition-colors flex items-center gap-3 ring-2 ring-red-500"
-          >
-            <span className="w-3 h-3 rounded-sm bg-red-500 animate-pulse" />
-            Stop Recording
-          </button>
-        )}
-      </div>
+            <div
+              className="w-8 h-8 rounded-full flex items-center justify-center border border-dashed"
+              style={{ borderColor: "var(--border-hi)" }}
+            >
+              <IcoPlus size={14} color="var(--text-3)" />
+            </div>
+            <span className="text-[13px] text-text-3">Invite a cohost…</span>
+            <div className="ml-auto">
+              <IcoLink size={13} color="var(--text-3)" />
+            </div>
+          </div>
 
-      {/* Status */}
-      {studioState === "recording" && (
-        <p className="text-center text-red-400 text-sm animate-pulse">
-          Recording in progress...
-        </p>
-      )}
+          {/* Monitor toggle kept below the strips so it doesn't crowd the meters */}
+          <div className="mt-2">
+            <MicMonitorToggle
+              enabled={monitorEnabled}
+              volume={monitorVolume}
+              onEnabledChange={onMonitorEnabledChange}
+              onVolumeChange={onMonitorVolumeChange}
+            />
+          </div>
+        </div>
+
+        {/* Right sidebar: record button + upload */}
+        <div
+          className="w-[120px] flex flex-col items-center py-7 border-l"
+          style={{
+            background: "var(--surface)",
+            borderLeftColor: "var(--border)",
+          }}
+        >
+          <div className="flex flex-col items-center gap-3 flex-1 justify-center">
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => (isRecording ? handleStopRecording() : handleStartRecording())}
+                className={`w-[60px] h-[60px] rounded-full flex items-center justify-center cursor-pointer border-2 ${
+                  isRecording ? "rec-ring" : ""
+                }`}
+                style={{
+                  background: isRecording ? "rgba(232,80,80,0.1)" : "var(--card)",
+                  borderColor: isRecording ? "var(--rec)" : "var(--border-hi)",
+                  transition: "all 200ms ease",
+                }}
+                aria-label={isRecording ? "Stop recording" : "Start recording"}
+              >
+                {isRecording ? (
+                  <div
+                    className="w-5 h-5 rounded-[3px]"
+                    style={{ background: "var(--rec)" }}
+                  />
+                ) : (
+                  <div
+                    className="w-6 h-6 rounded-full"
+                    style={{ background: "var(--rec)" }}
+                  />
+                )}
+              </button>
+            </div>
+            <span
+              className="font-mono text-[10px] font-medium tracking-[0.08em]"
+              style={{
+                color: isRecording ? "var(--rec)" : "var(--text-3)",
+              }}
+            >
+              {isRecording ? "STOP" : "REC"}
+            </span>
+            <div
+              className="font-mono text-[13px] tracking-[0.06em]"
+              style={{
+                color: isRecording ? "var(--text-2)" : "var(--text-3)",
+              }}
+            >
+              {formatElapsed(elapsedMs)}
+            </div>
+          </div>
+
+          <div className="w-10 h-px my-3" style={{ background: "var(--border)" }} />
+
+          {/* Upload indicator — real progress plumbing tracked in #27. */}
+          <div className="w-full px-3 flex flex-col gap-1.5 items-center mb-5">
+            <span className="font-mono text-[9px] text-text-3 tracking-[0.08em]">UPLOAD</span>
+            <div className="w-full h-0.5 rounded-[1px]" style={{ background: "var(--border)" }}>
+              <div
+                className="h-full rounded-[1px]"
+                style={{
+                  width: isRecording ? "30%" : "0%",
+                  background: "var(--amber)",
+                  transition: "width 600ms ease",
+                }}
+              />
+            </div>
+            <span className="font-mono text-[9px] text-text-3">
+              {isRecording ? "in flight" : "—"}
+            </span>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -581,6 +777,7 @@ export default function StudioPage() {
     setMonitorEnabled(getStoredMonitorEnabled());
     setMonitorVolume(getStoredMonitorVolume());
   }, []);
+
   const [showMicWarning, setShowMicWarning] = useState(false);
   const [acknowledgedDevices, setAcknowledgedDevices] = useState<Set<string>>(
     () => new Set(),
@@ -597,7 +794,6 @@ export default function StudioPage() {
   useEffect(() => {
     async function getMics() {
       try {
-        // Need to request permission first to get device labels
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: {
             echoCancellation: false,
@@ -623,7 +819,6 @@ export default function StudioPage() {
     getMics();
   }, []);
 
-  // Acquire a mic stream for prejoin monitoring (sidetone)
   useEffect(() => {
     if (studioState !== "prejoin" || !selectedMic || !monitorEnabled) return;
 
@@ -663,7 +858,6 @@ export default function StudioPage() {
     };
   }, [studioState, selectedMic, monitorEnabled]);
 
-  // Prejoin sidetone
   useMicMonitor({
     stream: studioState === "prejoin" ? prejoinStream : null,
     enabled: monitorEnabled,
@@ -685,7 +879,11 @@ export default function StudioPage() {
   function handleJoin() {
     if (!participantName.trim()) return;
 
-    if (selectedMicDevice && isBuiltInMic(selectedMicDevice.label) && !acknowledgedDevices.has(selectedMic)) {
+    if (
+      selectedMicDevice &&
+      isBuiltInMic(selectedMicDevice.label) &&
+      !acknowledgedDevices.has(selectedMic)
+    ) {
       setShowMicWarning(true);
       return;
     }
@@ -697,7 +895,8 @@ export default function StudioPage() {
 
   if (studioState === "prejoin") {
     return (
-      <div className="min-h-screen flex items-center justify-center px-4">
+      <div className="animate-page-enter min-h-screen bg-bg flex flex-col">
+        <Topbar />
         {showMicWarning && (
           <BuiltInMicWarningModal
             onAcknowledge={() => {
@@ -711,59 +910,78 @@ export default function StudioPage() {
             }}
           />
         )}
-        <div className="max-w-md w-full space-y-6">
-          <div className="text-center">
-            <h1 className="text-3xl font-bold text-white">Join Studio</h1>
-            <p className="text-gray-400 mt-2">Session: {sessionId.slice(0, 8)}...</p>
-          </div>
+        <div className="flex-1 flex items-center justify-center px-4">
+          <div className="w-full max-w-[360px] flex flex-col items-center">
+            <div className="mb-6 opacity-40">
+              <IcoMic size={32} color="var(--text)" />
+            </div>
+            <h1 className="text-[22px] font-bold text-text tracking-[-0.03em]">Join Studio</h1>
+            <p className="font-mono text-[11px] text-text-3 mt-1.5">
+              Session {sessionId.slice(0, 8)}…
+            </p>
 
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
-                Your Name
-              </label>
-              <input
-                type="text"
-                value={participantName}
-                onChange={(e) => setParticipantName(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleJoin()}
-                placeholder="Enter your name"
-                className="w-full px-4 py-3 rounded-lg bg-cozy-900 border border-cozy-700 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            <div className="w-full mt-7 space-y-4">
+              <div>
+                <label className="block font-sans text-[11px] font-medium text-text-3 uppercase tracking-[0.08em] mb-2">
+                  Your Name
+                </label>
+                <input
+                  type="text"
+                  value={participantName}
+                  onChange={(e) => setParticipantName(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleJoin()}
+                  placeholder="Enter your name"
+                  className="w-full px-3.5 py-2.5 text-sm rounded-md outline-none border font-sans text-text"
+                  style={{
+                    background: "var(--card)",
+                    borderColor: "var(--border)",
+                  }}
+                />
+              </div>
+
+              <div>
+                <label className="block font-sans text-[11px] font-medium text-text-3 uppercase tracking-[0.08em] mb-2">
+                  Microphone
+                </label>
+                <select
+                  ref={micSelectRef}
+                  value={selectedMic}
+                  onChange={(e) => setSelectedMic(e.target.value)}
+                  className="w-full px-3.5 py-2.5 text-sm rounded-md outline-none border font-sans text-text"
+                  style={{
+                    background: "var(--card)",
+                    borderColor: "var(--border)",
+                  }}
+                >
+                  {mics.map((mic) => (
+                    <option key={mic.deviceId} value={mic.deviceId}>
+                      {mic.label || `Microphone ${mic.deviceId.slice(0, 8)}`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <MicMonitorToggle
+                enabled={monitorEnabled}
+                volume={monitorVolume}
+                onEnabledChange={setMonitorEnabled}
+                onVolumeChange={setMonitorVolume}
               />
-            </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
-                Microphone
-              </label>
-              <select
-                ref={micSelectRef}
-                value={selectedMic}
-                onChange={(e) => setSelectedMic(e.target.value)}
-                className="w-full px-4 py-3 rounded-lg bg-cozy-900 border border-cozy-700 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              <button
+                onClick={handleJoin}
+                disabled={!participantName.trim() || connecting}
+                className="w-full py-[11px] text-[15px] font-semibold font-sans rounded-md border disabled:cursor-not-allowed"
+                style={{
+                  background: !participantName.trim() || connecting ? "var(--card)" : "var(--amber)",
+                  color: !participantName.trim() || connecting ? "var(--text-3)" : "var(--bg)",
+                  borderColor: !participantName.trim() || connecting ? "var(--border)" : "var(--amber)",
+                  opacity: !participantName.trim() || connecting ? 0.8 : 1,
+                }}
               >
-                {mics.map((mic) => (
-                  <option key={mic.deviceId} value={mic.deviceId}>
-                    {mic.label || `Microphone ${mic.deviceId.slice(0, 8)}`}
-                  </option>
-                ))}
-              </select>
+                {connecting ? "Connecting…" : "Join Studio"}
+              </button>
             </div>
-
-            <MicMonitorToggle
-              enabled={monitorEnabled}
-              volume={monitorVolume}
-              onEnabledChange={setMonitorEnabled}
-              onVolumeChange={setMonitorVolume}
-            />
-
-            <button
-              onClick={handleJoin}
-              disabled={!participantName.trim() || connecting}
-              className="w-full px-6 py-3 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {connecting ? "Connecting..." : "Join Studio"}
-            </button>
           </div>
         </div>
       </div>
@@ -773,58 +991,43 @@ export default function StudioPage() {
   // ---------- Connected / Recording ----------
 
   return (
-    <div className="min-h-screen px-4 py-8">
-      <div className="max-w-4xl mx-auto">
-        <div className="flex items-center justify-between mb-8">
-          <div>
-            <h1 className="text-2xl font-bold text-white">Studio</h1>
-            <p className="text-gray-400 text-sm">
-              {participantName} &middot; {sessionId.slice(0, 8)}...
-            </p>
-          </div>
-          {studioState === "recording" && (
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-              <span className="text-red-400 text-sm font-medium">REC</span>
-            </div>
-          )}
-        </div>
-
-        <LiveKitRoom
-          serverUrl={LIVEKIT_URL}
-          token={token}
-          audio={{
-            deviceId: selectedMic ? { exact: selectedMic } : undefined,
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            sampleRate: 48000,
-            channelCount: 1,
-          }}
-          options={{
-            publishDefaults: {
-              audioPreset: { maxBitrate: 128_000 },
-              dtx: false,
-            },
-          }}
-          connect={true}
-        >
-          <RoomAudioRenderer />
-          <RoomContent
-            sessionId={sessionId}
-            participantName={participantName}
-            selectedMic={selectedMic}
-            selectedMicLabel={selectedMicDevice?.label || undefined}
-            selectedMicIsBuiltIn={selectedMicDevice ? isBuiltInMic(selectedMicDevice.label) : false}
-            studioState={studioState}
-            setStudioState={setStudioState}
-            monitorEnabled={monitorEnabled}
-            monitorVolume={monitorVolume}
-            onMonitorEnabledChange={setMonitorEnabled}
-            onMonitorVolumeChange={setMonitorVolume}
-          />
-        </LiveKitRoom>
-      </div>
+    <div className="animate-page-enter min-h-screen bg-bg flex flex-col">
+      <Topbar session={`Session ${sessionId.slice(0, 8)}…`} />
+      <LiveKitRoom
+        serverUrl={LIVEKIT_URL}
+        token={token}
+        audio={{
+          deviceId: selectedMic ? { exact: selectedMic } : undefined,
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          sampleRate: 48000,
+          channelCount: 1,
+        }}
+        options={{
+          publishDefaults: {
+            audioPreset: { maxBitrate: 128_000 },
+            dtx: false,
+          },
+        }}
+        connect={true}
+        className="flex flex-col flex-1 min-h-0"
+      >
+        <RoomAudioRenderer />
+        <RoomContent
+          sessionId={sessionId}
+          participantName={participantName}
+          selectedMic={selectedMic}
+          selectedMicLabel={selectedMicDevice?.label || undefined}
+          selectedMicIsBuiltIn={selectedMicDevice ? isBuiltInMic(selectedMicDevice.label) : false}
+          studioState={studioState}
+          setStudioState={setStudioState}
+          monitorEnabled={monitorEnabled}
+          monitorVolume={monitorVolume}
+          onMonitorEnabledChange={setMonitorEnabled}
+          onMonitorVolumeChange={setMonitorVolume}
+        />
+      </LiveKitRoom>
     </div>
   );
 }

@@ -1,12 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { Topbar } from "@/components/ui/Topbar";
+import { Button, ButtonLink } from "@/components/ui/Button";
+import { Waveform } from "@/components/ui/Waveform";
+import { IcoDownload, IcoPlus } from "@/components/ui/Icon";
 
 interface Track {
   id: string;
   participantName: string;
   status: string;
+  durationMs: number | null;
 }
 
 interface Session {
@@ -16,7 +22,42 @@ interface Session {
   tracks: Track[];
 }
 
+function formatDate(iso: string): string {
+  const d = new Date(iso);
+  return d.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function formatDuration(ms: number | null): string {
+  if (!ms) return "--:--";
+  const total = Math.floor(ms / 1000);
+  const m = Math.floor(total / 60).toString().padStart(2, "0");
+  const s = (total % 60).toString().padStart(2, "0");
+  return `${m}:${s}`;
+}
+
+/** Pull a stable numeric seed out of a session id so waveforms stay consistent. */
+function seedFromId(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) {
+    h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  }
+  return h % 1000;
+}
+
+/** Rough aggregate duration across all tracks. Max of tracks, not sum — tracks
+ *  are recorded in parallel, so the longest track is a good proxy for session
+ *  length. Accurate per-session duration + total size is tracked in #29. */
+function sessionDuration(s: Session): string {
+  const longest = s.tracks.reduce<number>((acc, t) => Math.max(acc, t.durationMs ?? 0), 0);
+  return longest > 0 ? formatDuration(longest) : "--:--";
+}
+
 export default function DashboardPage() {
+  const router = useRouter();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -38,65 +79,89 @@ export default function DashboardPage() {
     fetchSessions();
   }, []);
 
+  const trackCount = useMemo(
+    () => sessions.reduce((acc, s) => acc + s.tracks.length, 0),
+    [sessions],
+  );
+
   return (
-    <div className="min-h-screen px-4 py-8">
-      <div className="max-w-4xl mx-auto">
-        <div className="flex items-center justify-between mb-8">
-          <h1 className="text-3xl font-bold text-white">Dashboard</h1>
-          <Link
-            href="/"
-            className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-medium transition-colors"
-          >
-            New Session
-          </Link>
+    <div className="animate-page-enter min-h-screen bg-bg">
+      <Topbar />
+      <div className="max-w-[740px] mx-auto px-5 pt-8 pb-12">
+        <div className="flex items-center justify-between mb-6">
+          <div>
+            <h1 className="text-xl font-bold text-text tracking-[-0.02em]">Recordings</h1>
+            <p className="text-xs text-text-3 mt-0.5">
+              {sessions.length} session{sessions.length === 1 ? "" : "s"} · {trackCount} track
+              {trackCount === 1 ? "" : "s"} total
+            </p>
+          </div>
+          <Button variant="primary" size="md" onClick={() => router.push("/")}>
+            <IcoPlus size={13} color="currentColor" /> New Session
+          </Button>
         </div>
 
         {loading ? (
-          <div className="text-gray-400 text-center py-12">Loading sessions...</div>
+          <div className="text-text-3 text-center py-16 text-sm">Loading sessions…</div>
         ) : sessions.length === 0 ? (
-          <div className="text-center py-12">
-            <p className="text-gray-400 text-lg">No sessions yet</p>
-            <p className="text-gray-500 mt-2">
+          <div className="text-center py-16">
+            <p className="text-text-2 text-sm">No sessions yet</p>
+            <p className="text-text-3 mt-1.5 text-xs">
               Create your first recording session to get started.
             </p>
           </div>
         ) : (
-          <div className="space-y-3">
-            {sessions.map((session) => (
-              <Link
-                key={session.id}
-                href={`/session/${session.id}`}
-                className="block p-4 rounded-lg bg-cozy-900 border border-cozy-700 hover:border-cozy-500 transition-colors"
+          <div className="flex flex-col gap-2">
+            {sessions.map((s) => (
+              <div
+                key={s.id}
+                className="group relative rounded-lg p-4 border transition-[border-color,background-color] duration-150 bg-card border-[color:var(--border)] hover:bg-card-hi hover:border-[color:var(--border-hi)] focus-within:border-[color:var(--border-hi)]"
               >
-                <div className="flex items-center justify-between">
+                {/* Card-wide navigation overlay. `z-10` lifts it above the
+                 *  card's text content (which sits at auto z-index) so clicks
+                 *  on the title/meta navigate. The action-button row sits
+                 *  higher still (`z-20`) so those stay clickable. The Waveform
+                 *  row uses pointer-events-none so the overlay catches clicks
+                 *  through it. */}
+                <Link
+                  href={`/session/${s.id}`}
+                  aria-label={`Open session ${s.name}`}
+                  className="absolute inset-0 z-10 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--amber)]"
+                />
+                <div className="relative flex items-start justify-between mb-3 pointer-events-none">
                   <div>
-                    <h2 className="text-lg font-medium text-white">
-                      {session.name}
-                    </h2>
-                    <p className="text-sm text-gray-400 mt-1">
-                      {new Date(session.createdAt).toLocaleDateString()} &middot;{" "}
-                      {session.tracks.length}{" "}
-                      {session.tracks.length === 1 ? "track" : "tracks"}
-                    </p>
-                  </div>
-                  <div className="flex gap-2">
-                    {session.tracks.map((track) => (
-                      <span
-                        key={track.id}
-                        className={`px-2 py-1 text-xs rounded-full ${
-                          track.status === "complete"
-                            ? "bg-green-900/50 text-green-400"
-                            : track.status === "recording"
-                              ? "bg-red-900/50 text-red-400"
-                              : "bg-yellow-900/50 text-yellow-400"
-                        }`}
-                      >
-                        {track.participantName}
+                    <div className="text-sm font-semibold text-text mb-1">{s.name}</div>
+                    <div className="flex gap-3 flex-wrap">
+                      <span className="font-mono text-[11px] text-text-3">{formatDate(s.createdAt)}</span>
+                      <span className="font-mono text-[11px] text-text-3">{sessionDuration(s)}</span>
+                      <span className="font-mono text-[11px] text-text-3">
+                        {s.tracks.length} track{s.tracks.length === 1 ? "" : "s"}
                       </span>
-                    ))}
+                    </div>
+                  </div>
+                  <div className="relative z-20 flex gap-1.5 flex-shrink-0 pointer-events-auto">
+                    <ButtonLink href={`/session/${s.id}`} variant="ghost" size="sm">
+                      View
+                    </ButtonLink>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={(e) => {
+                        // Bulk zip download is tracked in #26. Keep the button inert for now
+                        // but stop propagation so the overlay <Link> doesn't navigate.
+                        e.preventDefault();
+                        e.stopPropagation();
+                      }}
+                      title="Bulk zip download tracked in #26"
+                    >
+                      <IcoDownload size={12} color="currentColor" /> Download
+                    </Button>
                   </div>
                 </div>
-              </Link>
+                <div className="relative pointer-events-none">
+                  <Waveform height={24} seed={seedFromId(s.id)} played={0} />
+                </div>
+              </div>
             ))}
           </div>
         )}

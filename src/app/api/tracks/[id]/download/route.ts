@@ -1,11 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getPresignedGetUrl } from "@/lib/s3";
+import { AUTH_COOKIES, verifyHostCookie } from "@/lib/auth";
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  // Downloads are host-only. Guests record; they don't retrieve mastered tracks.
+  const host = await verifyHostCookie(req.cookies.get(AUTH_COOKIES.host)?.value);
+  if (!host) {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
+
   try {
     const { id } = await params;
 

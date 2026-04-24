@@ -1,7 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { AUTH_COOKIES, verifyHostCookie } from "@/lib/auth";
+
+async function requireHost(req: NextRequest): Promise<boolean> {
+  const host = await verifyHostCookie(req.cookies.get(AUTH_COOKIES.host)?.value);
+  return Boolean(host);
+}
 
 export async function POST(req: NextRequest) {
+  if (!(await requireHost(req))) {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
   try {
     const body = await req.json();
     const { name } = body;
@@ -27,12 +36,20 @@ export async function POST(req: NextRequest) {
   }
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  if (!(await requireHost(req))) {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
   try {
     const sessions = await db.session.findMany({
       include: {
         tracks: {
-          select: { id: true, participantName: true, status: true },
+          select: {
+            id: true,
+            participantName: true,
+            status: true,
+            durationMs: true,
+          },
         },
       },
       orderBy: { createdAt: "desc" },

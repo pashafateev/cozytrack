@@ -29,6 +29,23 @@ function toRemoteParticipant(p: LKRemoteParticipant): RemoteParticipant {
   return { identity: p.identity, name: p.name };
 }
 
+// Runtime guard: validate that an arbitrary parsed JSON value matches the
+// ControlMessage union before passing it to handlers. Returns the typed
+// message on success, or null if the payload is malformed. Prevents a
+// malicious or buggy peer from crashing local handlers via unexpected shapes.
+function parseControlMessage(raw: unknown): ControlMessage | null {
+  if (raw === null || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  if (obj.type === "recording_start") {
+    if (typeof obj.sessionStartedAt !== "string") return null;
+    return { type: "recording_start", sessionStartedAt: obj.sessionStartedAt };
+  }
+  if (obj.type === "recording_stop") {
+    return { type: "recording_stop" };
+  }
+  return null;
+}
+
 export class LiveKitTransport implements Transport {
   private room: Room;
   // True when this instance created the Room and therefore owns its lifecycle.
@@ -143,11 +160,16 @@ export class LiveKitTransport implements Transport {
       topic?: string,
     ) => {
       if (topic !== CONTROL_TOPIC) return;
-      let parsed: ControlMessage;
+      let raw: unknown;
       try {
-        parsed = JSON.parse(new TextDecoder().decode(payload)) as ControlMessage;
+        raw = JSON.parse(new TextDecoder().decode(payload));
       } catch (err) {
-        console.error("onControlMessage: failed to parse payload", err);
+        console.warn("onControlMessage: failed to parse payload", err);
+        return;
+      }
+      const parsed = parseControlMessage(raw);
+      if (!parsed) {
+        console.warn("onControlMessage: ignoring invalid control message", raw);
         return;
       }
       handler(parsed, participant?.identity ?? "");

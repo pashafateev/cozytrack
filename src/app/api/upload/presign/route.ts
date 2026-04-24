@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { trackPartKey, trackRecordingKey, getPresignedPutUrl } from "@/lib/s3";
+import { resolvePrincipal } from "@/lib/auth";
 
 function getUploadErrorMessage(error: unknown): string {
   if (!(error instanceof Error)) {
@@ -27,6 +28,16 @@ export async function POST(req: NextRequest) {
         { error: "sessionId, trackId, and partNumber are required" },
         { status: 400 }
       );
+    }
+
+    // AuthZ: host can presign for any session; guest only for the session
+    // their cookie is scoped to. This is where we enforce the S3 blast radius.
+    const principal = await resolvePrincipal(req, sessionId);
+    if (!principal) {
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    }
+    if (principal.kind === "guest" && principal.sessionId !== sessionId) {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
 
     if (partNumber === 0) {
