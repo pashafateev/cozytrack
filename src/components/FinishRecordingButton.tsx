@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 type FinishState =
   | { kind: "idle" }
@@ -30,8 +30,30 @@ export function FinishRecordingButton({
   const [state, setState] = useState<FinishState>({ kind: "idle" });
   const [copied, setCopied] = useState(false);
 
+  const isMountedRef = useRef(true);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      abortRef.current?.abort();
+      abortRef.current = null;
+    };
+  }, []);
+
+  const safeSetState = useCallback((next: FinishState) => {
+    if (isMountedRef.current) {
+      setState(next);
+    }
+  }, []);
+
   const runFinalize = useCallback(async () => {
-    setState({ kind: "polling" });
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    safeSetState({ kind: "polling" });
 
     try {
       await waitForUploads();
@@ -39,22 +61,30 @@ export function FinishRecordingButton({
       console.error("Failed waiting for uploads to drain:", err);
     }
 
+    if (controller.signal.aborted || !isMountedRef.current) return;
+
     const deadline = Date.now() + POLL_TIMEOUT_MS;
 
     while (Date.now() <= deadline) {
+      if (controller.signal.aborted || !isMountedRef.current) return;
+
       let res: Response;
       try {
         res = await fetch(`/api/sessions/${sessionId}/finalize`, {
           method: "POST",
+          signal: controller.signal,
         });
       } catch (err) {
+        if (controller.signal.aborted || !isMountedRef.current) return;
         console.error("Finalize request failed:", err);
-        await sleep(POLL_INTERVAL_MS);
+        await sleep(POLL_INTERVAL_MS, controller.signal);
         continue;
       }
 
+      if (controller.signal.aborted || !isMountedRef.current) return;
+
       if (res.ok) {
-        setState({ kind: "ready" });
+        safeSetState({ kind: "ready" });
         onReady?.();
         return;
       }
@@ -67,24 +97,28 @@ export function FinishRecordingButton({
         } catch {
           // ignore parse errors
         }
-        setState({ kind: "polling", pendingName });
-        await sleep(POLL_INTERVAL_MS);
+        if (controller.signal.aborted || !isMountedRef.current) return;
+        safeSetState({ kind: "polling", pendingName });
+        await sleep(POLL_INTERVAL_MS, controller.signal);
         continue;
       }
 
       const message = `Finalize failed (HTTP ${res.status})`;
-      setState({ kind: "error", message });
+      safeSetState({ kind: "error", message });
       return;
     }
 
-    setState({ kind: "timeout" });
-  }, [sessionId, waitForUploads, onReady]);
+    safeSetState({ kind: "timeout" });
+  }, [sessionId, waitForUploads, onReady, safeSetState]);
 
   const copyId = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(sessionId);
+      if (!isMountedRef.current) return;
       setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      setTimeout(() => {
+        if (isMountedRef.current) setCopied(false);
+      }, 1500);
     } catch (err) {
       console.error("Clipboard copy failed:", err);
     }
@@ -164,6 +198,20 @@ export function FinishRecordingButton({
   );
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const t = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(t);
+      resolve();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
