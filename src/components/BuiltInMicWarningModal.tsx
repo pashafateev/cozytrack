@@ -82,7 +82,7 @@ export function BuiltInMicWarningModal({
             type="checkbox"
             checked={checked}
             onChange={(e) => setChecked(e.target.checked)}
-            className="w-4 h-4 rounded accent-amber"
+            className="w-4 h-4 rounded accent-amber focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--amber)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--card)]"
           />
           <span className="text-sm text-text-2">
             I understand — continue with built-in mic
@@ -92,7 +92,7 @@ export function BuiltInMicWarningModal({
         <div className="flex gap-3">
           <button
             onClick={onSwitchMic}
-            className="flex-1 px-4 py-2.5 rounded-md text-sm font-medium border"
+            className="flex-1 px-4 py-2.5 rounded-md text-sm font-medium border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--amber)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--card)]"
             style={{ background: "var(--card-hi)", borderColor: "var(--border-hi)", color: "var(--text)" }}
           >
             Switch Microphone
@@ -100,7 +100,7 @@ export function BuiltInMicWarningModal({
           <button
             onClick={onAcknowledge}
             disabled={!checked}
-            className="flex-1 px-4 py-2.5 rounded-md text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed border"
+            className="flex-1 px-4 py-2.5 rounded-md text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--amber)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--card)]"
             style={{ background: checked ? "var(--amber)" : "var(--card-hi)", borderColor: checked ? "var(--amber)" : "var(--border-hi)", color: checked ? "var(--bg)" : "var(--text-3)" }}
           >
             Continue
