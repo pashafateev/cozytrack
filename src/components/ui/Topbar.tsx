@@ -55,13 +55,16 @@ export function Topbar({ session }: TopbarProps) {
         {/* Studio is contextual — only meaningful when you're inside a specific session. */}
         {isStudio && chip("studio", true, pathname)}
         {chip("dashboard", isDashboard, "/dashboard")}
-        <a
-          href="/api/auth/signout"
-          className="text-xs font-medium text-text-3 hover:text-text-2 ml-2"
-          title="Sign out"
-        >
-          sign out
-        </a>
+        {/* Sign-out is POST to avoid accidental logouts from prefetchers */}
+        <form action="/api/auth/signout" method="post" className="ml-2">
+          <button
+            type="submit"
+            className="text-xs font-medium text-text-3 hover:text-text-2 bg-transparent border-0 cursor-pointer p-0"
+            title="Sign out"
+          >
+            sign out
+          </button>
+        </form>
       </div>
     </div>
   );

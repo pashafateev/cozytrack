@@ -321,8 +321,9 @@ export default function SessionDetailPage() {
 
 /**
  * Host-only button that mints an invite link and copies it to the clipboard.
- * Rendered on the session detail page; the middleware already ensures only
- * a signed-in host can reach this page.
+ * Rendered on the session detail page. Middleware gates /session/<id> to
+ * host auth only (guests never reach this page), so the button can assume
+ * the caller is a host. The underlying API endpoint also enforces this.
  */
 function InviteButton({ sessionId }: { sessionId: string }) {
   const [state, setState] = useState<
@@ -360,14 +361,14 @@ function InviteButton({ sessionId }: { sessionId: string }) {
         size="md"
         onClick={onClick}
         disabled={state.kind === "pending"}
-        title="Generate a single-use invite link for a cohost"
+        title="Generate an invite link for a cohost. The link works until it expires; anyone with it can join until then."
       >
         {state.kind === "pending" ? "Generating…" : "Invite cohost"}
       </Button>
       {state.kind === "ready" && (
         <div className="text-[11px] font-mono text-text-3 break-all max-w-[520px]">
           <div className="text-text-2 mb-1">
-            Copied to clipboard — expires in {Math.round(state.expiresInSeconds / 3600)}h
+            Copied to clipboard — this invite link expires in {Math.round(state.expiresInSeconds / 3600)}h
           </div>
           {state.url}
         </div>

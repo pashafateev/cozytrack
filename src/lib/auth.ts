@@ -123,6 +123,11 @@ function guestCookieName(sessionId: string): string {
   return `${GUEST_COOKIE_PREFIX}${sessionId}`;
 }
 
+/** True if the cookie name belongs to a guest session. Safe for middleware/Edge. */
+export function isGuestCookieName(name: string): boolean {
+  return name.startsWith(GUEST_COOKIE_PREFIX);
+}
+
 // ---------- Request-level helpers ----------
 
 /**
@@ -163,6 +168,7 @@ export async function resolvePrincipalFromCookies(sessionId?: string): Promise<P
 
 export const AUTH_COOKIES = {
   host: HOST_COOKIE,
+  guestPrefix: GUEST_COOKIE_PREFIX,
   guest: guestCookieName,
 } as const;
 

@@ -13,7 +13,7 @@
 // Every other API/page route requires host auth.
 
 import { NextRequest, NextResponse } from "next/server";
-import { verifyHostCookie, verifyGuestCookie, AUTH_COOKIES } from "@/lib/auth";
+import { verifyHostCookie, verifyGuestCookie, AUTH_COOKIES, isGuestCookieName } from "@/lib/auth";
 
 const PUBLIC_PATHS = [
   "/signin",
@@ -30,15 +30,17 @@ function isPublic(pathname: string): boolean {
 }
 
 /**
- * Extract the session id from a URL if it's a session-scoped route.
- * Returns null for routes that are not session-scoped.
+ * Extract the session id from a URL if it's a guest-accessible session-scoped
+ * route. Returns null for routes that require host auth.
+ *
+ * Guests are deliberately limited to recording in the studio. The session
+ * detail page (/session/<id>) is host-only because it exposes admin UI
+ * (invite minting, download links). /api/sessions/<id> GET is allowed for
+ * guests so the studio page can load the session metadata it needs.
  */
 function extractSessionId(pathname: string): string | null {
-  // /studio/<id>, /session/<id>, /api/sessions/<id>/..., /api/tracks/<trackId>/...
-  // Tracks are not session-scoped in the URL — they only accept host auth.
   const sessionMatch =
     pathname.match(/^\/studio\/([^/]+)/) ??
-    pathname.match(/^\/session\/([^/]+)/) ??
     pathname.match(/^\/api\/sessions\/([^/]+)/);
   return sessionMatch?.[1] ?? null;
 }
@@ -80,9 +82,7 @@ export async function middleware(req: NextRequest) {
   // (streams aren't cloneable here), so we let any request with *some* guest
   // cookie continue to the handler, which does the real check.
   if (isGuestAllowedForSessionEndpoint(pathname)) {
-    const guestCookies = req.cookies
-      .getAll()
-      .filter((c) => c.name.startsWith("cozytrack_guest_"));
+    const guestCookies = req.cookies.getAll().filter((c) => isGuestCookieName(c.name));
     if (guestCookies.length > 0) {
       return NextResponse.next();
     }

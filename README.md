@@ -171,7 +171,7 @@ livekit.yaml                   # LiveKit server config
 | `AWS_REGION` | AWS region | `us-west-2` |
 | `S3_BUCKET_NAME` | S3 bucket for recordings | `cozytrack-dev-pasha` |
 | `AUTH_SECRET` | 32+ char secret for signing host + guest session JWTs. Generate with `openssl rand -hex 32`. | — (required) |
-| `HOST_PASSWORD` | Plaintext password for host sign-in. Single operator credential. | — (required) |
+| `HOST_PASSWORD` | Plaintext password for host sign-in. **Minimum 12 characters.** Hashed with scrypt at startup. | — (required) |
 
 ## Auth Model (interim)
 
