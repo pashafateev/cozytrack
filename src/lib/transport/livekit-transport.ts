@@ -1,7 +1,12 @@
+"use client";
+
 // LiveKit implementation of the Transport interface.
 // This is the ONLY non-component file allowed to import from "livekit-client".
 // If the WebRTC backend is swapped, replace this file with a new implementation
 // and update the factory in ./index.ts.
+//
+// `livekit-client` relies on browser/WebRTC globals. The "use client" directive
+// above ensures this module is never bundled for server components/routes.
 
 import {
   ConnectionState,
