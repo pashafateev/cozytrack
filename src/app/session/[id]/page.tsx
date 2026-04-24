@@ -169,6 +169,7 @@ export default function SessionDetailPage() {
           <ButtonLink href={`/studio/${session.id}`} variant="ghost" size="md">
             Open Studio
           </ButtonLink>
+          <InviteButton sessionId={session.id} />
         </div>
 
         {/* Notes (local-only for now) */}
@@ -317,3 +318,64 @@ export default function SessionDetailPage() {
     </div>
   );
 }
+
+/**
+ * Host-only button that mints an invite link and copies it to the clipboard.
+ * Rendered on the session detail page; the middleware already ensures only
+ * a signed-in host can reach this page.
+ */
+function InviteButton({ sessionId }: { sessionId: string }) {
+  const [state, setState] = useState<
+    | { kind: "idle" }
+    | { kind: "pending" }
+    | { kind: "ready"; url: string; expiresInSeconds: number }
+    | { kind: "error"; message: string }
+  >({ kind: "idle" });
+
+  async function onClick() {
+    setState({ kind: "pending" });
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/invite`, { method: "POST" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setState({ kind: "error", message: body.error ?? "Failed to create invite" });
+        return;
+      }
+      const { url, expiresInSeconds } = await res.json();
+      try {
+        await navigator.clipboard.writeText(url);
+      } catch {
+        // Clipboard may fail in insecure contexts — the URL is still shown.
+      }
+      setState({ kind: "ready", url, expiresInSeconds });
+    } catch {
+      setState({ kind: "error", message: "Network error" });
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <Button
+        variant="ghost"
+        size="md"
+        onClick={onClick}
+        disabled={state.kind === "pending"}
+        title="Generate a single-use invite link for a cohost"
+      >
+        {state.kind === "pending" ? "Generating…" : "Invite cohost"}
+      </Button>
+      {state.kind === "ready" && (
+        <div className="text-[11px] font-mono text-text-3 break-all max-w-[520px]">
+          <div className="text-text-2 mb-1">
+            Copied to clipboard — expires in {Math.round(state.expiresInSeconds / 3600)}h
+          </div>
+          {state.url}
+        </div>
+      )}
+      {state.kind === "error" && (
+        <div className="text-[11px] text-red-400">{state.message}</div>
+      )}
+    </div>
+  );
+}
+

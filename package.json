@@ -19,6 +19,7 @@
     "@aws-sdk/s3-request-presigner": "^3.600.0",
     "@livekit/components-react": "^2.6.0",
     "@prisma/client": "^6.0.0",
+    "jose": "^6.2.2",
     "livekit-client": "^2.6.0",
     "livekit-server-sdk": "^2.9.0",
     "next": "^15.0.0",

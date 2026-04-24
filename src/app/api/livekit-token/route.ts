@@ -4,6 +4,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { AccessToken } from "livekit-server-sdk";
+import { resolvePrincipal } from "@/lib/auth";
 
 export async function POST(req: NextRequest) {
   try {
@@ -15,6 +16,15 @@ export async function POST(req: NextRequest) {
         { error: "roomName and participantName are required" },
         { status: 400 }
       );
+    }
+
+    // LiveKit rooms are 1:1 with cozytrack sessions, so roomName == sessionId.
+    const principal = await resolvePrincipal(req, roomName);
+    if (!principal) {
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    }
+    if (principal.kind === "guest" && principal.sessionId !== roomName) {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
 
     const apiKey = process.env.LIVEKIT_API_KEY;

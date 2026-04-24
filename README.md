@@ -170,3 +170,16 @@ livekit.yaml                   # LiveKit server config
 | `AWS_SECRET_ACCESS_KEY` | Optional AWS secret key for local env-based auth | — |
 | `AWS_REGION` | AWS region | `us-west-2` |
 | `S3_BUCKET_NAME` | S3 bucket for recordings | `cozytrack-dev-pasha` |
+| `AUTH_SECRET` | 32+ char secret for signing host + guest session JWTs. Generate with `openssl rand -hex 32`. | — (required) |
+| `HOST_PASSWORD` | Plaintext password for host sign-in. Single operator credential. | — (required) |
+
+## Auth Model (interim)
+
+Strict lockdown: everything requires a valid session. Two principals:
+
+- **Host** — signs in at `/signin` with `HOST_PASSWORD`. Can access any session, create sessions, download tracks, mint invite links. Session cookie lasts 7 days.
+- **Guest** — receives an invite link (`/join/<token>`) minted by the host. The cookie is scoped to a single session; the same guest can't access any other session. Invite tokens expire after 48h; guest sessions after 12h.
+
+Both cookies are signed HS256 JWTs (`jose`). Middleware (`src/middleware.ts`) gates every non-public route. Per-route authorization in the API handlers enforces that guests can only touch their own session — this is where the S3 blast radius is capped.
+
+Long-term plan: this scheme gets replaced by podflow-as-IdP (see `pashafateev/podflow#11`, `pashafateev/cozytrack#36`, `pashafateev/cozytrack#37`). The JWT primitive stays; only the token issuer changes.

@@ -1,12 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { resolvePrincipal } from "@/lib/auth";
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const { id } = await params;
+
+    // Host can read any session; guest can read only the session their
+    // invite is scoped to (so the studio page loads for them).
+    const principal = await resolvePrincipal(req, id);
+    if (!principal) {
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    }
+    if (principal.kind === "guest" && principal.sessionId !== id) {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
+    }
 
     const session = await db.session.findUnique({
       where: { id },

@@ -51,10 +51,17 @@ export function Topbar({ session }: TopbarProps) {
       {session && (
         <span className="text-[13px] font-medium text-text-2 truncate">{session}</span>
       )}
-      <div className="ml-auto flex gap-2">
+      <div className="ml-auto flex gap-2 items-center">
         {/* Studio is contextual — only meaningful when you're inside a specific session. */}
         {isStudio && chip("studio", true, pathname)}
         {chip("dashboard", isDashboard, "/dashboard")}
+        <a
+          href="/api/auth/signout"
+          className="text-xs font-medium text-text-3 hover:text-text-2 ml-2"
+          title="Sign out"
+        >
+          sign out
+        </a>
       </div>
     </div>
   );
