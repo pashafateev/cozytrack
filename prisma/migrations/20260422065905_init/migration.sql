@@ -1,4 +1,4 @@
-reateTable
+-- CreateTable
 CREATE TABLE "Session" (
     "id" TEXT NOT NULL,
     "name" TEXT NOT NULL,
@@ -27,5 +27,4 @@ CREATE TABLE "Track" (
 );
 
 -- AddForeignKey
-ALTER TABLE "Track" ADD CONSTRAINT "Track_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "Session"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "Track" ADD CONSTRAINT "Track_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "Session"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
