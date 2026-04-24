@@ -33,6 +33,23 @@ vi.mock("@/lib/db", () => ({
           return structuredClone(updated);
         },
       ),
+      updateMany: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: { id: string; status?: string };
+          data: Partial<Session>;
+        }) => {
+          const existing = sessionStore.get(where.id);
+          if (!existing) return { count: 0 };
+          if (where.status !== undefined && existing.status !== where.status) {
+            return { count: 0 };
+          }
+          sessionStore.set(where.id, { ...existing, ...data });
+          return { count: 1 };
+        },
+      ),
     },
   },
 }));
@@ -118,10 +135,73 @@ describe("POST /api/sessions/[id]/finalize", () => {
     expect(body.status).toBe("ready");
     expect(new Date(body.finalizedAt!).toISOString()).toBe(finalizedAt.toISOString());
 
-    // Confirm no update was performed.
+    // Confirm no write was performed.
     const { db } = (await import("@/lib/db")) as unknown as {
-      db: { session: { update: ReturnType<typeof vi.fn> } };
+      db: {
+        session: {
+          update: ReturnType<typeof vi.fn>;
+          updateMany: ReturnType<typeof vi.fn>;
+        };
+      };
     };
     expect(db.session.update).not.toHaveBeenCalled();
+    expect(db.session.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("two concurrent finalize calls return the same finalizedAt (only the first stamps)", async () => {
+    sessionStore.set("s4", {
+      id: "s4",
+      name: "demo",
+      status: "recording",
+      finalizedAt: null,
+      tracks: [{ id: "t1", participantName: "Alice", status: "complete" }],
+    });
+
+    // Pin the wall clock so any second stamping would otherwise advance it.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-24T00:00:00.000Z"));
+
+    try {
+      const promiseA = POST(req(), {
+        params: Promise.resolve({ id: "s4" }),
+      });
+      // Move time forward; if a second updateMany stamped, we'd see this.
+      vi.setSystemTime(new Date("2026-04-24T00:00:05.000Z"));
+      const promiseB = POST(req(), {
+        params: Promise.resolve({ id: "s4" }),
+      });
+
+      const [resA, resB] = await Promise.all([promiseA, promiseB]);
+
+      expect(resA.status).toBe(200);
+      expect(resB.status).toBe(200);
+
+      const bodyA = (await resA.json()) as Session;
+      const bodyB = (await resB.json()) as Session;
+
+      expect(bodyA.finalizedAt).not.toBeNull();
+      expect(bodyB.finalizedAt).not.toBeNull();
+      expect(new Date(bodyA.finalizedAt!).toISOString()).toBe(
+        new Date(bodyB.finalizedAt!).toISOString(),
+      );
+
+      // Exactly one updateMany should have actually flipped the row.
+      const { db } = (await import("@/lib/db")) as unknown as {
+        db: {
+          session: {
+            updateMany: ReturnType<typeof vi.fn>;
+          };
+        };
+      };
+      const counts = await Promise.all(
+        db.session.updateMany.mock.results.map(
+          (r) => r.value as Promise<{ count: number }>,
+        ),
+      );
+      const flips = counts.filter((c) => c.count === 1).length;
+      expect(flips).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

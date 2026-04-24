@@ -22,29 +22,38 @@ export async function POST(
       );
     }
 
-    if (session.status === "ready") {
-      return NextResponse.json(session, { status: 200 });
+    if (session.status !== "ready") {
+      const pending = session.tracks
+        .filter((t) => t.status !== "complete")
+        .map((t) => ({
+          trackId: t.id,
+          participantName: t.participantName,
+          status: t.status,
+        }));
+
+      if (pending.length > 0) {
+        return NextResponse.json({ pending }, { status: 409 });
+      }
+
+      await db.session.updateMany({
+        where: { id, status: "recording" },
+        data: { status: "ready", finalizedAt: new Date() },
+      });
     }
 
-    const pending = session.tracks
-      .filter((t) => t.status !== "complete")
-      .map((t) => ({
-        trackId: t.id,
-        participantName: t.participantName,
-        status: t.status,
-      }));
-
-    if (pending.length > 0) {
-      return NextResponse.json({ pending }, { status: 409 });
-    }
-
-    const updated = await db.session.update({
+    const updated = await db.session.findUnique({
       where: { id },
-      data: { status: "ready", finalizedAt: new Date() },
       include: {
         tracks: { orderBy: { createdAt: "asc" } },
       },
     });
+
+    if (!updated) {
+      return NextResponse.json(
+        { error: "Session not found" },
+        { status: 404 }
+      );
+    }
 
     return NextResponse.json(updated, { status: 200 });
   } catch (error) {
