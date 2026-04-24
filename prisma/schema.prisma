@@ -27,6 +27,10 @@ model Track {
   deviceLabel     String?
   deviceId        String?
   isBuiltInMic    Boolean  @default(false)
+  // Broadcast-aligned session start timestamp. Shared across all tracks of a
+  // recording triggered from the same click (originator's local clock). Plumbed
+  // now for future multi-track alignment; not yet used to align audio.
+  sessionStartedAt DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 }

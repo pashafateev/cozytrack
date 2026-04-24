@@ -6,12 +6,19 @@ export interface DeviceInfo {
   isBuiltInMic: boolean;
 }
 
+export interface TrackInitInfo {
+  deviceInfo?: DeviceInfo;
+  // ISO8601 — the originator's local clock at the moment recording started.
+  // Shared across all tracks triggered by the same broadcast.
+  sessionStartedAt?: string;
+}
+
 export async function getPresignedUploadUrl(
   sessionId: string,
   trackId: string,
   partNumber: number,
   participantName?: string,
-  deviceInfo?: DeviceInfo,
+  trackInit?: TrackInitInfo,
 ): Promise<string> {
   const res = await fetch("/api/upload/presign", {
     method: "POST",
@@ -21,7 +28,8 @@ export async function getPresignedUploadUrl(
       trackId,
       partNumber,
       participantName,
-      ...(deviceInfo ?? {}),
+      ...(trackInit?.deviceInfo ?? {}),
+      sessionStartedAt: trackInit?.sessionStartedAt,
     }),
   });
 

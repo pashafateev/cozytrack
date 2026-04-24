@@ -5,6 +5,10 @@
 // (LiveKitRoom, RoomAudioRenderer, useLocalParticipant, useRemoteParticipants,
 // useSpeakingParticipants, etc.) would be replaced entirely, not adapted.
 // See src/lib/transport/ for the imperative transport wrapper.
+//
+// Invariant: this file MUST NOT import from "livekit-client". All imperative
+// LiveKit operations (data channel sends, DataReceived subscriptions, etc.)
+// go through the Transport abstraction via useTransport().
 
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useParams } from "next/navigation";
@@ -19,6 +23,7 @@ import { v4 as uuidv4 } from "uuid";
 import { CozyRecorder } from "@/lib/recorder";
 import { getPresignedUploadUrl, uploadChunk, completeUpload } from "@/lib/upload";
 import { getToken, LIVEKIT_URL } from "@/lib/livekit";
+import { useTransport } from "@/lib/transport";
 import { isBuiltInMic } from "@/lib/devices";
 import { BuiltInMicWarningModal } from "@/components/BuiltInMicWarningModal";
 import {
@@ -133,10 +138,18 @@ function RoomContent({
   const remoteParticipants = useRemoteParticipants();
   const speakingParticipants = useSpeakingParticipants();
   const { localParticipant } = useLocalParticipant();
+  const transport = useTransport();
   const recorderRef = useRef<CozyRecorder | null>(null);
   const trackIdRef = useRef<string>("");
   const streamRef = useRef<MediaStream | null>(null);
   const [recordingStream, setRecordingStream] = useState<MediaStream | null>(null);
+  // Mirror of studioState so callbacks invoked from transport subscriptions
+  // (which close over the value at subscription time) can check current state
+  // without re-subscribing on every render.
+  const studioStateRef = useRef<StudioState>(studioState);
+  useEffect(() => {
+    studioStateRef.current = studioState;
+  }, [studioState]);
 
   // Sidetone: let the user hear themselves without affecting the recording
   useMicMonitor({ stream: recordingStream, enabled: monitorEnabled, volume: monitorVolume });
@@ -297,79 +310,82 @@ function RoomContent({
     });
   }, [speakingParticipants]);
 
-  const startRecording = useCallback(async () => {
-    if (!streamRef.current) return;
+  // Core recording start. Idempotent against double-invocation: if we're
+  // already recording (our own click echoed via a later remote message, or the
+  // button pressed twice), this is a no-op.
+  const startRecordingLocal = useCallback(
+    async (sessionStartedAtIso: string) => {
+      if (studioStateRef.current === "recording" || recorderRef.current) return;
+      if (!streamRef.current) return;
 
-    trackIdRef.current = uuidv4();
-    const trackId = trackIdRef.current;
+      trackIdRef.current = uuidv4();
+      const trackId = trackIdRef.current;
 
-    try {
-      await getPresignedUploadUrl(sessionId, trackId, 0, participantName, {
-        deviceLabel: selectedMicLabel,
-        deviceId: selectedMic,
-        isBuiltInMic: selectedMicIsBuiltIn,
+      try {
+        await getPresignedUploadUrl(sessionId, trackId, 0, participantName, {
+          deviceInfo: {
+            deviceLabel: selectedMicLabel,
+            deviceId: selectedMic,
+            isBuiltInMic: selectedMicIsBuiltIn,
+          },
+          sessionStartedAt: sessionStartedAtIso,
+        });
+      } catch (err) {
+        console.error("Failed to initialize upload:", err);
+        return;
+      }
+
+      const recorder = new CozyRecorder(streamRef.current);
+
+      recorder.onChunk((chunk, index) => {
+        const uploadPromise = (async () => {
+          try {
+            const url = await getPresignedUploadUrl(sessionId, trackId, index);
+            await uploadChunk(url, chunk);
+          } catch (err) {
+            console.error("Failed to upload chunk:", err);
+          }
+        })();
+
+        trackChunkUpload(uploadPromise);
       });
-    } catch (err) {
-      console.error("Failed to initialize upload:", err);
-      return;
-    }
 
-    const recorder = new CozyRecorder(streamRef.current);
+      recorderRef.current = recorder;
+      recordingStartRef.current = Date.now();
 
-    recorder.onChunk((chunk, index) => {
-      const uploadPromise = (async () => {
-        try {
-          const url = await getPresignedUploadUrl(sessionId, trackId, index);
-          await uploadChunk(url, chunk);
-        } catch (err) {
-          console.error("Failed to upload chunk:", err);
-        }
-      })();
+      try {
+        await recorder.start(5000);
+      } catch (err) {
+        console.error("Failed to start recorder:", err);
+        recorderRef.current = null;
+        return;
+      }
 
-      trackChunkUpload(uploadPromise);
-    });
+      setStudioState("recording");
 
-    recorderRef.current = recorder;
-    recordingStartRef.current = Date.now();
+      // Auto-switch to bandwidth-saving mode for the LiveKit preview
+      const switched = await switchAudioQuality("bandwidth-saving");
+      if (switched) {
+        showNotification("Preview quality reduced — local recording is unaffected");
+      } else {
+        showNotification("Couldn't switch audio quality — check console");
+      }
+    },
+    [
+      sessionId,
+      participantName,
+      selectedMic,
+      selectedMicLabel,
+      selectedMicIsBuiltIn,
+      setStudioState,
+      showNotification,
+      switchAudioQuality,
+      trackChunkUpload,
+    ],
+  );
 
-    try {
-      await recorder.start(5000);
-    } catch (err) {
-      console.error("Failed to start recorder:", err);
-      recorderRef.current = null;
-      return;
-    }
-
-    setStudioState("recording");
-
-    // Auto-switch to bandwidth-saving mode for the LiveKit preview
-    const switched = await switchAudioQuality("bandwidth-saving");
-    if (switched) {
-      showNotification("Preview quality reduced — local recording is unaffected");
-    } else {
-      showNotification("Couldn't switch audio quality — check console");
-    }
-
-    // Notify other participants via data channel
-    const encoder = new TextEncoder();
-    const data = encoder.encode(
-      JSON.stringify({ type: "recording_started", participant: participantName })
-    );
-    localParticipant.publishData(data, { reliable: true });
-  }, [
-    sessionId,
-    participantName,
-    selectedMic,
-    selectedMicLabel,
-    selectedMicIsBuiltIn,
-    localParticipant,
-    setStudioState,
-    showNotification,
-    switchAudioQuality,
-    trackChunkUpload,
-  ]);
-
-  const stopRecording = useCallback(async () => {
+  // Core recording stop. Idempotent: no-op when we have no active recorder.
+  const stopRecordingLocal = useCallback(async () => {
     if (!recorderRef.current) return;
 
     try {
@@ -377,36 +393,64 @@ function RoomContent({
       const trackId = trackIdRef.current;
       const durationMs = Date.now() - recordingStartRef.current;
 
-      // Upload the final complete blob
       const url = await getPresignedUploadUrl(sessionId, trackId, 9999);
       await uploadChunk(url, blob);
       await waitForChunkUploads();
       await completeUpload(sessionId, trackId, durationMs);
 
-      // Notify other participants
-      const encoder = new TextEncoder();
-      const data = encoder.encode(
-        JSON.stringify({ type: "recording_stopped", participant: participantName })
-      );
-      localParticipant.publishData(data, { reliable: true });
-
       setStudioState("connected");
 
-      // Restore full-quality preview
       await switchAudioQuality("full");
     } catch (err) {
       console.error("Failed to stop recording:", err);
     }
 
     recorderRef.current = null;
-  }, [
-    sessionId,
-    participantName,
-    localParticipant,
-    setStudioState,
-    switchAudioQuality,
-    waitForChunkUploads,
-  ]);
+  }, [sessionId, setStudioState, switchAudioQuality, waitForChunkUploads]);
+
+  // Button handler: broadcast first so remote participants start close to our
+  // own start time, then start locally. sessionStartedAt uses our local clock
+  // so all participants share a single reference timestamp on the Track row.
+  const handleStartRecording = useCallback(async () => {
+    if (studioStateRef.current === "recording" || recorderRef.current) return;
+    const sessionStartedAt = new Date().toISOString();
+    try {
+      await transport.sendControlMessage({ type: "recording_start", sessionStartedAt });
+    } catch (err) {
+      console.error("Failed to broadcast recording_start:", err);
+    }
+    await startRecordingLocal(sessionStartedAt);
+  }, [transport, startRecordingLocal]);
+
+  const handleStopRecording = useCallback(async () => {
+    try {
+      await transport.sendControlMessage({ type: "recording_stop" });
+    } catch (err) {
+      console.error("Failed to broadcast recording_stop:", err);
+    }
+    await stopRecordingLocal();
+  }, [transport, stopRecordingLocal]);
+
+  // Subscribe to remote control messages. LiveKit does not echo the sender's
+  // own messages back, but startRecordingLocal/stopRecordingLocal are
+  // idempotent anyway as a belt-and-braces guard.
+  useEffect(() => {
+    const unsub = transport.onControlMessage((msg, fromParticipant) => {
+      if (msg.type === "recording_start") {
+        showNotification(
+          `Recording started by ${fromParticipant || "another participant"}`,
+        );
+        void startRecordingLocal(msg.sessionStartedAt);
+      } else if (msg.type === "recording_stop") {
+        showNotification(
+          `Recording stopped by ${fromParticipant || "another participant"}`,
+        );
+        void stopRecordingLocal();
+      }
+    });
+    return unsub;
+  }, [transport, startRecordingLocal, stopRecordingLocal, showNotification]);
+
 
   // Get mic stream on mount
   useEffect(() => {
@@ -490,7 +534,7 @@ function RoomContent({
       <div className="flex justify-center">
         {studioState === "connected" && (
           <button
-            onClick={startRecording}
+            onClick={handleStartRecording}
             className="px-8 py-3 rounded-full bg-red-600 hover:bg-red-700 text-white font-medium transition-colors flex items-center gap-3"
           >
             <span className="w-3 h-3 rounded-full bg-white" />
@@ -499,7 +543,7 @@ function RoomContent({
         )}
         {studioState === "recording" && (
           <button
-            onClick={stopRecording}
+            onClick={handleStopRecording}
             className="px-8 py-3 rounded-full bg-cozy-700 hover:bg-cozy-600 text-white font-medium transition-colors flex items-center gap-3 ring-2 ring-red-500"
           >
             <span className="w-3 h-3 rounded-sm bg-red-500 animate-pulse" />

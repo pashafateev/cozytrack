@@ -15,6 +15,13 @@ export interface TransportEvents {
   // Add more events here as the codebase actually needs them — do not add speculatively.
 }
 
+// Discriminated union of control messages broadcast between participants via
+// the data channel. Extend this union (not a generic payload) so all senders
+// and handlers get type-checked.
+export type ControlMessage =
+  | { type: "recording_start"; sessionStartedAt: string /* ISO8601 */ }
+  | { type: "recording_stop" };
+
 export interface Transport {
   /**
    * Connect to a room with a token. Returns when connected.
@@ -41,4 +48,18 @@ export interface Transport {
    * Is currently connected.
    */
   isConnected(): boolean;
+
+  /**
+   * Broadcast a JSON-serializable control message to all other participants.
+   * Uses a reliable channel — ordering and delivery are best-effort but not lossy.
+   */
+  sendControlMessage(msg: ControlMessage): Promise<void>;
+
+  /**
+   * Subscribe to control messages from other participants.
+   * Returns an unsubscribe function. The sender identity is passed so handlers
+   * can distinguish echoes of their own messages (though LiveKit's data channel
+   * does not echo to the sender — idempotency should still be enforced by state).
+   */
+  onControlMessage(handler: (msg: ControlMessage, fromParticipant: string) => void): () => void;
 }

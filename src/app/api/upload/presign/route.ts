@@ -20,7 +20,7 @@ function getUploadErrorMessage(error: unknown): string {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { sessionId, trackId, partNumber, participantName, deviceLabel, deviceId, isBuiltInMic } = body;
+    const { sessionId, trackId, partNumber, participantName, deviceLabel, deviceId, isBuiltInMic, sessionStartedAt } = body;
 
     if (!sessionId || !trackId || partNumber === undefined) {
       return NextResponse.json(
@@ -58,6 +58,10 @@ export async function POST(req: NextRequest) {
         const safeDeviceLabel = typeof deviceLabel === "string" && deviceLabel.length > 0 ? deviceLabel : null;
         const safeDeviceId = typeof deviceId === "string" && deviceId.length > 0 ? deviceId : null;
         const safeIsBuiltInMic = typeof isBuiltInMic === "boolean" ? isBuiltInMic : false;
+        const safeSessionStartedAt =
+          typeof sessionStartedAt === "string" && !Number.isNaN(Date.parse(sessionStartedAt))
+            ? new Date(sessionStartedAt)
+            : null;
 
         await db.track.create({
           data: {
@@ -68,6 +72,7 @@ export async function POST(req: NextRequest) {
             deviceLabel: safeDeviceLabel,
             deviceId: safeDeviceId,
             isBuiltInMic: safeIsBuiltInMic,
+            sessionStartedAt: safeSessionStartedAt,
           },
         });
       }
