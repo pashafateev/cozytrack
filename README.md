@@ -172,7 +172,7 @@ livekit.yaml                   # LiveKit server config
 | `S3_BUCKET_NAME` | S3 bucket for recordings | `cozytrack-dev-pasha` |
 | `AUTH_SECRET` | 32+ char secret for signing host + guest session JWTs. Generate with `openssl rand -hex 32`. | — (required) |
 | `HOST_PASSWORD` | Plaintext password for host sign-in. **Minimum 12 characters.** Hashed with scrypt at startup. | — (required) |
-| `COZYTRACK_API_KEY` | Shared secret checked against the `X-API-Key` header on `/api/ingest/*`. Skipped in `NODE_ENV=development` for requests from `127.0.0.1` / `::1`. | — |
+| `COZYTRACK_API_KEY` | Shared secret checked against the `X-API-Key` header on `/api/ingest/*` (external-consumer endpoints used by tools like podline's `sd ct-ingest`). Browser-facing routes under `/api/sessions*` and `/api/tracks/*` are not gated by this key. Skipped in `NODE_ENV=development` for requests from `127.0.0.1` / `::1`. | — |
 
 ## Auth Model (interim)
 

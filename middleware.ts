@@ -9,9 +9,5 @@ export function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: [
-    "/api/sessions",
-    "/api/sessions/:path*",
-    "/api/tracks/:id/download",
-  ],
+  matcher: ["/api/ingest/:path*"],
 };
