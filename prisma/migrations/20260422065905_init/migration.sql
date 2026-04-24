@@ -1,4 +1,4 @@
--- CreateTable
+reateTable
 CREATE TABLE "Session" (
     "id" TEXT NOT NULL,
     "name" TEXT NOT NULL,
@@ -17,6 +17,9 @@ CREATE TABLE "Track" (
     "durationMs" INTEGER,
     "format" TEXT NOT NULL DEFAULT 'webm',
     "status" TEXT NOT NULL DEFAULT 'recording',
+    "deviceLabel" TEXT,
+    "deviceId" TEXT,
+    "isBuiltInMic" BOOLEAN NOT NULL DEFAULT false,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -24,4 +27,5 @@ CREATE TABLE "Track" (
 );
 
 -- AddForeignKey
+ALTER TABLE "Track" ADD CONSTRAINT "Track_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "Session"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "Track" ADD CONSTRAINT "Track_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "Session"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
