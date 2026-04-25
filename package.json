@@ -8,6 +8,7 @@
     "init:local": "npm run reset:local && npm run dev",
     "reset:local": "bash ./scripts/reset-local.sh",
     "build": "next build",
+    "vercel-build": "if [ \"$VERCEL_ENV\" = \"production\" ]; then prisma migrate deploy; fi && next build",
     "start": "next start",
     "postinstall": "prisma generate",
     "lint": "next lint",
