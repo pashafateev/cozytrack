@@ -7,7 +7,7 @@
     "dev:local": "docker compose up -d && npm run db:push && npm run dev",
     "init:local": "npm run reset:local && npm run dev",
     "reset:local": "bash ./scripts/reset-local.sh",
-    "build": "next build",
+    "build": "prisma migrate deploy && next build",
     "start": "next start",
     "postinstall": "prisma generate",
     "lint": "next lint",
