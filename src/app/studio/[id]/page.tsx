@@ -244,14 +244,53 @@ function InviteLinkModal({
   const [copyState, setCopyState] = useState<"idle" | "copied">(
     initialCopyState,
   );
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const container = dialogRef.current;
+      if (!container) return;
+
+      const focusable = Array.from(
+        container.querySelectorAll<HTMLElement>("button, input, a[href]"),
+      ).filter((el) => !el.hasAttribute("disabled"));
+      if (focusable.length === 0) return;
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+
+      if (e.shiftKey) {
+        if (active === first || !container.contains(active)) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else {
+        if (active === last || !container.contains(active)) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
+
+  // Focus the first focusable element on open so keyboard users start inside
+  // the dialog rather than on whatever was focused on the page behind it.
+  useEffect(() => {
+    const container = dialogRef.current;
+    if (!container) return;
+    const first = container.querySelector<HTMLElement>(
+      "button, input, a[href]",
+    );
+    first?.focus();
+  }, []);
 
   async function copy() {
     try {
@@ -262,7 +301,9 @@ function InviteLinkModal({
     }
   }
 
-  const hours = Math.max(1, Math.round(expiresInSeconds / 3600));
+  // Use ceil so we never overstate validity. The token may expire sooner than
+  // the rounded hour figure would suggest, hence "up to".
+  const hours = Math.max(1, Math.ceil(expiresInSeconds / 3600));
 
   return (
     <div
@@ -270,6 +311,7 @@ function InviteLinkModal({
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="invite-link-title"
@@ -285,8 +327,8 @@ function InviteLinkModal({
             Invite a cohost
           </h2>
           <p className="text-sm text-text-2 mt-1.5">
-            Share this link. Anyone who opens it can join this session until it
-            expires in {hours}h.
+            Share this link. Anyone who opens it can join this session; it
+            expires in up to {hours}h.
           </p>
         </div>
         <div
@@ -311,7 +353,6 @@ function InviteLinkModal({
             <button
               type="button"
               onClick={copy}
-              autoFocus
               className="text-[12px] px-3 py-1.5 rounded-md font-medium"
               style={{ background: "var(--amber)", color: "var(--bg)" }}
             >
