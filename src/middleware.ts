@@ -20,6 +20,10 @@ const PUBLIC_PATHS = [
   "/api/auth/signin",
   "/api/auth/signout",
   "/api/auth/accept-invite",
+  // /api/auth/me does its own principal resolution and returns {role: null}
+  // for unauthenticated callers. It must be reachable for guests-in-session
+  // so the studio page can branch on host-vs-guest without 401-ing the call.
+  "/api/auth/me",
 ];
 
 const PUBLIC_PREFIXES = ["/join/", "/_next/", "/favicon.ico"];

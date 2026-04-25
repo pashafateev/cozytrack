@@ -149,6 +149,227 @@ function ParticipantStrip({
   );
 }
 
+// ---------- Invite Cohost Tile ----------
+
+// Host-only tile. Clicking mints a fresh invite URL via the session's invite
+// endpoint, copies it to the clipboard, and shows a modal so the host can
+// re-copy or see the expiry. Each click mints a new token — we don't persist
+// the last one; it's cheap and keeps the UI stateless across reloads.
+function InviteCohostTile({ sessionId }: { sessionId: string }) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [invite, setInvite] = useState<{
+    url: string;
+    expiresInSeconds: number;
+  } | null>(null);
+  const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
+
+  async function onClick() {
+    if (pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/invite`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setError(body.error ?? "Failed to create invite");
+        return;
+      }
+      const body: { url: string; expiresInSeconds: number } = await res.json();
+      setInvite(body);
+      try {
+        await navigator.clipboard.writeText(body.url);
+        setCopyState("copied");
+      } catch {
+        setCopyState("idle");
+      }
+    } catch {
+      setError("Network error");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={pending}
+        className="rounded-lg px-4 py-3.5 flex items-center gap-3 border border-dashed hover:bg-card/40 focus:outline-none focus:ring-1 focus:ring-[var(--border-hi)] transition-colors disabled:opacity-60 disabled:cursor-wait text-left"
+        style={{ borderColor: "var(--border)" }}
+        title="Generate a shareable invite link for a cohost"
+      >
+        <div
+          className="w-8 h-8 rounded-full flex items-center justify-center border border-dashed"
+          style={{ borderColor: "var(--border-hi)" }}
+        >
+          <IcoPlus size={14} color="var(--text-3)" />
+        </div>
+        <span className="text-[13px] text-text-2">
+          {pending ? "Generating invite…" : "Invite a cohost…"}
+        </span>
+        <div className="ml-auto">
+          <IcoLink size={13} color="var(--text-3)" />
+        </div>
+      </button>
+      {error && (
+        <div className="text-[11px] text-red-400 px-1" role="alert">
+          {error}
+        </div>
+      )}
+      {invite && (
+        <InviteLinkModal
+          url={invite.url}
+          expiresInSeconds={invite.expiresInSeconds}
+          initialCopyState={copyState}
+          onClose={() => {
+            setInvite(null);
+            setCopyState("idle");
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+function InviteLinkModal({
+  url,
+  expiresInSeconds,
+  initialCopyState,
+  onClose,
+}: {
+  url: string;
+  expiresInSeconds: number;
+  initialCopyState: "idle" | "copied";
+  onClose: () => void;
+}) {
+  const [copyState, setCopyState] = useState<"idle" | "copied">(
+    initialCopyState,
+  );
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const container = dialogRef.current;
+      if (!container) return;
+
+      const focusable = Array.from(
+        container.querySelectorAll<HTMLElement>("button, input, a[href]"),
+      ).filter((el) => !el.hasAttribute("disabled"));
+      if (focusable.length === 0) return;
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+
+      if (e.shiftKey) {
+        if (active === first || !container.contains(active)) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else {
+        if (active === last || !container.contains(active)) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  // Focus the first focusable element on open so keyboard users start inside
+  // the dialog rather than on whatever was focused on the page behind it.
+  useEffect(() => {
+    const container = dialogRef.current;
+    if (!container) return;
+    const first = container.querySelector<HTMLElement>(
+      "button, input, a[href]",
+    );
+    first?.focus();
+  }, []);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopyState("copied");
+    } catch {
+      // Clipboard can fail on insecure origins; the URL is still visible.
+    }
+  }
+
+  // Use ceil so we never overstate validity. The token may expire sooner than
+  // the rounded hour figure would suggest, hence "up to".
+  const hours = Math.max(1, Math.ceil(expiresInSeconds / 3600));
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4"
+      onClick={onClose}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="invite-link-title"
+        onClick={(e) => e.stopPropagation()}
+        className="max-w-md w-full rounded-xl border p-6 shadow-2xl space-y-5"
+        style={{ background: "var(--card)", borderColor: "var(--border-hi)" }}
+      >
+        <div>
+          <h2
+            id="invite-link-title"
+            className="text-lg font-semibold text-text"
+          >
+            Invite a cohost
+          </h2>
+          <p className="text-sm text-text-2 mt-1.5">
+            Share this link. Anyone who opens it can join this session; it
+            expires in up to {hours}h.
+          </p>
+        </div>
+        <div
+          className="rounded-md border px-3 py-2 text-[11px] font-mono text-text-2 break-all select-all"
+          style={{ background: "var(--bg)", borderColor: "var(--border)" }}
+        >
+          {url}
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-[11px] text-text-3">
+            {copyState === "copied" ? "Copied to clipboard" : ""}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-[12px] px-3 py-1.5 rounded-md border hover:bg-card/50"
+              style={{ borderColor: "var(--border)", color: "var(--text-2)" }}
+            >
+              Close
+            </button>
+            <button
+              type="button"
+              onClick={copy}
+              className="text-[12px] px-3 py-1.5 rounded-md font-medium"
+              style={{ background: "var(--amber)", color: "var(--bg)" }}
+            >
+              {copyState === "copied" ? "Copy again" : "Copy link"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------- Room Content (inside LiveKitRoom) ----------
 
 function RoomContent({
@@ -163,6 +384,7 @@ function RoomContent({
   monitorVolume,
   onMonitorEnabledChange,
   onMonitorVolumeChange,
+  isHost,
 }: {
   sessionId: string;
   participantName: string;
@@ -175,6 +397,7 @@ function RoomContent({
   monitorVolume: number;
   onMonitorEnabledChange: (enabled: boolean) => void;
   onMonitorVolumeChange: (volume: number) => void;
+  isHost: boolean;
 }) {
   const remoteParticipants = useRemoteParticipants();
   const speakingParticipants = useSpeakingParticipants();
@@ -650,23 +873,9 @@ function RoomContent({
             />
           ))}
 
-          {/* Invite tile — blocked on cozytrack#23 (invite tokens). */}
-          <div
-            className="rounded-lg px-4 py-3.5 flex items-center gap-3 opacity-50 cursor-not-allowed border border-dashed"
-            style={{ borderColor: "var(--border)" }}
-            title="Cohost invite links tracked in #23"
-          >
-            <div
-              className="w-8 h-8 rounded-full flex items-center justify-center border border-dashed"
-              style={{ borderColor: "var(--border-hi)" }}
-            >
-              <IcoPlus size={14} color="var(--text-3)" />
-            </div>
-            <span className="text-[13px] text-text-3">Invite a cohost…</span>
-            <div className="ml-auto">
-              <IcoLink size={13} color="var(--text-3)" />
-            </div>
-          </div>
+          {/* Invite tile — host-only. Guests don't see the affordance; the
+              underlying API also rejects non-host callers. */}
+          {isHost && <InviteCohostTile sessionId={sessionId} />}
 
           {/* Monitor toggle kept below the strips so it doesn't crowd the meters */}
           <div className="mt-2">
@@ -772,11 +981,40 @@ export default function StudioPage() {
   const [connecting, setConnecting] = useState(false);
   const [monitorEnabled, setMonitorEnabled] = useState(false);
   const [monitorVolume, setMonitorVolume] = useState(70);
+  // Role drives host-only affordances (e.g. the cohost invite tile). Guests
+  // arriving via /join have their display name recorded in the cookie; we
+  // use it to prefill the prejoin form.
+  const [isHost, setIsHost] = useState(false);
 
   useEffect(() => {
     setMonitorEnabled(getStoredMonitorEnabled());
     setMonitorVolume(getStoredMonitorVolume());
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadPrincipal() {
+      try {
+        const res = await fetch(
+          `/api/auth/me?sessionId=${encodeURIComponent(sessionId)}`,
+        );
+        if (!res.ok) return;
+        const body: { role?: string; name?: string } = await res.json();
+        if (cancelled) return;
+        if (body.role === "host") {
+          setIsHost(true);
+        } else if (body.role === "guest" && typeof body.name === "string") {
+          setParticipantName((prev) => (prev ? prev : body.name ?? ""));
+        }
+      } catch {
+        // Leave defaults — the studio still works, just without host UI.
+      }
+    }
+    void loadPrincipal();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
 
   const [showMicWarning, setShowMicWarning] = useState(false);
   const [acknowledgedDevices, setAcknowledgedDevices] = useState<Set<string>>(
@@ -1026,6 +1264,7 @@ export default function StudioPage() {
           monitorVolume={monitorVolume}
           onMonitorEnabledChange={setMonitorEnabled}
           onMonitorVolumeChange={setMonitorVolume}
+          isHost={isHost}
         />
       </LiveKitRoom>
     </div>
