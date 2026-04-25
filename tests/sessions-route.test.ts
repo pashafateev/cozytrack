@@ -27,6 +27,14 @@ vi.mock("@/lib/db", () => ({
   },
 }));
 
+// Browser-facing /api/sessions is gated by the host cookie. The test exercises
+// the status-filter validation, not the auth boundary, so we stub the cookie
+// verifier to always resolve a host principal.
+vi.mock("@/lib/auth", () => ({
+  AUTH_COOKIES: { host: "ct_host", guest: "ct_guest" },
+  verifyHostCookie: vi.fn(async () => ({ kind: "host" })),
+}));
+
 import { NextRequest } from "next/server";
 import { GET as listBrowserSessions } from "@/app/api/sessions/route";
 import { GET as listIngestSessions } from "@/app/api/ingest/sessions/route";
