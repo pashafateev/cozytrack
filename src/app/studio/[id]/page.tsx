@@ -32,6 +32,7 @@ import {
   getStoredMonitorVolume,
 } from "@/components/MicMonitorToggle";
 import { useMicMonitor } from "@/hooks/useMicMonitor";
+import { FinishRecordingButton } from "@/components/FinishRecordingButton";
 
 import { Topbar } from "@/components/ui/Topbar";
 import { VUMeter, DbScale } from "@/components/ui/VUMeter";
@@ -441,6 +442,7 @@ function RoomContent({
   const [audioQualityMode, setAudioQualityMode] = useState<AudioQualityMode>("full");
   const [notification, setNotification] = useState<string | null>(null);
   const notificationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [hasRecorded, setHasRecorded] = useState(false);
 
   // Elapsed recording timer
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -703,6 +705,7 @@ function RoomContent({
       await completeUpload(sessionId, trackId, durationMs);
 
       setStudioStateSync("connected");
+      setHasRecorded(true);
 
       await switchAudioQuality("full");
     } catch (err) {
@@ -886,6 +889,18 @@ function RoomContent({
               onVolumeChange={onMonitorVolumeChange}
             />
           </div>
+
+          {/* Finish recording (post-stop) — surfaces after the local recorder
+              has produced at least one track and the studio is no longer in
+              the recording state. Drives the /api/sessions/:id/finalize flow. */}
+          {studioState === "connected" && hasRecorded && (
+            <div className="flex justify-center mt-3">
+              <FinishRecordingButton
+                sessionId={sessionId}
+                waitForUploads={waitForChunkUploads}
+              />
+            </div>
+          )}
         </div>
 
         {/* Right sidebar: record button + upload */}

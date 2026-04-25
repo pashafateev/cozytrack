@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { db } from "@/lib/db";
 import { resolvePrincipal } from "@/lib/auth";
+import { getSession } from "@/lib/sessions";
 
 export async function GET(
   req: NextRequest,
@@ -19,23 +19,7 @@ export async function GET(
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
 
-    const session = await db.session.findUnique({
-      where: { id },
-      include: {
-        tracks: {
-          orderBy: { createdAt: "asc" },
-        },
-      },
-    });
-
-    if (!session) {
-      return NextResponse.json(
-        { error: "Session not found" },
-        { status: 404 }
-      );
-    }
-
-    return NextResponse.json(session);
+    return await getSession(id);
   } catch (error) {
     console.error("Failed to get session:", error);
     return NextResponse.json(

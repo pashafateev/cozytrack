@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { AUTH_COOKIES, verifyHostCookie } from "@/lib/auth";
+import { listSessions } from "@/lib/sessions";
 
 async function requireHost(req: NextRequest): Promise<boolean> {
   const host = await verifyHostCookie(req.cookies.get(AUTH_COOKIES.host)?.value);
@@ -41,21 +42,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
   try {
-    const sessions = await db.session.findMany({
-      include: {
-        tracks: {
-          select: {
-            id: true,
-            participantName: true,
-            status: true,
-            durationMs: true,
-          },
-        },
-      },
-      orderBy: { createdAt: "desc" },
-    });
-
-    return NextResponse.json(sessions);
+    return await listSessions(req);
   } catch (error) {
     console.error("Failed to list sessions:", error);
     return NextResponse.json(

@@ -64,7 +64,7 @@ Self-hosted podcast recording studio. A Riverside.fm alternative focused on loca
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 20.19+ (or Node.js 22.12+)
 - Docker & Docker Compose
 - AWS account with S3 bucket configured
 
@@ -172,6 +172,7 @@ livekit.yaml                   # LiveKit server config
 | `S3_BUCKET_NAME` | S3 bucket for recordings | `cozytrack-dev-pasha` |
 | `AUTH_SECRET` | 32+ char secret for signing host + guest session JWTs. Generate with `openssl rand -hex 32`. | — (required) |
 | `HOST_PASSWORD` | Plaintext password for host sign-in. **Minimum 12 characters.** Hashed with scrypt at startup. | — (required) |
+| `COZYTRACK_API_KEY` | Shared secret checked against the `X-API-Key` header on `/api/ingest/*` (external-consumer endpoints used by tools like podline's `sd ct-ingest`). Browser-facing routes under `/api/sessions*` and `/api/tracks/*` are not gated by this key. Skipped in `NODE_ENV=development` for requests from `127.0.0.1` / `::1`. | — |
 
 ## Auth Model (interim)
 
@@ -182,4 +183,18 @@ Strict lockdown: everything requires a valid session. Two principals:
 
 Both cookies are signed HS256 JWTs (`jose`). Middleware (`src/middleware.ts`) gates every non-public route. Per-route authorization in the API handlers enforces that guests can only touch their own session — this is where the S3 blast radius is capped.
 
+External ingest tools (e.g. podline's `sd ct-ingest`) hit a separate `/api/ingest/*` namespace gated by `COZYTRACK_API_KEY` — outside the host/guest cookie flow.
+
 Long-term plan: this scheme gets replaced by podflow-as-IdP (see `pashafateev/podflow#11`, `pashafateev/cozytrack#36`, `pashafateev/cozytrack#37`). The JWT primitive stays; only the token issuer changes.
+
+## Finishing a recording
+
+When a recorder is done capturing in the studio:
+
+1. Click **Stop Recording** to flush the local recorder and drain any in-flight chunk uploads.
+2. Click **Finish recording**. The studio polls `POST /api/sessions/:id/finalize` once a second for up to 30 seconds.
+   - `409` with `{ pending: [...] }` means at least one track is still uploading. The UI surfaces the pending participant and keeps polling.
+   - `200` flips the session to `status = "ready"`, stamps `finalizedAt`, and shows the session ID with a copy button plus the ingest hint `sd ct-ingest <id>`.
+   - On a 30-second timeout the UI offers a Retry button.
+
+Calling `POST /api/sessions/:id/finalize` on an already-ready session is idempotent — it returns the same payload without re-stamping `finalizedAt`.
