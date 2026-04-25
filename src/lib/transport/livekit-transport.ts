@@ -16,24 +16,60 @@ import {
   type TrackPublishOptions,
 } from "livekit-client";
 
-import type { RemoteParticipant, Transport, TransportEvents } from "./types";
+import type {
+  ControlMessage,
+  RemoteParticipant,
+  Transport,
+  TransportEvents,
+} from "./types";
+
+const CONTROL_TOPIC = "control";
 
 function toRemoteParticipant(p: LKRemoteParticipant): RemoteParticipant {
   return { identity: p.identity, name: p.name };
 }
 
+// Runtime guard: validate that an arbitrary parsed JSON value matches the
+// ControlMessage union before passing it to handlers. Returns the typed
+// message on success, or null if the payload is malformed. Prevents a
+// malicious or buggy peer from crashing local handlers via unexpected shapes.
+function parseControlMessage(raw: unknown): ControlMessage | null {
+  if (raw === null || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  if (obj.type === "recording_start") {
+    if (typeof obj.sessionStartedAt !== "string") return null;
+    return { type: "recording_start", sessionStartedAt: obj.sessionStartedAt };
+  }
+  if (obj.type === "recording_stop") {
+    return { type: "recording_stop" };
+  }
+  return null;
+}
+
 export class LiveKitTransport implements Transport {
   private room: Room;
+  // True when this instance created the Room and therefore owns its lifecycle.
+  // When wrapping an externally-managed Room (e.g. from <LiveKitRoom>),
+  // connect/disconnect are no-ops.
+  private ownsRoom: boolean;
 
-  constructor() {
-    this.room = new Room();
+  constructor(room?: Room) {
+    if (room) {
+      this.room = room;
+      this.ownsRoom = false;
+    } else {
+      this.room = new Room();
+      this.ownsRoom = true;
+    }
   }
 
   async connect(opts: { url: string; token: string }): Promise<void> {
+    if (!this.ownsRoom) return;
     await this.room.connect(opts.url, opts.token);
   }
 
   async disconnect(): Promise<void> {
+    if (!this.ownsRoom) return;
     await this.room.disconnect();
   }
 
@@ -104,5 +140,43 @@ export class LiveKitTransport implements Transport {
 
   isConnected(): boolean {
     return this.room.state === ConnectionState.Connected;
+  }
+
+  async sendControlMessage(msg: ControlMessage): Promise<void> {
+    const bytes = new TextEncoder().encode(JSON.stringify(msg));
+    await this.room.localParticipant.publishData(bytes, {
+      reliable: true,
+      topic: CONTROL_TOPIC,
+    });
+  }
+
+  onControlMessage(
+    handler: (msg: ControlMessage, fromParticipant: string) => void,
+  ): () => void {
+    const fn = (
+      payload: Uint8Array,
+      participant?: LKRemoteParticipant,
+      _kind?: unknown,
+      topic?: string,
+    ) => {
+      if (topic !== CONTROL_TOPIC) return;
+      let raw: unknown;
+      try {
+        raw = JSON.parse(new TextDecoder().decode(payload));
+      } catch (err) {
+        console.warn("onControlMessage: failed to parse payload", err);
+        return;
+      }
+      const parsed = parseControlMessage(raw);
+      if (!parsed) {
+        console.warn("onControlMessage: ignoring invalid control message", raw);
+        return;
+      }
+      handler(parsed, participant?.identity ?? "");
+    };
+    this.room.on(RoomEvent.DataReceived, fn);
+    return () => {
+      this.room.off(RoomEvent.DataReceived, fn);
+    };
   }
 }

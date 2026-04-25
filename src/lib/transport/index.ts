@@ -11,7 +11,13 @@
 import { LiveKitTransport } from "./livekit-transport";
 import type { Transport } from "./types";
 
-export type { Transport, RemoteParticipant, TransportEvents } from "./types";
+export type {
+  ControlMessage,
+  RemoteParticipant,
+  Transport,
+  TransportEvents,
+} from "./types";
+export { useTransport } from "./use-transport";
 
 /**
  * Create a new Transport instance. The active transport is LiveKit.
