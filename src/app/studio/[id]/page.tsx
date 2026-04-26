@@ -860,21 +860,29 @@ function RoomContent({
             status={localStatus}
           />
 
-          {remoteParticipants.map((p) => (
-            <ParticipantStrip
-              key={p.identity}
-              name={p.identity}
-              role="guest"
-              micLabel={undefined /* Remote mic label — needs #28 (LiveKit metadata propagation). */}
-              isBuiltIn={false /* Remote built-in detection — needs #28. */}
-              level={audioLevels.get(p.identity) ?? 0}
-              // studioState is local-only, so showing localStatus on remote
-              // strips was misleading (guests appeared to be "Recording" whenever
-              // the host hit record). Remote per-participant status is tracked
-              // in #30; until then we show a stable "connected" for remotes.
-              status="connected"
-            />
-          ))}
+          {/* Remote participant strips are host-only for now (#44). The remote
+              audio level we surface comes from LiveKit's speaking-participants
+              hook, which is a coarse "is this person talking" signal — not a
+              true representation of the recorded remote track. Showing it to
+              guests is misleading ("is my cohost's audio being captured?"),
+              so guests only see their own meter. Host-side multi-participant
+              metering with accurate levels is tracked separately. */}
+          {isHost &&
+            remoteParticipants.map((p) => (
+              <ParticipantStrip
+                key={p.identity}
+                name={p.identity}
+                role="guest"
+                micLabel={undefined /* Remote mic label — needs #28 (LiveKit metadata propagation). */}
+                isBuiltIn={false /* Remote built-in detection — needs #28. */}
+                level={audioLevels.get(p.identity) ?? 0}
+                // studioState is local-only, so showing localStatus on remote
+                // strips was misleading (guests appeared to be "Recording" whenever
+                // the host hit record). Remote per-participant status is tracked
+                // in #30; until then we show a stable "connected" for remotes.
+                status="connected"
+              />
+            ))}
 
           {/* Invite tile — host-only. Guests don't see the affordance; the
               underlying API also rejects non-host callers. */}
