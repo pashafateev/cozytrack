@@ -377,17 +377,17 @@ function InviteLinkModal({
  * Recording state machine
  * -----------------------
  *
- *   idle  →  recording  →  finalizing  →  idle
- *                              ↑
- *                       start blocked here
+ *   connected  →  recording  →  finalizing  →  connected
+ *                                   ↑
+ *                            start blocked here
  *
  * Hard invariant: cannot start a new recording while in `finalizing`.
  *
- * - idle:        no active recording. Record button enabled.
- * - recording:   actively capturing. Elapsed timer ticks. Record button shows Stop.
- * - finalizing:  capture stopped, draining/uploading remaining chunks. Timer frozen
- *                at stop value. Record button disabled. beforeunload warning active.
- *                Transitions to `idle` when uploads drain (success or error).
+ * - connected:  no active recording. Record button enabled.
+ * - recording:  actively capturing. Elapsed timer ticks. Record button shows Stop.
+ * - finalizing: capture stopped, draining/uploading remaining chunks. Timer frozen
+ *               at stop value. Record button disabled.
+ *               Transitions to `connected` when uploads drain (success or error).
  *
  * This is the client-side projection of the server's recording lifecycle
  * (see issue #60 for the broader server-owned-lifecycle plan; #61 for this
@@ -650,6 +650,13 @@ function RoomContent({
   // button pressed twice), this is a no-op.
   const startRecordingLocal = useCallback(
     async (sessionStartedAtIso: string) => {
+      // Hard invariant from issue #61: cannot start a new recording while a
+      // previous one is finalizing. Enforced here so both local and remote
+      // (control-message) start paths honor the invariant.
+      if (studioStateRef.current === "finalizing") {
+        console.warn("Ignoring recording_start: currently finalizing previous recording");
+        return;
+      }
       if (studioStateRef.current === "recording" || recorderRef.current) return;
       if (!streamRef.current) return;
 
@@ -749,6 +756,14 @@ function RoomContent({
       console.error("Failed to stop recording:", err);
     } finally {
       recorderRef.current = null;
+      // Hard invariant from issue #61: do not leave `finalizing` until the
+      // chunk-upload promise set is drained, regardless of error path. If the
+      // happy path above already drained, this is effectively a no-op.
+      try {
+        await waitForChunkUploads();
+      } catch (drainErr) {
+        console.error("Failed while draining chunk uploads:", drainErr);
+      }
       setStudioStateSync("connected");
       // Best-effort restoration of full-quality preview. Fire-and-forget —
       // a failure here must not keep us stuck in `finalizing`.
@@ -826,8 +841,11 @@ function RoomContent({
 
   const isRecording = studioState === "recording";
   const isFinalizing = studioState === "finalizing";
+  // Treat `finalizing` as still uploading: the recorder has stopped but
+  // chunks are draining, so the sidebar indicator should not look idle.
+  const isUploading = isRecording || isFinalizing;
 
-  const localStatus: Status = isRecording ? "recording" : "connected";
+  const localStatus: Status = isUploading ? "recording" : "connected";
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
@@ -1043,14 +1061,14 @@ function RoomContent({
               <div
                 className="h-full rounded-[1px]"
                 style={{
-                  width: isRecording ? "30%" : "0%",
+                  width: isUploading ? "30%" : "0%",
                   background: "var(--amber)",
                   transition: "width 600ms ease",
                 }}
               />
             </div>
             <span className="font-mono text-[9px] text-text-3">
-              {isRecording ? "in flight" : "—"}
+              {isUploading ? "in flight" : "—"}
             </span>
           </div>
         </div>
