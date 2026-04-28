@@ -46,7 +46,7 @@ import {
 
 // ---------- Types ----------
 
-type StudioState = "prejoin" | "connected" | "recording";
+type StudioState = "prejoin" | "connected" | "recording" | "finalizing";
 type AudioQualityMode = "full" | "bandwidth-saving";
 
 // ---------- Audio Quality Presets ----------
@@ -373,6 +373,26 @@ function InviteLinkModal({
 
 // ---------- Room Content (inside LiveKitRoom) ----------
 
+/**
+ * Recording state machine
+ * -----------------------
+ *
+ *   idle  →  recording  →  finalizing  →  idle
+ *                              ↑
+ *                       start blocked here
+ *
+ * Hard invariant: cannot start a new recording while in `finalizing`.
+ *
+ * - idle:        no active recording. Record button enabled.
+ * - recording:   actively capturing. Elapsed timer ticks. Record button shows Stop.
+ * - finalizing:  capture stopped, draining/uploading remaining chunks. Timer frozen
+ *                at stop value. Record button disabled. beforeunload warning active.
+ *                Transitions to `idle` when uploads drain (success or error).
+ *
+ * This is the client-side projection of the server's recording lifecycle
+ * (see issue #60 for the broader server-owned-lifecycle plan; #61 for this
+ * specific design).
+ */
 function RoomContent({
   sessionId,
   participantName,
@@ -593,7 +613,11 @@ function RoomContent({
     });
   }, [speakingParticipants]);
 
-  // Tick the elapsed-time display while recording
+  // Tick the elapsed-time display while recording. The interval is bound to
+  // `recording`, NOT `finalizing` — once we enter `finalizing` the timer tears
+  // down and the displayed value freezes at the stop-moment value. If we
+  // tear it down only when the upload pipeline settles, a wedged upload
+  // (issue #48) would let the timer keep ticking indefinitely.
   useEffect(() => {
     if (studioState === "recording") {
       setElapsedMs(0);
@@ -602,10 +626,15 @@ function RoomContent({
         setElapsedMs(Date.now() - started);
       }, 250);
     } else {
-      setElapsedMs(0);
       if (elapsedTimerRef.current) {
         clearInterval(elapsedTimerRef.current);
         elapsedTimerRef.current = null;
+      }
+      // Keep the displayed elapsed value frozen during `finalizing` so the
+      // user sees the duration they actually recorded. Reset only on full
+      // return to idle.
+      if (studioState !== "finalizing") {
+        setElapsedMs(0);
       }
     }
     return () => {
@@ -690,36 +719,58 @@ function RoomContent({
     ],
   );
 
-  // Core recording stop. Idempotent: no-op when we have no active recorder.
+  // Core recording stop. Idempotent: no-op when we have no active recorder or
+  // we're already finalizing.
   const stopRecordingLocal = useCallback(async () => {
     if (!recorderRef.current) return;
+    if (studioStateRef.current === "finalizing") return;
+
+    // Snapshot per-recording state into local consts BEFORE any await so a
+    // hypothetical concurrent attempt to re-record (blocked by the
+    // finalizing-state gate, but defended in depth here) cannot overwrite the
+    // values mid-finalize. Also transition synchronously so the elapsed timer
+    // tears down immediately — even if the upload pipeline below hangs.
+    const recorder = recorderRef.current;
+    const trackId = trackIdRef.current;
+    const startedAt = recordingStartRef.current;
+    setStudioStateSync("finalizing");
 
     try {
-      const blob = await recorderRef.current.stop();
-      const trackId = trackIdRef.current;
-      const durationMs = Date.now() - recordingStartRef.current;
+      const blob = await recorder.stop();
+      const durationMs = Date.now() - startedAt;
 
       const url = await getPresignedUploadUrl(sessionId, trackId, 9999);
       await uploadChunk(url, blob);
       await waitForChunkUploads();
       await completeUpload(sessionId, trackId, durationMs);
 
-      setStudioStateSync("connected");
       setHasRecorded(true);
-
-      await switchAudioQuality("full");
     } catch (err) {
       console.error("Failed to stop recording:", err);
+    } finally {
+      recorderRef.current = null;
+      setStudioStateSync("connected");
+      // Best-effort restoration of full-quality preview. Fire-and-forget —
+      // a failure here must not keep us stuck in `finalizing`.
+      void switchAudioQuality("full").catch((err) => {
+        console.error("Failed to restore audio quality:", err);
+      });
     }
-
-    recorderRef.current = null;
   }, [sessionId, setStudioStateSync, switchAudioQuality, waitForChunkUploads]);
 
   // Button handler: broadcast first so remote participants start close to our
   // own start time, then start locally. sessionStartedAt uses our local clock
   // so all participants share a single reference timestamp on the Track row.
   const handleStartRecording = useCallback(async () => {
-    if (studioStateRef.current === "recording" || recorderRef.current) return;
+    // Hard invariant from issue #61: cannot start a new recording while a
+    // previous one is finalizing. The button itself is disabled in that state,
+    // but enforce here too for the broadcast/control-message path.
+    if (
+      studioStateRef.current === "recording" ||
+      studioStateRef.current === "finalizing" ||
+      recorderRef.current
+    )
+      return;
     const sessionStartedAt = new Date().toISOString();
     try {
       await transport.sendControlMessage({ type: "recording_start", sessionStartedAt });
@@ -774,6 +825,7 @@ function RoomContent({
   const showLocalMicWarning = selectedMicIsBuiltIn && !bannerDismissed;
 
   const isRecording = studioState === "recording";
+  const isFinalizing = studioState === "finalizing";
 
   const localStatus: Status = isRecording ? "recording" : "connected";
 
@@ -916,15 +968,26 @@ function RoomContent({
               <button
                 type="button"
                 onClick={() => (isRecording ? handleStopRecording() : handleStartRecording())}
-                className={`w-[60px] h-[60px] rounded-full flex items-center justify-center cursor-pointer border-2 ${
+                disabled={isFinalizing}
+                className={`w-[60px] h-[60px] rounded-full flex items-center justify-center border-2 ${
                   isRecording ? "rec-ring" : ""
-                }`}
+                } ${isFinalizing ? "cursor-not-allowed" : "cursor-pointer"}`}
                 style={{
                   background: isRecording ? "rgba(232,80,80,0.1)" : "var(--card)",
                   borderColor: isRecording ? "var(--rec)" : "var(--border-hi)",
+                  opacity: isFinalizing ? 0.5 : 1,
                   transition: "all 200ms ease",
                 }}
-                aria-label={isRecording ? "Stop recording" : "Start recording"}
+                aria-label={
+                  isFinalizing
+                    ? "Finalizing previous recording"
+                    : isRecording
+                    ? "Stop recording"
+                    : "Start recording"
+                }
+                title={
+                  isFinalizing ? "Finalizing previous recording…" : undefined
+                }
               >
                 {isRecording ? (
                   <div
@@ -940,21 +1003,35 @@ function RoomContent({
               </button>
             </div>
             <span
-              className="font-mono text-[10px] font-medium tracking-[0.08em]"
+              className="font-mono text-[10px] font-medium tracking-[0.08em] text-center"
               style={{
-                color: isRecording ? "var(--rec)" : "var(--text-3)",
+                color: isRecording
+                  ? "var(--rec)"
+                  : isFinalizing
+                  ? "var(--text-2)"
+                  : "var(--text-3)",
               }}
             >
-              {isRecording ? "STOP" : "REC"}
+              {isFinalizing
+                ? "FINALIZING…"
+                : isRecording
+                ? "STOP"
+                : "REC"}
             </span>
             <div
               className="font-mono text-[13px] tracking-[0.06em]"
               style={{
-                color: isRecording ? "var(--text-2)" : "var(--text-3)",
+                color:
+                  isRecording || isFinalizing ? "var(--text-2)" : "var(--text-3)",
               }}
             >
               {formatElapsed(elapsedMs)}
             </div>
+            {isFinalizing && (
+              <span className="font-sans text-[10px] text-text-3 text-center px-2 max-w-[100px] leading-tight">
+                Finalizing previous recording…
+              </span>
+            )}
           </div>
 
           <div className="w-10 h-px my-3" style={{ background: "var(--border)" }} />
