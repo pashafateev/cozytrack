@@ -593,26 +593,23 @@ function RoomContent({
     });
   }, [speakingParticipants]);
 
-  // Tick the elapsed-time display while recording
+  // Tick the elapsed-time display while recording. The interval is bound to
+  // studioState — when stop is initiated (locally OR via a received
+  // recording_stop control message), studioState transitions to "connected"
+  // and this effect tears the interval down. The display is left frozen at
+  // the stop-moment value rather than reset to zero, and only reinitialized
+  // when a new recording begins.
   useEffect(() => {
-    if (studioState === "recording") {
-      setElapsedMs(0);
-      const started = Date.now();
-      elapsedTimerRef.current = setInterval(() => {
-        setElapsedMs(Date.now() - started);
-      }, 250);
-    } else {
-      setElapsedMs(0);
-      if (elapsedTimerRef.current) {
-        clearInterval(elapsedTimerRef.current);
-        elapsedTimerRef.current = null;
-      }
-    }
+    if (studioState !== "recording") return;
+    setElapsedMs(0);
+    const started = Date.now();
+    const id = setInterval(() => {
+      setElapsedMs(Date.now() - started);
+    }, 250);
+    elapsedTimerRef.current = id;
     return () => {
-      if (elapsedTimerRef.current) {
-        clearInterval(elapsedTimerRef.current);
-        elapsedTimerRef.current = null;
-      }
+      clearInterval(id);
+      elapsedTimerRef.current = null;
     };
   }, [studioState]);
 
@@ -691,11 +688,20 @@ function RoomContent({
   );
 
   // Core recording stop. Idempotent: no-op when we have no active recorder.
+  // Transitions studioState out of "recording" up front so UI elements bound
+  // to it (notably the elapsed-time ticker) tear down even if the async
+  // upload finalization below throws. Without this, a network blip on the
+  // co-host during finalize would leave the timer running forever (#48).
   const stopRecordingLocal = useCallback(async () => {
     if (!recorderRef.current) return;
 
+    const recorder = recorderRef.current;
+    recorderRef.current = null;
+    setStudioStateSync("connected");
+    setHasRecorded(true);
+
     try {
-      const blob = await recorderRef.current.stop();
+      const blob = await recorder.stop();
       const trackId = trackIdRef.current;
       const durationMs = Date.now() - recordingStartRef.current;
 
@@ -704,15 +710,10 @@ function RoomContent({
       await waitForChunkUploads();
       await completeUpload(sessionId, trackId, durationMs);
 
-      setStudioStateSync("connected");
-      setHasRecorded(true);
-
       await switchAudioQuality("full");
     } catch (err) {
       console.error("Failed to stop recording:", err);
     }
-
-    recorderRef.current = null;
   }, [sessionId, setStudioStateSync, switchAudioQuality, waitForChunkUploads]);
 
   // Button handler: broadcast first so remote participants start close to our
