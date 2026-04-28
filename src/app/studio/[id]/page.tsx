@@ -17,7 +17,6 @@ import {
   RoomAudioRenderer,
   useRemoteParticipants,
   useLocalParticipant,
-  useSpeakingParticipants,
 } from "@livekit/components-react";
 import { v4 as uuidv4 } from "uuid";
 import { CozyRecorder } from "@/lib/recorder";
@@ -32,6 +31,13 @@ import {
   getStoredMonitorVolume,
 } from "@/components/MicMonitorToggle";
 import { useMicMonitor } from "@/hooks/useMicMonitor";
+import { useRemoteAudioLevels } from "@/hooks/useRemoteAudioLevels";
+import {
+  CLIP_MIN_FRAMES,
+  CLIP_THRESHOLD,
+  SHAPING_EXPONENT,
+  smoothLevel,
+} from "@/lib/audio-meter";
 import { FinishRecordingButton } from "@/components/FinishRecordingButton";
 
 import { Topbar } from "@/components/ui/Topbar";
@@ -80,6 +86,7 @@ interface ParticipantStripProps {
   isBuiltIn: boolean;
   level: number; // 0..255
   status: Status;
+  clipping?: boolean;
 }
 
 function ParticipantStrip({
@@ -89,6 +96,7 @@ function ParticipantStrip({
   isBuiltIn,
   level,
   status,
+  clipping = false,
 }: ParticipantStripProps) {
   const normalized = Math.max(0, Math.min(1, level / 255));
   return (
@@ -96,7 +104,9 @@ function ParticipantStrip({
       className="rounded-lg px-4 py-3.5 border flex flex-col gap-2.5"
       style={{
         background: "var(--card)",
-        borderColor: "var(--border)",
+        borderColor: clipping ? "var(--rec)" : "var(--border)",
+        boxShadow: clipping ? "0 0 0 1px var(--rec), 0 0 12px rgba(232,80,80,0.45)" : undefined,
+        transition: "border-color 80ms ease, box-shadow 80ms ease",
       }}
     >
       <div className="flex items-center gap-2.5">
@@ -134,6 +144,21 @@ function ParticipantStrip({
                 className="inline-flex"
               >
                 <IcoAlert size={11} color="var(--warn)" />
+              </span>
+            )}
+            {clipping && (
+              <span
+                title="Audio is clipping — ask the talker to back off the mic or lower input gain"
+                aria-label="Audio is clipping"
+                className="inline-flex items-center font-mono text-[10px] font-semibold px-1.5 py-0.5 rounded-[4px]"
+                style={{
+                  background: "rgba(232,80,80,0.16)",
+                  color: "var(--rec)",
+                  border: "1px solid rgba(232,80,80,0.3)",
+                  letterSpacing: "0.04em",
+                }}
+              >
+                CLIP
               </span>
             )}
           </div>
@@ -401,7 +426,6 @@ function RoomContent({
   isHost: boolean;
 }) {
   const remoteParticipants = useRemoteParticipants();
-  const speakingParticipants = useSpeakingParticipants();
   const { localParticipant } = useLocalParticipant();
   const transport = useTransport();
   const recorderRef = useRef<CozyRecorder | null>(null);
@@ -433,10 +457,15 @@ function RoomContent({
   useMicMonitor({ stream: recordingStream, enabled: monitorEnabled, volume: monitorVolume });
 
   const [audioLevels, setAudioLevels] = useState<Map<string, number>>(new Map());
+  const [localClipping, setLocalClipping] = useState(false);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animFrameRef = useRef<number>(0);
   const recordingStartRef = useRef<number>(0);
   const localLevelRef = useRef(0);
+  // Tracks consecutive clip frames + remaining hold ticks for the local meter,
+  // so a transient peak still flashes instead of vanishing in one rAF.
+  const localClipFramesRef = useRef(0);
+  const localClipHoldRef = useRef(0);
   const chunkUploadPromisesRef = useRef(new Set<Promise<void>>());
 
   const [audioQualityMode, setAudioQualityMode] = useState<AudioQualityMode>("full");
@@ -549,18 +578,39 @@ function RoomContent({
       analyserRef.current.getByteTimeDomainData(dataArray);
 
       let sumSquares = 0;
+      let peak = 0;
       for (const value of dataArray) {
         const centeredSample = (value - 128) / 128;
         sumSquares += centeredSample * centeredSample;
+        const abs = Math.abs(centeredSample);
+        if (abs > peak) peak = abs;
       }
 
       const rms = Math.sqrt(sumSquares / dataArray.length);
       const normalized = Math.min(1, Math.max(0, (rms - 0.01) / 0.12));
-      const targetLevel = Math.round(Math.pow(normalized, 0.6) * 255);
+      const targetLevel = Math.round(Math.pow(normalized, SHAPING_EXPONENT) * 255);
       const smoothedLevel = Math.round(
-        localLevelRef.current * 0.7 + targetLevel * 0.3
+        smoothLevel(localLevelRef.current, targetLevel)
       );
       localLevelRef.current = smoothedLevel;
+
+      // Clipping flag: peak >= -1 dBFS for CLIP_MIN_FRAMES consecutive frames,
+      // then hold the visible flag briefly so a single transient peak still
+      // registers. The hold count here is in RAF frames (~60Hz), giving ~500ms.
+      if (peak >= CLIP_THRESHOLD) {
+        localClipFramesRef.current += 1;
+        if (localClipFramesRef.current >= CLIP_MIN_FRAMES) {
+          localClipHoldRef.current = 30;
+        }
+      } else {
+        localClipFramesRef.current = 0;
+      }
+      // Compute visibility from the CURRENT hold first, then decrement, so a
+      // hold of N yields N visible frames (not N-1).
+      const isClipping = localClipHoldRef.current > 0;
+      if (isClipping) localClipHoldRef.current -= 1;
+      // Avoid setState every frame when nothing changed.
+      setLocalClipping((prev) => (prev === isClipping ? prev : isClipping));
 
       setAudioLevels((prev) => {
         const next = new Map(prev);
@@ -579,19 +629,28 @@ function RoomContent({
     };
   }, [participantName, recordingStream]);
 
-  // Track remote audio levels via the speaking-participants hook
+  // Track remote audio levels via getStats() polling on each remote audio
+  // track's RTCRtpReceiver. Replaces the prior `useSpeakingParticipants`
+  // approach, which only emitted while the LiveKit voice-activity heuristic
+  // flagged a participant as "speaking" — fine for grid highlights but useless
+  // for level monitoring (silent talkers + no clipping signal). See #47.
+  const remoteAudio = useRemoteAudioLevels(remoteParticipants);
+  // Merge remote levels into the same audioLevels map the local meter feeds.
   useEffect(() => {
     setAudioLevels((prev) => {
       const next = new Map(prev);
-      for (const s of speakingParticipants) {
-        next.set(
-          s.identity ?? "unknown",
-          Math.round((s.audioLevel ?? 0) * 255),
-        );
+      // Wipe any identities that vanished so stale bars don't linger.
+      for (const id of next.keys()) {
+        if (id !== participantName && !remoteAudio.levels.has(id)) {
+          next.delete(id);
+        }
+      }
+      for (const [id, lvl] of remoteAudio.levels) {
+        next.set(id, lvl);
       }
       return next;
     });
-  }, [speakingParticipants]);
+  }, [remoteAudio.levels, participantName]);
 
   // Tick the elapsed-time display while recording
   useEffect(() => {
@@ -858,6 +917,7 @@ function RoomContent({
             isBuiltIn={selectedMicIsBuiltIn}
             level={audioLevels.get(participantName) ?? 0}
             status={localStatus}
+            clipping={localClipping}
           />
 
           {remoteParticipants.map((p) => (
@@ -873,6 +933,7 @@ function RoomContent({
               // the host hit record). Remote per-participant status is tracked
               // in #30; until then we show a stable "connected" for remotes.
               status="connected"
+              clipping={remoteAudio.clipping.has(p.identity)}
             />
           ))}
 
