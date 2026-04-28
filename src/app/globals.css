@@ -69,6 +69,17 @@ button, a, [role="button"] {
   100% { transform: scale(1.55); opacity: 0;   }
 }
 
+/* Upload progress bar pulse (active upload) */
+.upload-bar-pulse {
+  animation: upload-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes upload-pulse {
+  0%   { opacity: 1;    }
+  50%  { opacity: 0.55; }
+  100% { opacity: 1;    }
+}
+
 /* Subtle film-grain overlay — pure CSS, no image assets */
 .grain::before {
   content: '';

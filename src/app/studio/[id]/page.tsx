@@ -39,6 +39,8 @@ import {
   smoothLevel,
 } from "@/lib/audio-meter";
 import { FinishRecordingButton } from "@/components/FinishRecordingButton";
+import { useUploadProgress } from "@/hooks/useUploadProgress";
+import { UploadProgressBar } from "@/components/UploadProgressBar";
 
 import { Topbar } from "@/components/ui/Topbar";
 import { VUMeter, DbScale } from "@/components/ui/VUMeter";
@@ -486,7 +488,7 @@ function RoomContent({
   // so a transient peak still flashes instead of vanishing in one rAF.
   const localClipFramesRef = useRef(0);
   const localClipHoldRef = useRef(0);
-  const chunkUploadPromisesRef = useRef(new Set<Promise<void>>());
+  const uploadTracker = useUploadProgress();
 
   const [audioQualityMode, setAudioQualityMode] = useState<AudioQualityMode>("full");
   const [notification, setNotification] = useState<string | null>(null);
@@ -527,18 +529,6 @@ function RoomContent({
     [localParticipant],
   );
 
-  const trackChunkUpload = useCallback((uploadPromise: Promise<void>) => {
-    chunkUploadPromisesRef.current.add(uploadPromise);
-    uploadPromise.finally(() => {
-      chunkUploadPromisesRef.current.delete(uploadPromise);
-    });
-  }, []);
-
-  const waitForChunkUploads = useCallback(async () => {
-    while (chunkUploadPromisesRef.current.size > 0) {
-      await Promise.allSettled(Array.from(chunkUploadPromisesRef.current));
-    }
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -736,19 +726,20 @@ function RoomContent({
         return;
       }
 
+      uploadTracker.reset();
+
       const recorder = new CozyRecorder(streamRef.current);
 
       recorder.onChunk((chunk, index) => {
+        const byteLength = chunk.size;
+        uploadTracker.onChunkRecorded(byteLength);
+
         const uploadPromise = (async () => {
-          try {
-            const url = await getPresignedUploadUrl(sessionId, trackId, index);
-            await uploadChunk(url, chunk);
-          } catch (err) {
-            console.error("Failed to upload chunk:", err);
-          }
+          const url = await getPresignedUploadUrl(sessionId, trackId, index);
+          await uploadChunk(url, chunk);
         })();
 
-        trackChunkUpload(uploadPromise);
+        void uploadTracker.trackUpload(byteLength, uploadPromise);
       });
 
       recorderRef.current = recorder;
@@ -781,7 +772,7 @@ function RoomContent({
       setStudioStateSync,
       showNotification,
       switchAudioQuality,
-      trackChunkUpload,
+      uploadTracker,
     ],
   );
 
@@ -805,9 +796,19 @@ function RoomContent({
       const blob = await recorder.stop();
       const durationMs = Date.now() - startedAt;
 
-      const url = await getPresignedUploadUrl(sessionId, trackId, 9999);
-      await uploadChunk(url, blob);
-      await waitForChunkUploads();
+      // Freeze denominator — recording is done, no more chunks will arrive.
+      uploadTracker.freezeRecorded();
+
+      // Track the final blob upload in the progress meter.
+      const finalBytes = blob.size;
+      uploadTracker.onChunkRecorded(finalBytes);
+      const finalUpload = (async () => {
+        const url = await getPresignedUploadUrl(sessionId, trackId, 9999);
+        await uploadChunk(url, blob);
+      })();
+      void uploadTracker.trackUpload(finalBytes, finalUpload);
+
+      await uploadTracker.waitForUploads();
       await completeUpload(sessionId, trackId, durationMs);
 
       setHasRecorded(true);
@@ -819,7 +820,7 @@ function RoomContent({
       // chunk-upload promise set is drained, regardless of error path. If the
       // happy path above already drained, this is effectively a no-op.
       try {
-        await waitForChunkUploads();
+        await uploadTracker.waitForUploads();
       } catch (drainErr) {
         console.error("Failed while draining chunk uploads:", drainErr);
       }
@@ -830,7 +831,7 @@ function RoomContent({
         console.error("Failed to restore audio quality:", err);
       });
     }
-  }, [sessionId, setStudioStateSync, switchAudioQuality, waitForChunkUploads]);
+  }, [sessionId, setStudioStateSync, switchAudioQuality, uploadTracker]);
 
   // Button handler: broadcast first so remote participants start close to our
   // own start time, then start locally. sessionStartedAt uses our local clock
@@ -883,6 +884,18 @@ function RoomContent({
     return unsub;
   }, [transport, startRecordingLocal, stopRecordingLocal, showNotification]);
 
+
+  // Warn before tab close when uploads are in flight or recording is active.
+  // This is the Layer A fix for #49 — prevents accidental data loss.
+  useEffect(() => {
+    if (!uploadTracker.hasInflight && studioState !== "recording") return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [uploadTracker.hasInflight, studioState]);
 
   useEffect(() => {
     return () => {
@@ -1028,7 +1041,7 @@ function RoomContent({
             <div className="flex justify-center mt-3">
               <FinishRecordingButton
                 sessionId={sessionId}
-                waitForUploads={waitForChunkUploads}
+                waitForUploads={uploadTracker.waitForUploads}
               />
             </div>
           )}
@@ -1115,23 +1128,10 @@ function RoomContent({
 
           <div className="w-10 h-px my-3" style={{ background: "var(--border)" }} />
 
-          {/* Upload indicator — real progress plumbing tracked in #27. */}
-          <div className="w-full px-3 flex flex-col gap-1.5 items-center mb-5">
-            <span className="font-mono text-[9px] text-text-3 tracking-[0.08em]">UPLOAD</span>
-            <div className="w-full h-0.5 rounded-[1px]" style={{ background: "var(--border)" }}>
-              <div
-                className="h-full rounded-[1px]"
-                style={{
-                  width: isUploading ? "30%" : "0%",
-                  background: "var(--amber)",
-                  transition: "width 600ms ease",
-                }}
-              />
-            </div>
-            <span className="font-mono text-[9px] text-text-3">
-              {isUploading ? "in flight" : "—"}
-            </span>
-          </div>
+          <UploadProgressBar
+            progress={uploadTracker.progress}
+            recordingStopped={studioState !== "recording"}
+          />
         </div>
       </div>
     </div>
