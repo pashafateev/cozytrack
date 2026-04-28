@@ -11,13 +11,15 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { RemoteParticipant } from "livekit-client";
+import {
+  CLIP_MIN_FRAMES,
+  CLIP_THRESHOLD,
+  shapeLevel,
+  smoothLevel,
+} from "@/lib/audio-meter";
 
 const POLL_INTERVAL_MS = 100; // ~10 Hz, per the issue.
 
-// "Clipping" here means the receiver-side audioLevel is essentially full-scale.
-// `audioLevel` from inbound-rtp is normalized 0..1; -1 dBFS ≈ 0.891.
-const CLIP_THRESHOLD = 0.891;
-const CLIP_MIN_FRAMES = 2;
 // How many polls we hold the clip indicator after it stops triggering, so a
 // single transient peak still flashes visibly (~400ms at 10Hz).
 const CLIP_HOLD_FRAMES = 4;
@@ -90,6 +92,11 @@ export function useRemoteAudioLevels(
             if (typeof audioLevel === "number") break;
           }
 
+          // Bail out before any ref mutation if the effect was cleaned up
+          // mid-poll (e.g. participants prop changed). Otherwise this stale
+          // poll would race with the new effect's loop on the same refs.
+          if (cancelled) return;
+
           if (typeof audioLevel !== "number") {
             // No fresh stat — fade existing smoothed value toward zero so the
             // meter doesn't appear stuck if a participant goes silent.
@@ -97,11 +104,18 @@ export function useRemoteAudioLevels(
             const decayed = Math.max(0, prev * 0.85);
             smoothedRef.current.set(identity, decayed);
             nextLevels.set(identity, Math.round(decayed));
-            // Drain any clip-hold counter without retriggering.
-            const hold = (clipHoldFramesRef.current.get(identity) ?? 0) - 1;
+            // Drain any clip-hold counter without retriggering. Mirror the
+            // main path: check > 0 first, THEN decrement, so the final held
+            // frame still flashes even when stats happen to be missing.
+            const hold = clipHoldFramesRef.current.get(identity) ?? 0;
             if (hold > 0) {
-              clipHoldFramesRef.current.set(identity, hold);
               nextClipping.add(identity);
+              const remaining = hold - 1;
+              if (remaining > 0) {
+                clipHoldFramesRef.current.set(identity, remaining);
+              } else {
+                clipHoldFramesRef.current.delete(identity);
+              }
             } else {
               clipHoldFramesRef.current.delete(identity);
             }
@@ -109,12 +123,10 @@ export function useRemoteAudioLevels(
             return;
           }
 
-          // Match the local meter's perceptual curve so both look identical:
-          // raise to ~0.6 (compander) then scale to 0..255 like the host side.
-          const shaped = Math.pow(Math.max(0, Math.min(1, audioLevel)), 0.6);
-          const target = shaped * 255;
+          // Match the local meter's perceptual curve so both look identical.
+          const target = shapeLevel(audioLevel);
           const prev = smoothedRef.current.get(identity) ?? 0;
-          const smoothed = prev * 0.7 + target * 0.3;
+          const smoothed = smoothLevel(prev, target);
           smoothedRef.current.set(identity, smoothed);
           nextLevels.set(identity, Math.round(smoothed));
 
