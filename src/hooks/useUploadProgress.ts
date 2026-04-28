@@ -17,13 +17,27 @@ export interface UploadProgress {
   fraction: number;
 }
 
+export interface TrackUploadOptions {
+  /**
+   * If true, rethrow the upload error after recording it in `lastError`.
+   * Use for critical uploads (e.g. final recording.webm) where the caller
+   * needs to abort follow-up actions on failure. Defaults to false so
+   * background chunk uploads don't produce unhandled rejections.
+   */
+  rethrow?: boolean;
+}
+
 export interface UploadTracker {
   /** Current snapshot of upload progress. */
   progress: UploadProgress;
   /** Call when recorder emits a new chunk (before upload starts). */
   onChunkRecorded: (byteLength: number) => void;
   /** Wrap a chunk upload promise so it tracks bytes and in-flight count. */
-  trackUpload: (byteLength: number, uploadPromise: Promise<void>) => Promise<void>;
+  trackUpload: (
+    byteLength: number,
+    uploadPromise: Promise<void>,
+    options?: TrackUploadOptions,
+  ) => Promise<void>;
   /** Freeze the denominator — call when recording stops. */
   freezeRecorded: () => void;
   /** Reset all counters for a new recording session. */
@@ -86,22 +100,36 @@ export function useUploadProgress(): UploadTracker {
   );
 
   const trackUpload = useCallback(
-    (byteLength: number, uploadPromise: Promise<void>): Promise<void> => {
+    (
+      byteLength: number,
+      uploadPromise: Promise<void>,
+      options?: TrackUploadOptions,
+    ): Promise<void> => {
+      const rethrow = options?.rethrow ?? false;
       inFlight.current += 1;
       flush();
 
-      const tracked = uploadPromise
-        .then(() => {
-          uploaded.current += byteLength;
-          // Clear last error on success.
-          setProgress((prev) =>
-            prev.lastError !== null ? { ...prev, lastError: null } : prev,
-          );
-        })
-        .catch((err: unknown) => {
-          const message =
-            err instanceof Error ? err.message : "Upload failed";
-          setProgress((prev) => ({ ...prev, lastError: message }));
+      // Build a tracker promise that always settles successfully so it can
+      // live in `inflightPromises` without producing unhandled rejections —
+      // independent of whether we rethrow to the caller.
+      const settled: Promise<{ ok: true } | { ok: false; err: unknown }> =
+        uploadPromise.then(
+          () => ({ ok: true as const }),
+          (err: unknown) => ({ ok: false as const, err }),
+        );
+
+      const tracked: Promise<void> = settled
+        .then((result) => {
+          if (result.ok) {
+            uploaded.current += byteLength;
+            setProgress((prev) =>
+              prev.lastError !== null ? { ...prev, lastError: null } : prev,
+            );
+          } else {
+            const message =
+              result.err instanceof Error ? result.err.message : "Upload failed";
+            setProgress((prev) => ({ ...prev, lastError: message }));
+          }
         })
         .finally(() => {
           inFlight.current -= 1;
@@ -110,6 +138,21 @@ export function useUploadProgress(): UploadTracker {
         });
 
       inflightPromises.current.add(tracked);
+
+      if (rethrow) {
+        // Caller wants to abort on failure. Wait for tracking bookkeeping to
+        // finish (so `lastError` is set and counters are decremented) before
+        // surfacing the original error.
+        return tracked.then(async () => {
+          const result = await settled;
+          if (!result.ok) {
+            throw result.err instanceof Error
+              ? result.err
+              : new Error("Upload failed");
+          }
+        });
+      }
+
       return tracked;
     },
     [flush],
@@ -123,6 +166,17 @@ export function useUploadProgress(): UploadTracker {
   }, [flush]);
 
   const reset = useCallback(() => {
+    // Defensive: clearing inflightPromises while uploads are still running
+    // would let those promises' .finally drive counters negative when they
+    // settle. Callers must waitForUploads() (or otherwise reach an idle
+    // state) before resetting. The finalizing-state invariant guarantees
+    // this in practice — this guard catches programming mistakes.
+    if (inFlight.current > 0) {
+      console.warn(
+        `useUploadProgress.reset() called with ${inFlight.current} uploads still in flight; ignoring.`,
+      );
+      return;
+    }
     recorded.current = 0;
     uploaded.current = 0;
     inFlight.current = 0;

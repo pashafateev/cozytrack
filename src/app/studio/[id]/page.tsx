@@ -489,6 +489,17 @@ function RoomContent({
   const localClipFramesRef = useRef(0);
   const localClipHoldRef = useRef(0);
   const uploadTracker = useUploadProgress();
+  // Destructure stable callbacks so they can be listed individually in
+  // dependency arrays. `uploadTracker` itself is a fresh object each render,
+  // so depending on the whole tracker would recreate callbacks every render
+  // and force downstream effects to re-subscribe.
+  const {
+    onChunkRecorded: trackerOnChunkRecorded,
+    trackUpload: trackerTrackUpload,
+    freezeRecorded: trackerFreezeRecorded,
+    reset: trackerReset,
+    waitForUploads: trackerWaitForUploads,
+  } = uploadTracker;
 
   const [audioQualityMode, setAudioQualityMode] = useState<AudioQualityMode>("full");
   const [notification, setNotification] = useState<string | null>(null);
@@ -726,20 +737,20 @@ function RoomContent({
         return;
       }
 
-      uploadTracker.reset();
+      trackerReset();
 
       const recorder = new CozyRecorder(streamRef.current);
 
       recorder.onChunk((chunk, index) => {
         const byteLength = chunk.size;
-        uploadTracker.onChunkRecorded(byteLength);
+        trackerOnChunkRecorded(byteLength);
 
         const uploadPromise = (async () => {
           const url = await getPresignedUploadUrl(sessionId, trackId, index);
           await uploadChunk(url, chunk);
         })();
 
-        void uploadTracker.trackUpload(byteLength, uploadPromise);
+        void trackerTrackUpload(byteLength, uploadPromise);
       });
 
       recorderRef.current = recorder;
@@ -772,7 +783,9 @@ function RoomContent({
       setStudioStateSync,
       showNotification,
       switchAudioQuality,
-      uploadTracker,
+      trackerReset,
+      trackerOnChunkRecorded,
+      trackerTrackUpload,
     ],
   );
 
@@ -797,22 +810,29 @@ function RoomContent({
       const durationMs = Date.now() - startedAt;
 
       // Freeze denominator — recording is done, no more chunks will arrive.
-      uploadTracker.freezeRecorded();
+      trackerFreezeRecorded();
 
-      // Track the final blob upload in the progress meter.
+      // The final recording.webm upload is critical: if it fails, we must
+      // NOT call completeUpload (which marks the track complete and lets
+      // the server delete chunk files). Use rethrow so a failure surfaces
+      // here, lastError is set in the tracker (visible in the UI), and
+      // completeUpload is skipped.
       const finalBytes = blob.size;
-      uploadTracker.onChunkRecorded(finalBytes);
+      trackerOnChunkRecorded(finalBytes);
       const finalUpload = (async () => {
         const url = await getPresignedUploadUrl(sessionId, trackId, 9999);
         await uploadChunk(url, blob);
       })();
-      void uploadTracker.trackUpload(finalBytes, finalUpload);
+      await trackerTrackUpload(finalBytes, finalUpload, { rethrow: true });
 
-      await uploadTracker.waitForUploads();
+      // Wait for any background chunk uploads still settling.
+      await trackerWaitForUploads();
       await completeUpload(sessionId, trackId, durationMs);
 
       setHasRecorded(true);
     } catch (err) {
+      // Final upload (or stop()) failed. lastError is already populated by
+      // trackUpload's rethrow path; the recording stays incomplete.
       console.error("Failed to stop recording:", err);
     } finally {
       recorderRef.current = null;
@@ -820,7 +840,7 @@ function RoomContent({
       // chunk-upload promise set is drained, regardless of error path. If the
       // happy path above already drained, this is effectively a no-op.
       try {
-        await uploadTracker.waitForUploads();
+        await trackerWaitForUploads();
       } catch (drainErr) {
         console.error("Failed while draining chunk uploads:", drainErr);
       }
@@ -831,7 +851,15 @@ function RoomContent({
         console.error("Failed to restore audio quality:", err);
       });
     }
-  }, [sessionId, setStudioStateSync, switchAudioQuality, uploadTracker]);
+  }, [
+    sessionId,
+    setStudioStateSync,
+    switchAudioQuality,
+    trackerFreezeRecorded,
+    trackerOnChunkRecorded,
+    trackerTrackUpload,
+    trackerWaitForUploads,
+  ]);
 
   // Button handler: broadcast first so remote participants start close to our
   // own start time, then start locally. sessionStartedAt uses our local clock
