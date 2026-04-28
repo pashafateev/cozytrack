@@ -24,7 +24,7 @@ import { CozyRecorder } from "@/lib/recorder";
 import { getPresignedUploadUrl, uploadChunk, completeUpload } from "@/lib/upload";
 import { getToken, LIVEKIT_URL } from "@/lib/livekit";
 import { useTransport } from "@/lib/transport";
-import { isBuiltInMic } from "@/lib/devices";
+import { isSelectedMicBuiltIn } from "@/lib/devices";
 import { BuiltInMicWarningModal } from "@/components/BuiltInMicWarningModal";
 import {
   MicMonitorToggle,
@@ -1134,7 +1134,7 @@ export default function StudioPage() {
 
     if (
       selectedMicDevice &&
-      isBuiltInMic(selectedMicDevice.label) &&
+      isSelectedMicBuiltIn(mics, selectedMic) &&
       !acknowledgedDevices.has(selectedMic)
     ) {
       setShowMicWarning(true);
@@ -1272,7 +1272,7 @@ export default function StudioPage() {
           participantName={participantName}
           selectedMic={selectedMic}
           selectedMicLabel={selectedMicDevice?.label || undefined}
-          selectedMicIsBuiltIn={selectedMicDevice ? isBuiltInMic(selectedMicDevice.label) : false}
+          selectedMicIsBuiltIn={selectedMicDevice ? isSelectedMicBuiltIn(mics, selectedMic) : false}
           studioState={studioState}
           setStudioState={setStudioState}
           monitorEnabled={monitorEnabled}
