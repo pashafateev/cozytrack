@@ -61,7 +61,9 @@ export function UploadProgressBar({
       >
         <div
           className={`h-full rounded-[2px] transition-[width] duration-500 ease-out${
-            phase === "uploading" ? " upload-bar-pulse" : ""
+            phase === "uploading" && progress.chunksInFlight > 0
+              ? " upload-bar-pulse"
+              : ""
           }`}
           style={{
             width: phase === "idle" ? "0%" : `${Math.max(pct, 2)}%`,

@@ -3,7 +3,7 @@
 import { useCallback, useRef, useState } from "react";
 
 export interface UploadProgress {
-  /** Total bytes from recorder chunks emitted so far. */
+  /** Total bytes enqueued for upload (recorder chunks + any final merged blobs). */
   bytesRecorded: number;
   /** Total bytes acknowledged by S3 (successful PUT responses). */
   bytesUploaded: number;
@@ -159,9 +159,10 @@ export function useUploadProgress(): UploadTracker {
   );
 
   const freezeRecorded = useCallback(() => {
-    // Denominator is already whatever recorded.current is — just flush to
-    // ensure state is in sync. After this, no more onChunkRecorded calls
-    // should arrive, so the denominator freezes naturally.
+    // Flushes current recorded-byte counters into React state so progress UI
+    // is accurate at the moment of call. Subsequent `onChunkRecorded` calls
+    // (e.g. for the final merged blob) are still permitted and will continue
+    // to grow the denominator.
     flush();
   }, [flush]);
 
