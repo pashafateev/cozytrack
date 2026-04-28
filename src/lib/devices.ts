@@ -37,12 +37,14 @@ export function resolveDefaultDevice(
   const match = selected.label.match(/^Default\s*[-–—]\s*(.+)$/i);
   if (match) {
     const underlyingName = match[1].trim().toLowerCase();
-    const byLabel = devices.find(
-      (d) =>
-        d.deviceId !== "default" &&
-        d.label.toLowerCase().includes(underlyingName),
-    );
-    if (byLabel) return byLabel;
+    if (underlyingName) {
+      const byLabel = devices.find(
+        (d) =>
+          d.deviceId !== "default" &&
+          d.label.toLowerCase().endsWith(underlyingName),
+      );
+      if (byLabel) return byLabel;
+    }
   }
 
   return selected;

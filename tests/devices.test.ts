@@ -73,6 +73,16 @@ describe("resolveDefaultDevice", () => {
     const resolved = resolveDefaultDevice(devices, "default");
     expect(resolved?.deviceId).toBe("default");
   });
+
+  it("does not match an unrelated device when the parsed fallback label is empty", () => {
+    const devices = [
+      dev("default", "Default - ", ""),
+      dev("abc123", "Focusrite Scarlett 2i2", ""),
+      dev("xyz789", "MacBook Pro Microphone", ""),
+    ];
+    const resolved = resolveDefaultDevice(devices, "default");
+    expect(resolved?.deviceId).toBe("default");
+  });
 });
 
 describe("isSelectedMicBuiltIn", () => {
