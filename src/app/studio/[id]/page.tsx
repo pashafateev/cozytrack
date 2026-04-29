@@ -20,6 +20,7 @@ import {
 } from "@livekit/components-react";
 import { v4 as uuidv4 } from "uuid";
 import { CozyRecorder } from "@/lib/recorder";
+import { forceMonoStream, getTrackChannelCount } from "@/lib/audio-downmix";
 import { getPresignedUploadUrl, uploadChunk, completeUpload } from "@/lib/upload";
 import { getToken, LIVEKIT_URL } from "@/lib/livekit";
 import { useTransport } from "@/lib/transport";
@@ -452,7 +453,15 @@ function RoomContent({
   const transport = useTransport();
   const recorderRef = useRef<CozyRecorder | null>(null);
   const trackIdRef = useRef<string>("");
+  // Raw stream straight from getUserMedia — retained so we can stop the
+  // underlying device tracks on teardown.
+  const rawStreamRef = useRef<MediaStream | null>(null);
+  // Mono-forced stream (post-downmix) — what the recorder, level meter, and
+  // sidetone monitor actually consume. See `forceMonoStream` in
+  // `@/lib/audio-downmix` for why we always downmix instead of trusting
+  // `getUserMedia` constraints.
   const streamRef = useRef<MediaStream | null>(null);
+  const downmixDisposeRef = useRef<(() => void) | null>(null);
   const [recordingStream, setRecordingStream] = useState<MediaStream | null>(null);
   // Mirror of studioState so callbacks invoked from transport subscriptions
   // (which close over the value at subscription time) can check current state
@@ -546,7 +555,7 @@ function RoomContent({
 
     async function getRecordingStream() {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
+        const rawStream = await navigator.mediaDevices.getUserMedia({
           audio: {
             deviceId: selectedMic ? { exact: selectedMic } : undefined,
             echoCancellation: false,
@@ -558,13 +567,45 @@ function RoomContent({
         });
 
         if (cancelled) {
-          stream.getTracks().forEach((track) => track.stop());
+          rawStream.getTracks().forEach((track) => track.stop());
           return;
         }
 
-        streamRef.current?.getTracks().forEach((track) => track.stop());
-        streamRef.current = stream;
-        setRecordingStream(stream);
+        // Tear down any prior stream/downmix before installing the new one.
+        downmixDisposeRef.current?.();
+        downmixDisposeRef.current = null;
+        rawStreamRef.current?.getTracks().forEach((track) => track.stop());
+
+        // Force the recording stream to a single channel even when the
+        // browser hands back a 2-channel track despite our `channelCount: 1`
+        // constraint (issue #46). Logs a warning when we observe the mismatch
+        // so we can spot affected devices in the field.
+        const [rawTrack] = rawStream.getAudioTracks();
+        const reportedChannels = rawTrack ? getTrackChannelCount(rawTrack) : undefined;
+        if (reportedChannels !== undefined && reportedChannels > 1) {
+          console.warn(
+            `Recording: device returned ${reportedChannels}-channel track despite mono request; downmixing to mono.`,
+          );
+        }
+
+        let monoStream: MediaStream;
+        let dispose: (() => void) | null = null;
+        try {
+          const result = forceMonoStream(rawStream);
+          monoStream = result.stream;
+          dispose = result.dispose;
+        } catch (err) {
+          // Web Audio unavailable — fall back to the raw stream. The
+          // recorder will still encode whatever the device returned, but at
+          // least the rest of the UI keeps working.
+          console.error("Recording: forceMonoStream failed; using raw stream.", err);
+          monoStream = rawStream;
+        }
+
+        rawStreamRef.current = rawStream;
+        streamRef.current = monoStream;
+        downmixDisposeRef.current = dispose;
+        setRecordingStream(monoStream);
       } catch (err) {
         console.error("Failed to get recording stream:", err);
       }
@@ -574,7 +615,10 @@ function RoomContent({
 
     return () => {
       cancelled = true;
-      streamRef.current?.getTracks().forEach((track) => track.stop());
+      downmixDisposeRef.current?.();
+      downmixDisposeRef.current = null;
+      rawStreamRef.current?.getTracks().forEach((track) => track.stop());
+      rawStreamRef.current = null;
       streamRef.current = null;
       setRecordingStream(null);
     };
@@ -927,6 +971,11 @@ function RoomContent({
 
   useEffect(() => {
     return () => {
+      downmixDisposeRef.current?.();
+      downmixDisposeRef.current = null;
+      if (rawStreamRef.current) {
+        rawStreamRef.current.getTracks().forEach((t) => t.stop());
+      }
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
       }
