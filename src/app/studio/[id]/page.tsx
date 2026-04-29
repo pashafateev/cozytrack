@@ -41,6 +41,7 @@ import {
   IcoLink,
   IcoMic,
   IcoPlus,
+  IcoX,
 } from "@/components/ui/Icon";
 
 // ---------- Types ----------
@@ -68,6 +69,48 @@ function formatElapsed(totalMs: number): string {
   const m = Math.floor((totalSec % 3600) / 60).toString().padStart(2, "0");
   const s = (totalSec % 60).toString().padStart(2, "0");
   return `${h}:${m}:${s}`;
+}
+
+function isMobileBrowser(navigatorInfo: Navigator): boolean {
+  const ua = navigatorInfo.userAgent;
+  const looksLikeModernIpad =
+    navigatorInfo.platform === "MacIntel" && navigatorInfo.maxTouchPoints > 1;
+
+  return /iPhone|iPad|iPod|Android/i.test(ua) || looksLikeModernIpad;
+}
+
+function MobileBrowserWarningBanner({
+  onDismiss,
+}: {
+  onDismiss: () => void;
+}) {
+  return (
+    <div
+      className="sticky top-[52px] z-40 flex items-start gap-3 px-5 py-3 border-b"
+      style={{
+        background: "rgba(232,168,48,0.09)",
+        borderBottomColor: "rgba(232,168,48,0.22)",
+      }}
+    >
+      <span className="mt-0.5 flex-shrink-0">
+        <IcoAlert size={15} color="var(--warn)" />
+      </span>
+      <p className="flex-1 text-[12px] leading-5 text-warn">
+        <span className="font-semibold">Mobile browser detected.</span>{" "}
+        Audio quality may be reduced and recording may fail if you switch apps
+        or your screen locks. For best results, join from a laptop or desktop
+        browser.
+      </p>
+      <button
+        type="button"
+        onClick={onDismiss}
+        aria-label="Dismiss mobile browser warning"
+        className="mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-[4px] text-warn/70 hover:bg-warn/10 hover:text-warn"
+      >
+        <IcoX size={14} color="currentColor" />
+      </button>
+    </div>
+  );
 }
 
 // ---------- Participant Strip ----------
@@ -772,10 +815,16 @@ export default function StudioPage() {
   const [connecting, setConnecting] = useState(false);
   const [monitorEnabled, setMonitorEnabled] = useState(false);
   const [monitorVolume, setMonitorVolume] = useState(70);
+  const [isMobile, setIsMobile] = useState(false);
+  const [mobileWarningDismissed, setMobileWarningDismissed] = useState(false);
 
   useEffect(() => {
     setMonitorEnabled(getStoredMonitorEnabled());
     setMonitorVolume(getStoredMonitorVolume());
+  }, []);
+
+  useEffect(() => {
+    setIsMobile(isMobileBrowser(navigator));
   }, []);
 
   const [showMicWarning, setShowMicWarning] = useState(false);
@@ -897,6 +946,11 @@ export default function StudioPage() {
     return (
       <div className="animate-page-enter min-h-screen bg-bg flex flex-col">
         <Topbar />
+        {isMobile && !mobileWarningDismissed && (
+          <MobileBrowserWarningBanner
+            onDismiss={() => setMobileWarningDismissed(true)}
+          />
+        )}
         {showMicWarning && (
           <BuiltInMicWarningModal
             onAcknowledge={() => {
@@ -993,6 +1047,11 @@ export default function StudioPage() {
   return (
     <div className="animate-page-enter min-h-screen bg-bg flex flex-col">
       <Topbar session={`Session ${sessionId.slice(0, 8)}…`} />
+      {isMobile && !mobileWarningDismissed && (
+        <MobileBrowserWarningBanner
+          onDismiss={() => setMobileWarningDismissed(true)}
+        />
+      )}
       <LiveKitRoom
         serverUrl={LIVEKIT_URL}
         token={token}
