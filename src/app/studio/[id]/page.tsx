@@ -572,9 +572,19 @@ function RoomContent({
         }
 
         // Tear down any prior stream/downmix before installing the new one.
+        // Both raw and mono streams must be stopped: AudioContext.close() does
+        // not reliably end the destination track on every browser, so the
+        // previous mono MediaStreamTrack can otherwise outlive the switch.
+        // The guard prevents a double-stop in the fallback path where
+        // forceMonoStream failed and monoStream === rawStream.
+        const previousRawStream = rawStreamRef.current;
+        const previousStream = streamRef.current;
         downmixDisposeRef.current?.();
         downmixDisposeRef.current = null;
-        rawStreamRef.current?.getTracks().forEach((track) => track.stop());
+        previousRawStream?.getTracks().forEach((track) => track.stop());
+        if (previousStream && previousStream !== previousRawStream) {
+          previousStream.getTracks().forEach((track) => track.stop());
+        }
 
         // Force the recording stream to a single channel even when the
         // browser hands back a 2-channel track despite our `channelCount: 1`
@@ -615,9 +625,17 @@ function RoomContent({
 
     return () => {
       cancelled = true;
+      // Mirror the on-switch teardown: stop both raw and mono tracks. The
+      // guard avoids a double-stop in the fallback path where
+      // forceMonoStream failed and streamRef === rawStreamRef.
+      const previousRawStream = rawStreamRef.current;
+      const previousStream = streamRef.current;
       downmixDisposeRef.current?.();
       downmixDisposeRef.current = null;
-      rawStreamRef.current?.getTracks().forEach((track) => track.stop());
+      previousRawStream?.getTracks().forEach((track) => track.stop());
+      if (previousStream && previousStream !== previousRawStream) {
+        previousStream.getTracks().forEach((track) => track.stop());
+      }
       rawStreamRef.current = null;
       streamRef.current = null;
       setRecordingStream(null);
@@ -973,11 +991,15 @@ function RoomContent({
     return () => {
       downmixDisposeRef.current?.();
       downmixDisposeRef.current = null;
-      if (rawStreamRef.current) {
-        rawStreamRef.current.getTracks().forEach((t) => t.stop());
+      const rawStream = rawStreamRef.current;
+      const monoStream = streamRef.current;
+      if (rawStream) {
+        rawStream.getTracks().forEach((t) => t.stop());
       }
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
+      // Guard against double-stopping when the fallback path made
+      // monoStream === rawStream.
+      if (monoStream && monoStream !== rawStream) {
+        monoStream.getTracks().forEach((t) => t.stop());
       }
     };
   }, []);

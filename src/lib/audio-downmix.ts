@@ -75,7 +75,23 @@ export function forceMonoStream(
       } catch {
         // Already disconnected — ignore.
       }
-      void ctx.close();
+      // Stop the synthetic destination track so callers that drop their
+      // reference don't leak a live MediaStreamTrack waiting for `ended`.
+      // AudioContext.close() alone does not reliably end the track on every
+      // browser.
+      for (const track of destination.stream.getTracks()) {
+        try {
+          track.stop();
+        } catch {
+          // Already stopped or unavailable — ignore.
+        }
+      }
+      // close() can reject on already-closed/suspended contexts or browser
+      // quirks. Swallow so dispose stays best-effort and silent — an
+      // unhandled rejection here would surface in app-level error logging.
+      void ctx.close().catch(() => {
+        // Ignore close failures.
+      });
     },
   };
 }

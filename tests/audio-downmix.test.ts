@@ -27,6 +27,11 @@ function makeNode(): MockNode {
 class MockMediaStream {
   // Just a tag so identity comparisons work.
   readonly _kind = "stream" as const;
+  // Default implementation — individual tests may overwrite this to inject
+  // spy tracks.
+  getTracks(): MediaStreamTrack[] {
+    return [];
+  }
 }
 
 class MockDestinationNode {
@@ -42,10 +47,18 @@ class MockDestinationNode {
   }
 }
 
+type MockAudioCtxInstance = {
+  closed: boolean;
+  createMediaStreamSource: ReturnType<typeof vi.fn>;
+  createGain: ReturnType<typeof vi.fn>;
+  close: ReturnType<typeof vi.fn>;
+};
+
 function makeMockAudioContextCtor() {
   const sourceNode = makeNode();
   const gainNode = makeNode();
   const destinationCalls: Array<{ args: unknown[]; instance: MockDestinationNode }> = [];
+  const audioContextInstances: MockAudioCtxInstance[] = [];
 
   // Real class so `new ...()` works; spy via a wrapper that records the call.
   function DestinationCtorImpl(this: MockDestinationNode, ctx: unknown, opts?: { channelCount?: number }) {
@@ -67,6 +80,9 @@ function makeMockAudioContextCtor() {
       this.closed = true;
       return Promise.resolve();
     });
+    constructor() {
+      audioContextInstances.push(this as MockAudioCtxInstance);
+    }
   }
 
   return {
@@ -75,6 +91,7 @@ function makeMockAudioContextCtor() {
     gainNode,
     DestinationCtor,
     destinationCalls,
+    audioContextInstances,
   };
 }
 
@@ -125,9 +142,12 @@ describe("forceMonoStream", () => {
     expect(captured.sourceNode.connect).toHaveBeenCalledTimes(1);
     expect(captured.sourceNode.connect.mock.calls[0][0]).toBe(captured.gainNode);
     expect(captured.gainNode.connect).toHaveBeenCalledTimes(1);
-    // destination instance is the single argument captured by gainNode.connect.
-    const destArg = captured.gainNode.connect.mock.calls[0][0];
-    expect(destArg).toBeDefined();
+    // gain must connect to the actual destination instance — asserting the
+    // arg is merely defined would let mis-wirings (e.g. gain -> source -> dest)
+    // slip through.
+    expect(captured.gainNode.connect.mock.calls[0][0]).toBe(
+      captured.destinationCalls[0].instance,
+    );
   });
 
   it("returned stream comes from the destination node", () => {
@@ -141,15 +161,60 @@ describe("forceMonoStream", () => {
   it("dispose() disconnects nodes and closes the context exactly once", () => {
     const fakeStream = {} as MediaStream;
     const { dispose } = forceMonoStream(fakeStream, captured.Ctor);
+    const audioCtx = captured.audioContextInstances[0];
 
     dispose();
     expect(captured.sourceNode.disconnect).toHaveBeenCalledTimes(1);
     expect(captured.gainNode.disconnect).toHaveBeenCalledTimes(1);
+    expect(audioCtx.close).toHaveBeenCalledTimes(1);
 
     // Idempotent — a second call must not double-close.
     dispose();
     expect(captured.sourceNode.disconnect).toHaveBeenCalledTimes(1);
     expect(captured.gainNode.disconnect).toHaveBeenCalledTimes(1);
+    expect(audioCtx.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("dispose() stops the synthetic destination stream tracks", () => {
+    const fakeStream = {} as MediaStream;
+    const stopSpy = vi.fn();
+    const fakeTrack = { stop: stopSpy } as unknown as MediaStreamTrack;
+
+    const { dispose } = forceMonoStream(fakeStream, captured.Ctor);
+    // Surface a stoppable track on the destination's MediaStream. dispose()
+    // hasn't been called yet, so patching now is safe — the closure reads
+    // destination.stream.getTracks() lazily inside dispose.
+    const destInstance = captured.destinationCalls[0].instance;
+    (destInstance.stream as unknown as { getTracks: () => MediaStreamTrack[] })
+      .getTracks = () => [fakeTrack];
+
+    dispose();
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+
+    // Idempotent — calling dispose again must not re-stop.
+    dispose();
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("dispose() swallows rejections from ctx.close()", async () => {
+    const fakeStream = {} as MediaStream;
+    // Override Ctor so close() rejects.
+    class RejectingCtx {
+      closed = false;
+      createMediaStreamSource = vi.fn().mockReturnValue(captured.sourceNode);
+      createGain = vi.fn().mockReturnValue(captured.gainNode);
+      close = vi.fn().mockRejectedValue(new Error("already closed"));
+    }
+    const { dispose } = forceMonoStream(
+      fakeStream,
+      RejectingCtx as unknown as typeof AudioContext,
+    );
+
+    // If dispose did not catch, this would log an unhandled rejection.
+    expect(() => dispose()).not.toThrow();
+    // Flush microtasks so the rejected promise settles before the test ends.
+    await Promise.resolve();
+    await Promise.resolve();
   });
 
   it("throws when no AudioContext is available", () => {
