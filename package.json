@@ -2,18 +2,23 @@
   "name": "cozytrack",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
   "scripts": {
     "dev": "bash ./scripts/check-aws-auth.sh && next dev -p 3001",
     "dev:local": "docker compose up -d && npm run db:push && npm run dev",
     "init:local": "npm run reset:local && npm run dev",
     "reset:local": "bash ./scripts/reset-local.sh",
     "build": "next build",
+    "vercel-build": "if [ \"$VERCEL_ENV\" = \"production\" ]; then prisma migrate deploy; fi && next build",
     "start": "next start",
     "postinstall": "prisma generate",
     "lint": "next lint",
     "db:migrate": "prisma migrate dev",
     "db:generate": "prisma generate",
-    "db:push": "prisma db push"
+    "db:push": "prisma db push",
+    "test": "vitest run"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",
@@ -35,11 +40,13 @@
     "@types/react-dom": "^19.0.0",
     "@types/recordrtc": "^5.6.0",
     "@types/uuid": "^10.0.0",
+    "@vitest/coverage-v8": "^4.1.5",
     "eslint": "^9.0.0",
     "eslint-config-next": "^15.0.0",
     "postcss": "^8.4.0",
     "prisma": "^6.0.0",
     "tailwindcss": "^3.4.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.5"
   }
 }

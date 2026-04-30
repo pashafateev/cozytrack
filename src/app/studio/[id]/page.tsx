@@ -17,14 +17,14 @@ import {
   RoomAudioRenderer,
   useRemoteParticipants,
   useLocalParticipant,
-  useSpeakingParticipants,
 } from "@livekit/components-react";
 import { v4 as uuidv4 } from "uuid";
 import { CozyRecorder } from "@/lib/recorder";
+import { forceMonoStream, getTrackChannelCount } from "@/lib/audio-downmix";
 import { getPresignedUploadUrl, uploadChunk, completeUpload } from "@/lib/upload";
 import { getToken, LIVEKIT_URL } from "@/lib/livekit";
 import { useTransport } from "@/lib/transport";
-import { isBuiltInMic } from "@/lib/devices";
+import { isSelectedMicBuiltIn } from "@/lib/devices";
 import { BuiltInMicWarningModal } from "@/components/BuiltInMicWarningModal";
 import {
   MicMonitorToggle,
@@ -32,6 +32,16 @@ import {
   getStoredMonitorVolume,
 } from "@/components/MicMonitorToggle";
 import { useMicMonitor } from "@/hooks/useMicMonitor";
+import { useRemoteAudioLevels } from "@/hooks/useRemoteAudioLevels";
+import {
+  CLIP_MIN_FRAMES,
+  CLIP_THRESHOLD,
+  SHAPING_EXPONENT,
+  smoothLevel,
+} from "@/lib/audio-meter";
+import { FinishRecordingButton } from "@/components/FinishRecordingButton";
+import { useUploadProgress } from "@/hooks/useUploadProgress";
+import { UploadProgressBar } from "@/components/UploadProgressBar";
 
 import { Topbar } from "@/components/ui/Topbar";
 import { VUMeter, DbScale } from "@/components/ui/VUMeter";
@@ -46,7 +56,7 @@ import {
 
 // ---------- Types ----------
 
-type StudioState = "prejoin" | "connected" | "recording";
+type StudioState = "prejoin" | "connected" | "recording" | "finalizing";
 type AudioQualityMode = "full" | "bandwidth-saving";
 
 // ---------- Audio Quality Presets ----------
@@ -122,6 +132,7 @@ interface ParticipantStripProps {
   isBuiltIn: boolean;
   level: number; // 0..255
   status: Status;
+  clipping?: boolean;
 }
 
 function ParticipantStrip({
@@ -131,6 +142,7 @@ function ParticipantStrip({
   isBuiltIn,
   level,
   status,
+  clipping = false,
 }: ParticipantStripProps) {
   const normalized = Math.max(0, Math.min(1, level / 255));
   return (
@@ -138,7 +150,9 @@ function ParticipantStrip({
       className="rounded-lg px-4 py-3.5 border flex flex-col gap-2.5"
       style={{
         background: "var(--card)",
-        borderColor: "var(--border)",
+        borderColor: clipping ? "var(--rec)" : "var(--border)",
+        boxShadow: clipping ? "0 0 0 1px var(--rec), 0 0 12px rgba(232,80,80,0.45)" : undefined,
+        transition: "border-color 80ms ease, box-shadow 80ms ease",
       }}
     >
       <div className="flex items-center gap-2.5">
@@ -178,6 +192,21 @@ function ParticipantStrip({
                 <IcoAlert size={11} color="var(--warn)" />
               </span>
             )}
+            {clipping && (
+              <span
+                title="Audio is clipping — ask the talker to back off the mic or lower input gain"
+                aria-label="Audio is clipping"
+                className="inline-flex items-center font-mono text-[10px] font-semibold px-1.5 py-0.5 rounded-[4px]"
+                style={{
+                  background: "rgba(232,80,80,0.16)",
+                  color: "var(--rec)",
+                  border: "1px solid rgba(232,80,80,0.3)",
+                  letterSpacing: "0.04em",
+                }}
+              >
+                CLIP
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-1 text-[11px] text-text-3 mt-0.5">
             <IcoMic size={10} color="currentColor" />
@@ -192,8 +221,249 @@ function ParticipantStrip({
   );
 }
 
+// ---------- Invite Cohost Tile ----------
+
+// Host-only tile. Clicking mints a fresh invite URL via the session's invite
+// endpoint, copies it to the clipboard, and shows a modal so the host can
+// re-copy or see the expiry. Each click mints a new token — we don't persist
+// the last one; it's cheap and keeps the UI stateless across reloads.
+function InviteCohostTile({ sessionId }: { sessionId: string }) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [invite, setInvite] = useState<{
+    url: string;
+    expiresInSeconds: number;
+  } | null>(null);
+  const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
+
+  async function onClick() {
+    if (pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/invite`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setError(body.error ?? "Failed to create invite");
+        return;
+      }
+      const body: { url: string; expiresInSeconds: number } = await res.json();
+      setInvite(body);
+      try {
+        await navigator.clipboard.writeText(body.url);
+        setCopyState("copied");
+      } catch {
+        setCopyState("idle");
+      }
+    } catch {
+      setError("Network error");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={pending}
+        className="rounded-lg px-4 py-3.5 flex items-center gap-3 border border-dashed hover:bg-card/40 focus:outline-none focus:ring-1 focus:ring-[var(--border-hi)] transition-colors disabled:opacity-60 disabled:cursor-wait text-left"
+        style={{ borderColor: "var(--border)" }}
+        title="Generate a shareable invite link for a cohost"
+      >
+        <div
+          className="w-8 h-8 rounded-full flex items-center justify-center border border-dashed"
+          style={{ borderColor: "var(--border-hi)" }}
+        >
+          <IcoPlus size={14} color="var(--text-3)" />
+        </div>
+        <span className="text-[13px] text-text-2">
+          {pending ? "Generating invite…" : "Invite a cohost…"}
+        </span>
+        <div className="ml-auto">
+          <IcoLink size={13} color="var(--text-3)" />
+        </div>
+      </button>
+      {error && (
+        <div className="text-[11px] text-red-400 px-1" role="alert">
+          {error}
+        </div>
+      )}
+      {invite && (
+        <InviteLinkModal
+          url={invite.url}
+          expiresInSeconds={invite.expiresInSeconds}
+          initialCopyState={copyState}
+          onClose={() => {
+            setInvite(null);
+            setCopyState("idle");
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+function InviteLinkModal({
+  url,
+  expiresInSeconds,
+  initialCopyState,
+  onClose,
+}: {
+  url: string;
+  expiresInSeconds: number;
+  initialCopyState: "idle" | "copied";
+  onClose: () => void;
+}) {
+  const [copyState, setCopyState] = useState<"idle" | "copied">(
+    initialCopyState,
+  );
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const container = dialogRef.current;
+      if (!container) return;
+
+      const focusable = Array.from(
+        container.querySelectorAll<HTMLElement>("button, input, a[href]"),
+      ).filter((el) => !el.hasAttribute("disabled"));
+      if (focusable.length === 0) return;
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+
+      if (e.shiftKey) {
+        if (active === first || !container.contains(active)) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else {
+        if (active === last || !container.contains(active)) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  // Focus the first focusable element on open so keyboard users start inside
+  // the dialog rather than on whatever was focused on the page behind it.
+  useEffect(() => {
+    const container = dialogRef.current;
+    if (!container) return;
+    const first = container.querySelector<HTMLElement>(
+      "button, input, a[href]",
+    );
+    first?.focus();
+  }, []);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopyState("copied");
+    } catch {
+      // Clipboard can fail on insecure origins; the URL is still visible.
+    }
+  }
+
+  // Use ceil so we never overstate validity. The token may expire sooner than
+  // the rounded hour figure would suggest, hence "up to".
+  const hours = Math.max(1, Math.ceil(expiresInSeconds / 3600));
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4"
+      onClick={onClose}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="invite-link-title"
+        onClick={(e) => e.stopPropagation()}
+        className="max-w-md w-full rounded-xl border p-6 shadow-2xl space-y-5"
+        style={{ background: "var(--card)", borderColor: "var(--border-hi)" }}
+      >
+        <div>
+          <h2
+            id="invite-link-title"
+            className="text-lg font-semibold text-text"
+          >
+            Invite a cohost
+          </h2>
+          <p className="text-sm text-text-2 mt-1.5">
+            Share this link. Anyone who opens it can join this session; it
+            expires in up to {hours}h.
+          </p>
+        </div>
+        <div
+          className="rounded-md border px-3 py-2 text-[11px] font-mono text-text-2 break-all select-all"
+          style={{ background: "var(--bg)", borderColor: "var(--border)" }}
+        >
+          {url}
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-[11px] text-text-3">
+            {copyState === "copied" ? "Copied to clipboard" : ""}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-[12px] px-3 py-1.5 rounded-md border hover:bg-card/50"
+              style={{ borderColor: "var(--border)", color: "var(--text-2)" }}
+            >
+              Close
+            </button>
+            <button
+              type="button"
+              onClick={copy}
+              className="text-[12px] px-3 py-1.5 rounded-md font-medium"
+              style={{ background: "var(--amber)", color: "var(--bg)" }}
+            >
+              {copyState === "copied" ? "Copy again" : "Copy link"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------- Room Content (inside LiveKitRoom) ----------
 
+/**
+ * Recording state machine
+ * -----------------------
+ *
+ *   connected  →  recording  →  finalizing  →  connected
+ *                                   ↑
+ *                            start blocked here
+ *
+ * Hard invariant: cannot start a new recording while in `finalizing`.
+ *
+ * - connected:  no active recording. Record button enabled.
+ * - recording:  actively capturing. Elapsed timer ticks. Record button shows Stop.
+ * - finalizing: capture stopped, draining/uploading remaining chunks. Timer frozen
+ *               at stop value. Record button disabled.
+ *               Transitions to `connected` when uploads drain (success or error).
+ *
+ * This is the client-side projection of the server's recording lifecycle
+ * (see issue #60 for the broader server-owned-lifecycle plan; #61 for this
+ * specific design).
+ */
 function RoomContent({
   sessionId,
   participantName,
@@ -206,6 +476,7 @@ function RoomContent({
   monitorVolume,
   onMonitorEnabledChange,
   onMonitorVolumeChange,
+  isHost,
 }: {
   sessionId: string;
   participantName: string;
@@ -218,14 +489,22 @@ function RoomContent({
   monitorVolume: number;
   onMonitorEnabledChange: (enabled: boolean) => void;
   onMonitorVolumeChange: (volume: number) => void;
+  isHost: boolean;
 }) {
   const remoteParticipants = useRemoteParticipants();
-  const speakingParticipants = useSpeakingParticipants();
   const { localParticipant } = useLocalParticipant();
   const transport = useTransport();
   const recorderRef = useRef<CozyRecorder | null>(null);
   const trackIdRef = useRef<string>("");
+  // Raw stream straight from getUserMedia — retained so we can stop the
+  // underlying device tracks on teardown.
+  const rawStreamRef = useRef<MediaStream | null>(null);
+  // Mono-forced stream (post-downmix) — what the recorder, level meter, and
+  // sidetone monitor actually consume. See `forceMonoStream` in
+  // `@/lib/audio-downmix` for why we always downmix instead of trusting
+  // `getUserMedia` constraints.
   const streamRef = useRef<MediaStream | null>(null);
+  const downmixDisposeRef = useRef<(() => void) | null>(null);
   const [recordingStream, setRecordingStream] = useState<MediaStream | null>(null);
   // Mirror of studioState so callbacks invoked from transport subscriptions
   // (which close over the value at subscription time) can check current state
@@ -252,15 +531,32 @@ function RoomContent({
   useMicMonitor({ stream: recordingStream, enabled: monitorEnabled, volume: monitorVolume });
 
   const [audioLevels, setAudioLevels] = useState<Map<string, number>>(new Map());
+  const [localClipping, setLocalClipping] = useState(false);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animFrameRef = useRef<number>(0);
   const recordingStartRef = useRef<number>(0);
   const localLevelRef = useRef(0);
-  const chunkUploadPromisesRef = useRef(new Set<Promise<void>>());
+  // Tracks consecutive clip frames + remaining hold ticks for the local meter,
+  // so a transient peak still flashes instead of vanishing in one rAF.
+  const localClipFramesRef = useRef(0);
+  const localClipHoldRef = useRef(0);
+  const uploadTracker = useUploadProgress();
+  // Destructure stable callbacks so they can be listed individually in
+  // dependency arrays. `uploadTracker` itself is a fresh object each render,
+  // so depending on the whole tracker would recreate callbacks every render
+  // and force downstream effects to re-subscribe.
+  const {
+    onChunkRecorded: trackerOnChunkRecorded,
+    trackUpload: trackerTrackUpload,
+    freezeRecorded: trackerFreezeRecorded,
+    reset: trackerReset,
+    waitForUploads: trackerWaitForUploads,
+  } = uploadTracker;
 
   const [audioQualityMode, setAudioQualityMode] = useState<AudioQualityMode>("full");
   const [notification, setNotification] = useState<string | null>(null);
   const notificationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [hasRecorded, setHasRecorded] = useState(false);
 
   // Elapsed recording timer
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -296,25 +592,13 @@ function RoomContent({
     [localParticipant],
   );
 
-  const trackChunkUpload = useCallback((uploadPromise: Promise<void>) => {
-    chunkUploadPromisesRef.current.add(uploadPromise);
-    uploadPromise.finally(() => {
-      chunkUploadPromisesRef.current.delete(uploadPromise);
-    });
-  }, []);
-
-  const waitForChunkUploads = useCallback(async () => {
-    while (chunkUploadPromisesRef.current.size > 0) {
-      await Promise.allSettled(Array.from(chunkUploadPromisesRef.current));
-    }
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
 
     async function getRecordingStream() {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
+        const rawStream = await navigator.mediaDevices.getUserMedia({
           audio: {
             deviceId: selectedMic ? { exact: selectedMic } : undefined,
             echoCancellation: false,
@@ -326,13 +610,55 @@ function RoomContent({
         });
 
         if (cancelled) {
-          stream.getTracks().forEach((track) => track.stop());
+          rawStream.getTracks().forEach((track) => track.stop());
           return;
         }
 
-        streamRef.current?.getTracks().forEach((track) => track.stop());
-        streamRef.current = stream;
-        setRecordingStream(stream);
+        // Tear down any prior stream/downmix before installing the new one.
+        // Both raw and mono streams must be stopped: AudioContext.close() does
+        // not reliably end the destination track on every browser, so the
+        // previous mono MediaStreamTrack can otherwise outlive the switch.
+        // The guard prevents a double-stop in the fallback path where
+        // forceMonoStream failed and monoStream === rawStream.
+        const previousRawStream = rawStreamRef.current;
+        const previousStream = streamRef.current;
+        downmixDisposeRef.current?.();
+        downmixDisposeRef.current = null;
+        previousRawStream?.getTracks().forEach((track) => track.stop());
+        if (previousStream && previousStream !== previousRawStream) {
+          previousStream.getTracks().forEach((track) => track.stop());
+        }
+
+        // Force the recording stream to a single channel even when the
+        // browser hands back a 2-channel track despite our `channelCount: 1`
+        // constraint (issue #46). Logs a warning when we observe the mismatch
+        // so we can spot affected devices in the field.
+        const [rawTrack] = rawStream.getAudioTracks();
+        const reportedChannels = rawTrack ? getTrackChannelCount(rawTrack) : undefined;
+        if (reportedChannels !== undefined && reportedChannels > 1) {
+          console.warn(
+            `Recording: device returned ${reportedChannels}-channel track despite mono request; downmixing to mono.`,
+          );
+        }
+
+        let monoStream: MediaStream;
+        let dispose: (() => void) | null = null;
+        try {
+          const result = forceMonoStream(rawStream);
+          monoStream = result.stream;
+          dispose = result.dispose;
+        } catch (err) {
+          // Web Audio unavailable — fall back to the raw stream. The
+          // recorder will still encode whatever the device returned, but at
+          // least the rest of the UI keeps working.
+          console.error("Recording: forceMonoStream failed; using raw stream.", err);
+          monoStream = rawStream;
+        }
+
+        rawStreamRef.current = rawStream;
+        streamRef.current = monoStream;
+        downmixDisposeRef.current = dispose;
+        setRecordingStream(monoStream);
       } catch (err) {
         console.error("Failed to get recording stream:", err);
       }
@@ -342,7 +668,18 @@ function RoomContent({
 
     return () => {
       cancelled = true;
-      streamRef.current?.getTracks().forEach((track) => track.stop());
+      // Mirror the on-switch teardown: stop both raw and mono tracks. The
+      // guard avoids a double-stop in the fallback path where
+      // forceMonoStream failed and streamRef === rawStreamRef.
+      const previousRawStream = rawStreamRef.current;
+      const previousStream = streamRef.current;
+      downmixDisposeRef.current?.();
+      downmixDisposeRef.current = null;
+      previousRawStream?.getTracks().forEach((track) => track.stop());
+      if (previousStream && previousStream !== previousRawStream) {
+        previousStream.getTracks().forEach((track) => track.stop());
+      }
+      rawStreamRef.current = null;
       streamRef.current = null;
       setRecordingStream(null);
     };
@@ -367,18 +704,39 @@ function RoomContent({
       analyserRef.current.getByteTimeDomainData(dataArray);
 
       let sumSquares = 0;
+      let peak = 0;
       for (const value of dataArray) {
         const centeredSample = (value - 128) / 128;
         sumSquares += centeredSample * centeredSample;
+        const abs = Math.abs(centeredSample);
+        if (abs > peak) peak = abs;
       }
 
       const rms = Math.sqrt(sumSquares / dataArray.length);
       const normalized = Math.min(1, Math.max(0, (rms - 0.01) / 0.12));
-      const targetLevel = Math.round(Math.pow(normalized, 0.6) * 255);
+      const targetLevel = Math.round(Math.pow(normalized, SHAPING_EXPONENT) * 255);
       const smoothedLevel = Math.round(
-        localLevelRef.current * 0.7 + targetLevel * 0.3
+        smoothLevel(localLevelRef.current, targetLevel)
       );
       localLevelRef.current = smoothedLevel;
+
+      // Clipping flag: peak >= -1 dBFS for CLIP_MIN_FRAMES consecutive frames,
+      // then hold the visible flag briefly so a single transient peak still
+      // registers. The hold count here is in RAF frames (~60Hz), giving ~500ms.
+      if (peak >= CLIP_THRESHOLD) {
+        localClipFramesRef.current += 1;
+        if (localClipFramesRef.current >= CLIP_MIN_FRAMES) {
+          localClipHoldRef.current = 30;
+        }
+      } else {
+        localClipFramesRef.current = 0;
+      }
+      // Compute visibility from the CURRENT hold first, then decrement, so a
+      // hold of N yields N visible frames (not N-1).
+      const isClipping = localClipHoldRef.current > 0;
+      if (isClipping) localClipHoldRef.current -= 1;
+      // Avoid setState every frame when nothing changed.
+      setLocalClipping((prev) => (prev === isClipping ? prev : isClipping));
 
       setAudioLevels((prev) => {
         const next = new Map(prev);
@@ -397,21 +755,34 @@ function RoomContent({
     };
   }, [participantName, recordingStream]);
 
-  // Track remote audio levels via the speaking-participants hook
+  // Track remote audio levels via getStats() polling on each remote audio
+  // track's RTCRtpReceiver. Replaces the prior `useSpeakingParticipants`
+  // approach, which only emitted while the LiveKit voice-activity heuristic
+  // flagged a participant as "speaking" — fine for grid highlights but useless
+  // for level monitoring (silent talkers + no clipping signal). See #47.
+  const remoteAudio = useRemoteAudioLevels(remoteParticipants);
+  // Merge remote levels into the same audioLevels map the local meter feeds.
   useEffect(() => {
     setAudioLevels((prev) => {
       const next = new Map(prev);
-      for (const s of speakingParticipants) {
-        next.set(
-          s.identity ?? "unknown",
-          Math.round((s.audioLevel ?? 0) * 255),
-        );
+      // Wipe any identities that vanished so stale bars don't linger.
+      for (const id of next.keys()) {
+        if (id !== participantName && !remoteAudio.levels.has(id)) {
+          next.delete(id);
+        }
+      }
+      for (const [id, lvl] of remoteAudio.levels) {
+        next.set(id, lvl);
       }
       return next;
     });
-  }, [speakingParticipants]);
+  }, [remoteAudio.levels, participantName]);
 
-  // Tick the elapsed-time display while recording
+  // Tick the elapsed-time display while recording. The interval is bound to
+  // `recording`, NOT `finalizing` — once we enter `finalizing` the timer tears
+  // down and the displayed value freezes at the stop-moment value. If we
+  // tear it down only when the upload pipeline settles, a wedged upload
+  // (issue #48) would let the timer keep ticking indefinitely.
   useEffect(() => {
     if (studioState === "recording") {
       setElapsedMs(0);
@@ -420,10 +791,15 @@ function RoomContent({
         setElapsedMs(Date.now() - started);
       }, 250);
     } else {
-      setElapsedMs(0);
       if (elapsedTimerRef.current) {
         clearInterval(elapsedTimerRef.current);
         elapsedTimerRef.current = null;
+      }
+      // Keep the displayed elapsed value frozen during `finalizing` so the
+      // user sees the duration they actually recorded. Reset only on full
+      // return to idle.
+      if (studioState !== "finalizing") {
+        setElapsedMs(0);
       }
     }
     return () => {
@@ -439,6 +815,13 @@ function RoomContent({
   // button pressed twice), this is a no-op.
   const startRecordingLocal = useCallback(
     async (sessionStartedAtIso: string) => {
+      // Hard invariant from issue #61: cannot start a new recording while a
+      // previous one is finalizing. Enforced here so both local and remote
+      // (control-message) start paths honor the invariant.
+      if (studioStateRef.current === "finalizing") {
+        console.warn("Ignoring recording_start: currently finalizing previous recording");
+        return;
+      }
       if (studioStateRef.current === "recording" || recorderRef.current) return;
       if (!streamRef.current) return;
 
@@ -459,19 +842,20 @@ function RoomContent({
         return;
       }
 
+      trackerReset();
+
       const recorder = new CozyRecorder(streamRef.current);
 
       recorder.onChunk((chunk, index) => {
+        const byteLength = chunk.size;
+        trackerOnChunkRecorded(byteLength);
+
         const uploadPromise = (async () => {
-          try {
-            const url = await getPresignedUploadUrl(sessionId, trackId, index);
-            await uploadChunk(url, chunk);
-          } catch (err) {
-            console.error("Failed to upload chunk:", err);
-          }
+          const url = await getPresignedUploadUrl(sessionId, trackId, index);
+          await uploadChunk(url, chunk);
         })();
 
-        trackChunkUpload(uploadPromise);
+        void trackerTrackUpload(byteLength, uploadPromise);
       });
 
       recorderRef.current = recorder;
@@ -504,39 +888,97 @@ function RoomContent({
       setStudioStateSync,
       showNotification,
       switchAudioQuality,
-      trackChunkUpload,
+      trackerReset,
+      trackerOnChunkRecorded,
+      trackerTrackUpload,
     ],
   );
 
-  // Core recording stop. Idempotent: no-op when we have no active recorder.
+  // Core recording stop. Idempotent: no-op when we have no active recorder or
+  // we're already finalizing.
   const stopRecordingLocal = useCallback(async () => {
     if (!recorderRef.current) return;
+    if (studioStateRef.current === "finalizing") return;
+
+    // Snapshot per-recording state into local consts BEFORE any await so a
+    // hypothetical concurrent attempt to re-record (blocked by the
+    // finalizing-state gate, but defended in depth here) cannot overwrite the
+    // values mid-finalize. Also transition synchronously so the elapsed timer
+    // tears down immediately — even if the upload pipeline below hangs.
+    const recorder = recorderRef.current;
+    const trackId = trackIdRef.current;
+    const startedAt = recordingStartRef.current;
+    setStudioStateSync("finalizing");
 
     try {
-      const blob = await recorderRef.current.stop();
-      const trackId = trackIdRef.current;
-      const durationMs = Date.now() - recordingStartRef.current;
+      const blob = await recorder.stop();
+      const durationMs = Date.now() - startedAt;
 
-      const url = await getPresignedUploadUrl(sessionId, trackId, 9999);
-      await uploadChunk(url, blob);
-      await waitForChunkUploads();
+      // Freeze denominator — recording is done, no more chunks will arrive.
+      trackerFreezeRecorded();
+
+      // The final recording.webm upload is critical: if it fails, we must
+      // NOT call completeUpload (which marks the track complete and lets
+      // the server delete chunk files). Use rethrow so a failure surfaces
+      // here, lastError is set in the tracker (visible in the UI), and
+      // completeUpload is skipped.
+      const finalBytes = blob.size;
+      trackerOnChunkRecorded(finalBytes);
+      const finalUpload = (async () => {
+        const url = await getPresignedUploadUrl(sessionId, trackId, 9999);
+        await uploadChunk(url, blob);
+      })();
+      await trackerTrackUpload(finalBytes, finalUpload, { rethrow: true });
+
+      // Wait for any background chunk uploads still settling.
+      await trackerWaitForUploads();
       await completeUpload(sessionId, trackId, durationMs);
 
-      setStudioStateSync("connected");
-
-      await switchAudioQuality("full");
+      setHasRecorded(true);
     } catch (err) {
+      // Final upload (or stop()) failed. lastError is already populated by
+      // trackUpload's rethrow path; the recording stays incomplete.
       console.error("Failed to stop recording:", err);
+    } finally {
+      recorderRef.current = null;
+      // Hard invariant from issue #61: do not leave `finalizing` until the
+      // chunk-upload promise set is drained, regardless of error path. If the
+      // happy path above already drained, this is effectively a no-op.
+      try {
+        await trackerWaitForUploads();
+      } catch (drainErr) {
+        console.error("Failed while draining chunk uploads:", drainErr);
+      }
+      setStudioStateSync("connected");
+      // Best-effort restoration of full-quality preview. Fire-and-forget —
+      // a failure here must not keep us stuck in `finalizing`.
+      void switchAudioQuality("full").catch((err) => {
+        console.error("Failed to restore audio quality:", err);
+      });
     }
-
-    recorderRef.current = null;
-  }, [sessionId, setStudioStateSync, switchAudioQuality, waitForChunkUploads]);
+  }, [
+    sessionId,
+    setStudioStateSync,
+    switchAudioQuality,
+    trackerFreezeRecorded,
+    trackerOnChunkRecorded,
+    trackerTrackUpload,
+    trackerWaitForUploads,
+  ]);
 
   // Button handler: broadcast first so remote participants start close to our
   // own start time, then start locally. sessionStartedAt uses our local clock
   // so all participants share a single reference timestamp on the Track row.
   const handleStartRecording = useCallback(async () => {
-    if (studioStateRef.current === "recording" || recorderRef.current) return;
+    // Hard invariant from issue #61: cannot start a new recording while a
+    // previous one is finalizing. The button itself is disabled in that state,
+    // but enforce here too for the broadcast/control-message path.
+    if (
+      studioStateRef.current === "recording" ||
+      studioStateRef.current === "finalizing" ||
+      recorderRef.current
+    )
+      return;
     const sessionStartedAt = new Date().toISOString();
     try {
       await transport.sendControlMessage({ type: "recording_start", sessionStartedAt });
@@ -576,10 +1018,31 @@ function RoomContent({
   }, [transport, startRecordingLocal, stopRecordingLocal, showNotification]);
 
 
+  // Warn before tab close when uploads are in flight or recording is active.
+  // This is the Layer A fix for #49 — prevents accidental data loss.
+  useEffect(() => {
+    if (!uploadTracker.hasInflight && studioState !== "recording") return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [uploadTracker.hasInflight, studioState]);
+
   useEffect(() => {
     return () => {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
+      downmixDisposeRef.current?.();
+      downmixDisposeRef.current = null;
+      const rawStream = rawStreamRef.current;
+      const monoStream = streamRef.current;
+      if (rawStream) {
+        rawStream.getTracks().forEach((t) => t.stop());
+      }
+      // Guard against double-stopping when the fallback path made
+      // monoStream === rawStream.
+      if (monoStream && monoStream !== rawStream) {
+        monoStream.getTracks().forEach((t) => t.stop());
       }
     };
   }, []);
@@ -591,8 +1054,12 @@ function RoomContent({
   const showLocalMicWarning = selectedMicIsBuiltIn && !bannerDismissed;
 
   const isRecording = studioState === "recording";
+  const isFinalizing = studioState === "finalizing";
+  // Treat `finalizing` as still uploading: the recorder has stopped but
+  // chunks are draining, so the sidebar indicator should not look idle.
+  const isUploading = isRecording || isFinalizing;
 
-  const localStatus: Status = isRecording ? "recording" : "connected";
+  const localStatus: Status = isUploading ? "recording" : "connected";
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
@@ -675,6 +1142,7 @@ function RoomContent({
             isBuiltIn={selectedMicIsBuiltIn}
             level={audioLevels.get(participantName) ?? 0}
             status={localStatus}
+            clipping={localClipping}
           />
 
           {remoteParticipants.map((p) => (
@@ -690,26 +1158,13 @@ function RoomContent({
               // the host hit record). Remote per-participant status is tracked
               // in #30; until then we show a stable "connected" for remotes.
               status="connected"
+              clipping={remoteAudio.clipping.has(p.identity)}
             />
           ))}
 
-          {/* Invite tile — blocked on cozytrack#23 (invite tokens). */}
-          <div
-            className="rounded-lg px-4 py-3.5 flex items-center gap-3 opacity-50 cursor-not-allowed border border-dashed"
-            style={{ borderColor: "var(--border)" }}
-            title="Cohost invite links tracked in #23"
-          >
-            <div
-              className="w-8 h-8 rounded-full flex items-center justify-center border border-dashed"
-              style={{ borderColor: "var(--border-hi)" }}
-            >
-              <IcoPlus size={14} color="var(--text-3)" />
-            </div>
-            <span className="text-[13px] text-text-3">Invite a cohost…</span>
-            <div className="ml-auto">
-              <IcoLink size={13} color="var(--text-3)" />
-            </div>
-          </div>
+          {/* Invite tile — host-only. Guests don't see the affordance; the
+              underlying API also rejects non-host callers. */}
+          {isHost && <InviteCohostTile sessionId={sessionId} />}
 
           {/* Monitor toggle kept below the strips so it doesn't crowd the meters */}
           <div className="mt-2">
@@ -720,6 +1175,18 @@ function RoomContent({
               onVolumeChange={onMonitorVolumeChange}
             />
           </div>
+
+          {/* Finish recording (post-stop) — surfaces after the local recorder
+              has produced at least one track and the studio is no longer in
+              the recording state. Drives the /api/sessions/:id/finalize flow. */}
+          {studioState === "connected" && hasRecorded && (
+            <div className="flex justify-center mt-3">
+              <FinishRecordingButton
+                sessionId={sessionId}
+                waitForUploads={uploadTracker.waitForUploads}
+              />
+            </div>
+          )}
         </div>
 
         {/* Right sidebar: record button + upload */}
@@ -735,15 +1202,26 @@ function RoomContent({
               <button
                 type="button"
                 onClick={() => (isRecording ? handleStopRecording() : handleStartRecording())}
-                className={`w-[60px] h-[60px] rounded-full flex items-center justify-center cursor-pointer border-2 ${
+                disabled={isFinalizing}
+                className={`w-[60px] h-[60px] rounded-full flex items-center justify-center border-2 ${
                   isRecording ? "rec-ring" : ""
-                }`}
+                } ${isFinalizing ? "cursor-not-allowed" : "cursor-pointer"}`}
                 style={{
                   background: isRecording ? "rgba(232,80,80,0.1)" : "var(--card)",
                   borderColor: isRecording ? "var(--rec)" : "var(--border-hi)",
+                  opacity: isFinalizing ? 0.5 : 1,
                   transition: "all 200ms ease",
                 }}
-                aria-label={isRecording ? "Stop recording" : "Start recording"}
+                aria-label={
+                  isFinalizing
+                    ? "Finalizing previous recording"
+                    : isRecording
+                    ? "Stop recording"
+                    : "Start recording"
+                }
+                title={
+                  isFinalizing ? "Finalizing previous recording…" : undefined
+                }
               >
                 {isRecording ? (
                   <div
@@ -759,42 +1237,43 @@ function RoomContent({
               </button>
             </div>
             <span
-              className="font-mono text-[10px] font-medium tracking-[0.08em]"
+              className="font-mono text-[10px] font-medium tracking-[0.08em] text-center"
               style={{
-                color: isRecording ? "var(--rec)" : "var(--text-3)",
+                color: isRecording
+                  ? "var(--rec)"
+                  : isFinalizing
+                  ? "var(--text-2)"
+                  : "var(--text-3)",
               }}
             >
-              {isRecording ? "STOP" : "REC"}
+              {isFinalizing
+                ? "FINALIZING…"
+                : isRecording
+                ? "STOP"
+                : "REC"}
             </span>
             <div
               className="font-mono text-[13px] tracking-[0.06em]"
               style={{
-                color: isRecording ? "var(--text-2)" : "var(--text-3)",
+                color:
+                  isRecording || isFinalizing ? "var(--text-2)" : "var(--text-3)",
               }}
             >
               {formatElapsed(elapsedMs)}
             </div>
+            {isFinalizing && (
+              <span className="font-sans text-[10px] text-text-3 text-center px-2 max-w-[100px] leading-tight">
+                Finalizing previous recording…
+              </span>
+            )}
           </div>
 
           <div className="w-10 h-px my-3" style={{ background: "var(--border)" }} />
 
-          {/* Upload indicator — real progress plumbing tracked in #27. */}
-          <div className="w-full px-3 flex flex-col gap-1.5 items-center mb-5">
-            <span className="font-mono text-[9px] text-text-3 tracking-[0.08em]">UPLOAD</span>
-            <div className="w-full h-0.5 rounded-[1px]" style={{ background: "var(--border)" }}>
-              <div
-                className="h-full rounded-[1px]"
-                style={{
-                  width: isRecording ? "30%" : "0%",
-                  background: "var(--amber)",
-                  transition: "width 600ms ease",
-                }}
-              />
-            </div>
-            <span className="font-mono text-[9px] text-text-3">
-              {isRecording ? "in flight" : "—"}
-            </span>
-          </div>
+          <UploadProgressBar
+            progress={uploadTracker.progress}
+            recordingStopped={studioState !== "recording"}
+          />
         </div>
       </div>
     </div>
@@ -817,6 +1296,10 @@ export default function StudioPage() {
   const [monitorVolume, setMonitorVolume] = useState(70);
   const [isMobile, setIsMobile] = useState(false);
   const [mobileWarningDismissed, setMobileWarningDismissed] = useState(false);
+  // Role drives host-only affordances (e.g. the cohost invite tile). Guests
+  // arriving via /join have their display name recorded in the cookie; we
+  // use it to prefill the prejoin form.
+  const [isHost, setIsHost] = useState(false);
 
   useEffect(() => {
     setMonitorEnabled(getStoredMonitorEnabled());
@@ -826,6 +1309,31 @@ export default function StudioPage() {
   useEffect(() => {
     setIsMobile(isMobileBrowser(navigator));
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadPrincipal() {
+      try {
+        const res = await fetch(
+          `/api/auth/me?sessionId=${encodeURIComponent(sessionId)}`,
+        );
+        if (!res.ok) return;
+        const body: { role?: string; name?: string } = await res.json();
+        if (cancelled) return;
+        if (body.role === "host") {
+          setIsHost(true);
+        } else if (body.role === "guest" && typeof body.name === "string") {
+          setParticipantName((prev) => (prev ? prev : body.name ?? ""));
+        }
+      } catch {
+        // Leave defaults — the studio still works, just without host UI.
+      }
+    }
+    void loadPrincipal();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
 
   const [showMicWarning, setShowMicWarning] = useState(false);
   const [acknowledgedDevices, setAcknowledgedDevices] = useState<Set<string>>(
@@ -930,7 +1438,7 @@ export default function StudioPage() {
 
     if (
       selectedMicDevice &&
-      isBuiltInMic(selectedMicDevice.label) &&
+      isSelectedMicBuiltIn(mics, selectedMic) &&
       !acknowledgedDevices.has(selectedMic)
     ) {
       setShowMicWarning(true);
@@ -1078,13 +1586,14 @@ export default function StudioPage() {
           participantName={participantName}
           selectedMic={selectedMic}
           selectedMicLabel={selectedMicDevice?.label || undefined}
-          selectedMicIsBuiltIn={selectedMicDevice ? isBuiltInMic(selectedMicDevice.label) : false}
+          selectedMicIsBuiltIn={selectedMicDevice ? isSelectedMicBuiltIn(mics, selectedMic) : false}
           studioState={studioState}
           setStudioState={setStudioState}
           monitorEnabled={monitorEnabled}
           monitorVolume={monitorVolume}
           onMonitorEnabledChange={setMonitorEnabled}
           onMonitorVolumeChange={setMonitorVolume}
+          isHost={isHost}
         />
       </LiveKitRoom>
     </div>
