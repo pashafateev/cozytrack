@@ -35,7 +35,7 @@ export function Topbar({ session }: TopbarProps) {
 
   return (
     <div
-      className="h-[52px] sticky top-0 z-50 flex items-center gap-4 px-5 border-b"
+      className="h-[var(--topbar-height)] sticky top-0 z-50 flex items-center gap-4 px-5 border-b"
       style={{
         background: "var(--surface)",
         borderBottomColor: "var(--border)",

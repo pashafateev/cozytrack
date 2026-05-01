@@ -73,6 +73,7 @@ export const IcoPlay = (p: IconProps) => <Paths {...p} fill={p.fill ?? "currentC
 export const IcoPause = (p: IconProps) => <Paths {...p} d={["M6 4h4v16H6z", "M14 4h4v16h-4z"]} />;
 export const IcoChevron = (p: IconProps) => <Paths {...p} d="M15 18l-6-6 6-6" />;
 export const IcoPlus = (p: IconProps) => <Paths {...p} d={["M12 5v14", "M5 12h14"]} />;
+export const IcoX = (p: IconProps) => <Paths {...p} d={["M18 6L6 18", "M6 6l12 12"]} />;
 
 export const IcoAlert = (p: IconProps) => (
   <Paths

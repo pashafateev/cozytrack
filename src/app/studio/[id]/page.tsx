@@ -10,7 +10,14 @@
 // LiveKit operations (data channel sends, DataReceived subscriptions, etc.)
 // go through the Transport abstraction via useTransport().
 
-import { useEffect, useState, useRef, useCallback, useMemo } from "react";
+import {
+  type ReactNode,
+  useEffect,
+  useState,
+  useRef,
+  useCallback,
+  useMemo,
+} from "react";
 import { useParams } from "next/navigation";
 import {
   LiveKitRoom,
@@ -51,6 +58,7 @@ import {
   IcoLink,
   IcoMic,
   IcoPlus,
+  IcoX,
 } from "@/components/ui/Icon";
 
 // ---------- Types ----------
@@ -78,6 +86,72 @@ function formatElapsed(totalMs: number): string {
   const m = Math.floor((totalSec % 3600) / 60).toString().padStart(2, "0");
   const s = (totalSec % 60).toString().padStart(2, "0");
   return `${h}:${m}:${s}`;
+}
+
+function isMobileBrowser(navigatorInfo: Navigator): boolean {
+  const ua = navigatorInfo.userAgent;
+  const looksLikeModernIpad =
+    navigatorInfo.platform === "MacIntel" && navigatorInfo.maxTouchPoints > 1;
+
+  return /iPhone|iPad|iPod|Android/i.test(ua) || looksLikeModernIpad;
+}
+
+function MobileBrowserWarningBanner({
+  onDismiss,
+}: {
+  onDismiss: () => void;
+}) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="sticky top-[var(--topbar-height)] z-40 flex items-start gap-3 px-5 py-3 border-b"
+      style={{
+        background: "rgba(232,168,48,0.09)",
+        borderBottomColor: "rgba(232,168,48,0.22)",
+      }}
+    >
+      <span className="mt-0.5 flex-shrink-0">
+        <IcoAlert size={15} color="var(--warn)" />
+      </span>
+      <p className="flex-1 text-[12px] leading-5 text-warn">
+        <span className="font-semibold">Mobile browser detected.</span>{" "}
+        Audio quality may be reduced and recording may fail if you switch apps
+        or your screen locks. For best results, join from a laptop or desktop
+        browser.
+      </p>
+      <button
+        type="button"
+        onClick={onDismiss}
+        aria-label="Dismiss mobile browser warning"
+        className="mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-[4px] text-warn/70 hover:bg-warn/10 hover:text-warn"
+      >
+        <IcoX size={14} color="currentColor" />
+      </button>
+    </div>
+  );
+}
+
+function StudioFrame({
+  children,
+  session,
+  showMobileWarning,
+  onDismissMobileWarning,
+}: {
+  children: ReactNode;
+  session?: string;
+  showMobileWarning: boolean;
+  onDismissMobileWarning: () => void;
+}) {
+  return (
+    <div className="animate-page-enter min-h-screen bg-bg flex flex-col">
+      <Topbar session={session} />
+      {showMobileWarning && (
+        <MobileBrowserWarningBanner onDismiss={onDismissMobileWarning} />
+      )}
+      {children}
+    </div>
+  );
 }
 
 // ---------- Participant Strip ----------
@@ -1251,6 +1325,8 @@ export default function StudioPage() {
   const [connecting, setConnecting] = useState(false);
   const [monitorEnabled, setMonitorEnabled] = useState(false);
   const [monitorVolume, setMonitorVolume] = useState(70);
+  const [isMobile, setIsMobile] = useState(false);
+  const [mobileWarningDismissed, setMobileWarningDismissed] = useState(false);
   // Role drives host-only affordances (e.g. the cohost invite tile). Guests
   // arriving via /join have their display name recorded in the cookie; we
   // use it to prefill the prejoin form.
@@ -1259,6 +1335,10 @@ export default function StudioPage() {
   useEffect(() => {
     setMonitorEnabled(getStoredMonitorEnabled());
     setMonitorVolume(getStoredMonitorVolume());
+  }, []);
+
+  useEffect(() => {
+    setIsMobile(isMobileBrowser(navigator));
   }, []);
 
   useEffect(() => {
@@ -1403,8 +1483,10 @@ export default function StudioPage() {
 
   if (studioState === "prejoin") {
     return (
-      <div className="animate-page-enter min-h-screen bg-bg flex flex-col">
-        <Topbar />
+      <StudioFrame
+        showMobileWarning={isMobile && !mobileWarningDismissed}
+        onDismissMobileWarning={() => setMobileWarningDismissed(true)}
+      >
         {showMicWarning && (
           <BuiltInMicWarningModal
             onAcknowledge={() => {
@@ -1492,15 +1574,18 @@ export default function StudioPage() {
             </div>
           </div>
         </div>
-      </div>
+      </StudioFrame>
     );
   }
 
   // ---------- Connected / Recording ----------
 
   return (
-    <div className="animate-page-enter min-h-screen bg-bg flex flex-col">
-      <Topbar session={`Session ${sessionId.slice(0, 8)}…`} />
+    <StudioFrame
+      session={`Session ${sessionId.slice(0, 8)}…`}
+      showMobileWarning={isMobile && !mobileWarningDismissed}
+      onDismissMobileWarning={() => setMobileWarningDismissed(true)}
+    >
       <LiveKitRoom
         serverUrl={LIVEKIT_URL}
         token={token}
@@ -1537,6 +1622,6 @@ export default function StudioPage() {
           isHost={isHost}
         />
       </LiveKitRoom>
-    </div>
+    </StudioFrame>
   );
 }
