@@ -15,6 +15,7 @@
 - Assume the user reviews every implementation through commits.
 - After implementing an approved change, surface the commit hash in the response.
 - If there are uncommitted changes that belong to the just-finished implementation, commit them before concluding unless the user explicitly says not to.
+- When opening a pull request, create a regular ready-for-review PR unless the user explicitly asks for a draft.
 
 ## Safety
 
