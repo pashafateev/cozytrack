@@ -10,7 +10,14 @@
 // LiveKit operations (data channel sends, DataReceived subscriptions, etc.)
 // go through the Transport abstraction via useTransport().
 
-import { useEffect, useState, useRef, useCallback, useMemo } from "react";
+import {
+  type ReactNode,
+  useEffect,
+  useState,
+  useRef,
+  useCallback,
+  useMemo,
+} from "react";
 import { useParams } from "next/navigation";
 import {
   LiveKitRoom,
@@ -96,7 +103,9 @@ function MobileBrowserWarningBanner({
 }) {
   return (
     <div
-      className="sticky top-[52px] z-40 flex items-start gap-3 px-5 py-3 border-b"
+      role="status"
+      aria-live="polite"
+      className="sticky top-[var(--topbar-height)] z-40 flex items-start gap-3 px-5 py-3 border-b"
       style={{
         background: "rgba(232,168,48,0.09)",
         borderBottomColor: "rgba(232,168,48,0.22)",
@@ -119,6 +128,28 @@ function MobileBrowserWarningBanner({
       >
         <IcoX size={14} color="currentColor" />
       </button>
+    </div>
+  );
+}
+
+function StudioFrame({
+  children,
+  session,
+  showMobileWarning,
+  onDismissMobileWarning,
+}: {
+  children: ReactNode;
+  session?: string;
+  showMobileWarning: boolean;
+  onDismissMobileWarning: () => void;
+}) {
+  return (
+    <div className="animate-page-enter min-h-screen bg-bg flex flex-col">
+      <Topbar session={session} />
+      {showMobileWarning && (
+        <MobileBrowserWarningBanner onDismiss={onDismissMobileWarning} />
+      )}
+      {children}
     </div>
   );
 }
@@ -1452,13 +1483,10 @@ export default function StudioPage() {
 
   if (studioState === "prejoin") {
     return (
-      <div className="animate-page-enter min-h-screen bg-bg flex flex-col">
-        <Topbar />
-        {isMobile && !mobileWarningDismissed && (
-          <MobileBrowserWarningBanner
-            onDismiss={() => setMobileWarningDismissed(true)}
-          />
-        )}
+      <StudioFrame
+        showMobileWarning={isMobile && !mobileWarningDismissed}
+        onDismissMobileWarning={() => setMobileWarningDismissed(true)}
+      >
         {showMicWarning && (
           <BuiltInMicWarningModal
             onAcknowledge={() => {
@@ -1546,20 +1574,18 @@ export default function StudioPage() {
             </div>
           </div>
         </div>
-      </div>
+      </StudioFrame>
     );
   }
 
   // ---------- Connected / Recording ----------
 
   return (
-    <div className="animate-page-enter min-h-screen bg-bg flex flex-col">
-      <Topbar session={`Session ${sessionId.slice(0, 8)}…`} />
-      {isMobile && !mobileWarningDismissed && (
-        <MobileBrowserWarningBanner
-          onDismiss={() => setMobileWarningDismissed(true)}
-        />
-      )}
+    <StudioFrame
+      session={`Session ${sessionId.slice(0, 8)}…`}
+      showMobileWarning={isMobile && !mobileWarningDismissed}
+      onDismissMobileWarning={() => setMobileWarningDismissed(true)}
+    >
       <LiveKitRoom
         serverUrl={LIVEKIT_URL}
         token={token}
@@ -1596,6 +1622,6 @@ export default function StudioPage() {
           isHost={isHost}
         />
       </LiveKitRoom>
-    </div>
+    </StudioFrame>
   );
 }
