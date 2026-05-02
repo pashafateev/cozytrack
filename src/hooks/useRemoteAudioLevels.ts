@@ -12,8 +12,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { RemoteParticipant } from "livekit-client";
 import {
-  CLIP_MIN_FRAMES,
-  CLIP_THRESHOLD,
+  advanceClipHold,
   shapeLevel,
   smoothLevel,
 } from "@/lib/audio-meter";
@@ -61,6 +60,37 @@ export function useRemoteAudioLevels(
       // Snapshot the participants so a disconnect mid-poll doesn't blow up.
       const snapshot = participants.slice();
 
+      function applyClipState(identity: string, audioLevel: number | undefined) {
+        const step = advanceClipHold(
+          {
+            consecutiveClipFrames:
+              consecutiveClipFramesRef.current.get(identity) ?? 0,
+            holdFrames: clipHoldFramesRef.current.get(identity) ?? 0,
+          },
+          audioLevel,
+          CLIP_HOLD_FRAMES,
+        );
+
+        if (step.state.consecutiveClipFrames > 0) {
+          consecutiveClipFramesRef.current.set(
+            identity,
+            step.state.consecutiveClipFrames,
+          );
+        } else {
+          consecutiveClipFramesRef.current.delete(identity);
+        }
+
+        if (step.state.holdFrames > 0) {
+          clipHoldFramesRef.current.set(identity, step.state.holdFrames);
+        } else {
+          clipHoldFramesRef.current.delete(identity);
+        }
+
+        if (step.isClipping) {
+          nextClipping.add(identity);
+        }
+      }
+
       await Promise.all(
         snapshot.map(async (participant) => {
           const identity = participant.identity;
@@ -104,50 +134,18 @@ export function useRemoteAudioLevels(
             const decayed = Math.max(0, prev * 0.85);
             smoothedRef.current.set(identity, decayed);
             nextLevels.set(identity, Math.round(decayed));
-            // Drain any clip-hold counter without retriggering. Mirror the
-            // main path: check > 0 first, THEN decrement, so the final held
-            // frame still flashes even when stats happen to be missing.
-            const hold = clipHoldFramesRef.current.get(identity) ?? 0;
-            if (hold > 0) {
-              nextClipping.add(identity);
-              const remaining = hold - 1;
-              if (remaining > 0) {
-                clipHoldFramesRef.current.set(identity, remaining);
-              } else {
-                clipHoldFramesRef.current.delete(identity);
-              }
-            } else {
-              clipHoldFramesRef.current.delete(identity);
-            }
-            consecutiveClipFramesRef.current.delete(identity);
+            applyClipState(identity, undefined);
             return;
           }
 
           // Match the local meter's perceptual curve so both look identical.
-          const target = shapeLevel(audioLevel);
+          const target = shapeLevel(audioLevel) * 255;
           const prev = smoothedRef.current.get(identity) ?? 0;
           const smoothed = smoothLevel(prev, target);
           smoothedRef.current.set(identity, smoothed);
           nextLevels.set(identity, Math.round(smoothed));
 
-          // Clipping: count consecutive frames at/over threshold; latch the
-          // visible flag for a few extra frames so single peaks register.
-          if (audioLevel >= CLIP_THRESHOLD) {
-            const n =
-              (consecutiveClipFramesRef.current.get(identity) ?? 0) + 1;
-            consecutiveClipFramesRef.current.set(identity, n);
-            if (n >= CLIP_MIN_FRAMES) {
-              clipHoldFramesRef.current.set(identity, CLIP_HOLD_FRAMES);
-            }
-          } else {
-            consecutiveClipFramesRef.current.set(identity, 0);
-          }
-
-          const hold = clipHoldFramesRef.current.get(identity) ?? 0;
-          if (hold > 0) {
-            nextClipping.add(identity);
-            clipHoldFramesRef.current.set(identity, hold - 1);
-          }
+          applyClipState(identity, audioLevel);
         }),
       );
 
