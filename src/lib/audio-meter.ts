@@ -19,12 +19,22 @@ export const SHAPING_EXPONENT = 0.6;
 export const SMOOTHING_PREV_WEIGHT = 0.7;
 export const SMOOTHING_TARGET_WEIGHT = 0.3;
 
+export interface ClipHoldState {
+  consecutiveClipFrames: number;
+  holdFrames: number;
+}
+
+export interface ClipHoldStep {
+  state: ClipHoldState;
+  isClipping: boolean;
+}
+
 /**
- * Map a raw 0..1 level to the shared 0..255 meter scale (compander curve).
+ * Shape a raw 0..1 level using the shared compander curve.
  */
 export function shapeLevel(audioLevel: number): number {
   const clamped = Math.max(0, Math.min(1, audioLevel));
-  return Math.pow(clamped, SHAPING_EXPONENT) * 255;
+  return Math.pow(clamped, SHAPING_EXPONENT);
 }
 
 /**
@@ -32,4 +42,44 @@ export function shapeLevel(audioLevel: number): number {
  */
 export function smoothLevel(prev: number, target: number): number {
   return prev * SMOOTHING_PREV_WEIGHT + target * SMOOTHING_TARGET_WEIGHT;
+}
+
+/**
+ * Advance the shared clip-latch state by one meter frame.
+ *
+ * `audioLevel === undefined` means the poll produced no fresh stat and is
+ * intentionally treated like a below-threshold sample.
+ */
+export function advanceClipHold(
+  state: ClipHoldState,
+  audioLevel: number | undefined,
+  visibleHoldFrames: number,
+): ClipHoldStep {
+  const holdFrames = Math.max(0, Math.floor(visibleHoldFrames));
+  const aboveThreshold =
+    typeof audioLevel === "number" &&
+    Number.isFinite(audioLevel) &&
+    audioLevel >= CLIP_THRESHOLD;
+
+  const consecutiveClipFrames = aboveThreshold
+    ? state.consecutiveClipFrames + 1
+    : 0;
+
+  let nextHoldFrames = Math.max(0, state.holdFrames);
+  if (aboveThreshold && consecutiveClipFrames >= CLIP_MIN_FRAMES) {
+    nextHoldFrames = holdFrames;
+  }
+
+  const isClipping = nextHoldFrames > 0;
+  if (isClipping) {
+    nextHoldFrames -= 1;
+  }
+
+  return {
+    state: {
+      consecutiveClipFrames,
+      holdFrames: nextHoldFrames,
+    },
+    isClipping,
+  };
 }
