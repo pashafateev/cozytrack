@@ -7,9 +7,50 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
-export const s3 = new S3Client({
-  region: process.env.AWS_REGION!,
-});
+type S3ClientConfig = NonNullable<ConstructorParameters<typeof S3Client>[0]>;
+
+function cleanEnv(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function booleanEnv(value: string | undefined): boolean | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no"].includes(normalized)) {
+    return false;
+  }
+
+  return undefined;
+}
+
+export function buildS3ClientConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): S3ClientConfig {
+  const endpoint = cleanEnv(env.S3_ENDPOINT);
+  const forcePathStyle = booleanEnv(env.S3_FORCE_PATH_STYLE) ?? Boolean(endpoint);
+  const config: S3ClientConfig = {
+    region: env.AWS_REGION!,
+  };
+
+  if (endpoint) {
+    config.endpoint = endpoint;
+  }
+
+  if (forcePathStyle) {
+    config.forcePathStyle = true;
+  }
+
+  return config;
+}
+
+export const s3 = new S3Client(buildS3ClientConfig());
 
 const bucket = process.env.S3_BUCKET_NAME!;
 

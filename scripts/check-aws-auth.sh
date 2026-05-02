@@ -5,12 +5,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-set -a
-[ -f ./.env ] && . ./.env
-[ -f ./.env.local ] && . ./.env.local
-set +a
+. ./scripts/local-env.sh
+load_local_env
 
 if [ -z "${S3_BUCKET_NAME:-}" ]; then
+  exit 0
+fi
+
+if [ -n "${S3_ENDPOINT:-}" ]; then
   exit 0
 fi
 
