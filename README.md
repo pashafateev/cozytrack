@@ -179,6 +179,7 @@ livekit.yaml                   # LiveKit server config
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DATABASE_URL` | PostgreSQL connection string | `postgresql://cozytrack:cozytrack@localhost:5433/cozytrack` |
+| `DIRECT_DATABASE_URL` | Direct PostgreSQL connection for Prisma migrations and schema pushes. Locally this can match `DATABASE_URL`; `npm run dev:local` fills it from `DATABASE_URL` if omitted. | `postgresql://cozytrack:cozytrack@localhost:5433/cozytrack` |
 | `LIVEKIT_API_KEY` | LiveKit API key | `devkey` |
 | `LIVEKIT_API_SECRET` | LiveKit API secret | `cozytrack-local-livekit-secret-32` |
 | `LIVEKIT_URL` | LiveKit server URL (server-side) | `ws://localhost:7880` |
@@ -191,6 +192,7 @@ livekit.yaml                   # LiveKit server config
 | `S3_FORCE_PATH_STYLE` | Forces path-style S3 URLs for MinIO and other local endpoints. | `true` |
 | `MINIO_ROOT_USER` | Local MinIO console and API user. | `minioadmin` |
 | `MINIO_ROOT_PASSWORD` | Local MinIO console and API password. | `minioadmin` |
+| `MINIO_API_CORS_ALLOW_ORIGIN` | Comma-separated origins allowed by local MinIO. | `http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001` |
 | `AUTH_SECRET` | 32+ char secret for signing host + guest session JWTs. Generate with `openssl rand -hex 32`. | — (required) |
 | `HOST_PASSWORD` | Plaintext password for host sign-in. **Minimum 12 characters.** Hashed with scrypt at startup. | — (required) |
 | `COZYTRACK_API_KEY` | Shared secret checked against the `X-API-Key` header on `/api/ingest/*` (external-consumer endpoints used by tools like podline's `sd ct-ingest`). Browser-facing routes under `/api/sessions*` and `/api/tracks/*` are not gated by this key. Skipped in `NODE_ENV=development` for requests from `127.0.0.1` / `::1`. | — |

@@ -35,6 +35,7 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_API_CORS_ALLOW_ORIGIN: ${MINIO_API_CORS_ALLOW_ORIGIN:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001}
     volumes:
       - miniodata:/data
     command: server /data --console-address ":9001"
@@ -48,10 +49,8 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
       S3_BUCKET_NAME: ${S3_BUCKET_NAME:-cozytrack-local}
-      MINIO_CORS_FILE: /tmp/s3-cors-console.json
     volumes:
       - ./scripts/minio-bucket.sh:/scripts/minio-bucket.sh:ro
-      - ./infra/s3-cors-console.json:/tmp/s3-cors-console.json:ro
     entrypoint: ["/bin/sh"]
     command: ["/scripts/minio-bucket.sh", "provision"]
 
@@ -66,10 +65,8 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
       S3_BUCKET_NAME: ${S3_BUCKET_NAME:-cozytrack-local}
-      MINIO_CORS_FILE: /tmp/s3-cors-console.json
     volumes:
       - ./scripts/minio-bucket.sh:/scripts/minio-bucket.sh:ro
-      - ./infra/s3-cors-console.json:/tmp/s3-cors-console.json:ro
     entrypoint: ["/bin/sh"]
 
 volumes:

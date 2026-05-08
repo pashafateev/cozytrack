@@ -12,6 +12,9 @@ Two files, same rules, different shape:
 - **`s3-cors.json`** — wrapped as `{ "CORSRules": [...] }`. Use with the AWS CLI / SDK.
 - **`s3-cors-console.json`** — just the array `[...]`. Paste into the AWS Console's CORS editor.
 
+Local MinIO does not use these bucket-level files. Docker Compose configures
+local CORS with `MINIO_API_CORS_ALLOW_ORIGIN` on the MinIO service instead.
+
 ### Via AWS Console
 
 1. S3 → Buckets → `cozytrack` → Permissions tab

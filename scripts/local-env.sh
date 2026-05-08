@@ -5,6 +5,10 @@ load_local_env() {
   [ -f ./.env ] && . ./.env
   [ -f ./.env.local ] && . ./.env.local
   set +a
+
+  if [ -z "${DIRECT_DATABASE_URL:-}" ] && [ -n "${DATABASE_URL:-}" ]; then
+    export DIRECT_DATABASE_URL="$DATABASE_URL"
+  fi
 }
 
 is_local_s3_endpoint() {
