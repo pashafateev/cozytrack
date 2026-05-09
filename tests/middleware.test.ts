@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { NextRequest } from "next/server";
-import { middleware, config as middlewareConfig } from "../middleware";
+import { middleware, config as middlewareConfig } from "../src/middleware";
 
 function makeReq(
   url: string,
@@ -19,15 +19,15 @@ describe("auth middleware", () => {
     vi.unstubAllEnvs();
   });
 
-  it("returns 401 when no API key is provided", () => {
-    const res = middleware(
+  it("returns 401 when no API key is provided", async () => {
+    const res = await middleware(
       makeReq("http://localhost:3001/api/ingest/sessions")
     );
     expect(res.status).toBe(401);
   });
 
-  it("returns 401 for a wrong API key", () => {
-    const res = middleware(
+  it("returns 401 for a wrong API key", async () => {
+    const res = await middleware(
       makeReq("http://localhost:3001/api/ingest/sessions", {
         "x-api-key": "wrong",
       })
@@ -35,8 +35,8 @@ describe("auth middleware", () => {
     expect(res.status).toBe(401);
   });
 
-  it("passes through with the correct API key", () => {
-    const res = middleware(
+  it("passes through with the correct API key", async () => {
+    const res = await middleware(
       makeReq("http://localhost:3001/api/ingest/sessions", {
         "x-api-key": "test-secret",
       })
@@ -45,9 +45,9 @@ describe("auth middleware", () => {
     expect(res.status).toBe(200);
   });
 
-  it("bypasses auth in development from localhost", () => {
+  it("bypasses auth in development from localhost", async () => {
     vi.stubEnv("NODE_ENV", "development");
-    const res = middleware(
+    const res = await middleware(
       makeReq("http://localhost:3001/api/ingest/sessions", {
         "x-forwarded-for": "127.0.0.1",
       })
@@ -57,13 +57,9 @@ describe("auth middleware", () => {
 });
 
 describe("middleware matcher", () => {
-  it("only protects /api/ingest/* — not browser-facing routes", () => {
-    expect(middlewareConfig.matcher).toEqual(["/api/ingest/:path*"]);
-    // Sanity: the matcher must not contain anything that would gate the
-    // browser-facing routes used by the studio UI.
-    for (const pattern of middlewareConfig.matcher) {
-      expect(pattern.startsWith("/api/sessions")).toBe(false);
-      expect(pattern.startsWith("/api/tracks")).toBe(false);
-    }
+  it("runs the app-wide auth middleware", () => {
+    expect(middlewareConfig.matcher).toEqual([
+      "/((?!_next/static|_next/image|favicon.ico).*)",
+    ]);
   });
 });
