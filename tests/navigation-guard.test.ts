@@ -3,6 +3,7 @@ import { shouldInterceptAnchorClick } from "../src/hooks/useNavigationGuard";
 
 const ORIGIN = "https://app.cozytrack.test";
 const STUDIO_PATH = "/studio/abc123";
+const STUDIO_URL = `${ORIGIN}${STUDIO_PATH}`;
 
 function click(overrides: Partial<Parameters<typeof shouldInterceptAnchorClick>[0]> = {}) {
   return shouldInterceptAnchorClick(
@@ -14,8 +15,7 @@ function click(overrides: Partial<Parameters<typeof shouldInterceptAnchorClick>[
       button: 0,
       ...overrides,
     },
-    ORIGIN,
-    STUDIO_PATH,
+    STUDIO_URL,
   );
 }
 
@@ -58,7 +58,19 @@ describe("shouldInterceptAnchorClick", () => {
   it("does not intercept same-pathname links (in-page anchors / re-clicks)", () => {
     expect(click({ href: STUDIO_PATH })).toBe(false);
     expect(click({ href: `${STUDIO_PATH}#invite` })).toBe(false);
-    expect(click({ href: `${ORIGIN}${STUDIO_PATH}` })).toBe(false);
+    expect(click({ href: STUDIO_URL })).toBe(false);
+  });
+
+  it("does not intercept same-document hash hrefs", () => {
+    // Bare hash hrefs (e.g. <a href="#invite">) must resolve onto the
+    // current pathname, not the origin root.
+    expect(click({ href: "#invite" })).toBe(false);
+    expect(click({ href: "#" })).toBe(false);
+  });
+
+  it("does not intercept same-document query-only hrefs", () => {
+    expect(click({ href: "?tab=invite" })).toBe(false);
+    expect(click({ href: "?" })).toBe(false);
   });
 
   it("does not intercept anchors without an href", () => {

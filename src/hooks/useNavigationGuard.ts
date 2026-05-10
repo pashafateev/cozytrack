@@ -28,6 +28,19 @@ interface AnchorClickInfo {
   button: number;
 }
 
+// Marker we tag onto our pushState entry so we can recognize it on cleanup
+// and pop it without disturbing application state pushed by other code.
+const SENTINEL_KEY = "__cozytrackNavGuard__";
+type SentinelState = { [SENTINEL_KEY]: true; inner: unknown };
+
+function isSentinelState(state: unknown): state is SentinelState {
+  return (
+    typeof state === "object" &&
+    state !== null &&
+    (state as { [SENTINEL_KEY]?: unknown })[SENTINEL_KEY] === true
+  );
+}
+
 /**
  * Pure decision: given a clicked anchor's properties and the current
  * location, should we intercept (warn) before letting the browser navigate?
@@ -40,12 +53,12 @@ interface AnchorClickInfo {
  * - modified clicks (cmd/ctrl/shift/alt) and middle-click — those don't leave
  *   the current document
  * - cross-origin links (we only care about leaving the studio in-app)
- * - same-pathname links (in-page anchors and re-clicks)
+ * - same-pathname links (in-page anchors and re-clicks, including bare
+ *   `#hash` and `?query` hrefs that resolve onto the current pathname)
  */
 export function shouldInterceptAnchorClick(
   info: AnchorClickInfo,
-  currentOrigin: string,
-  currentPathname: string,
+  currentUrl: string,
 ): boolean {
   if (info.button !== 0) return false;
   if (info.modifierPressed) return false;
@@ -55,16 +68,20 @@ export function shouldInterceptAnchorClick(
   const href = info.href;
   if (!href) return false;
 
+  let current: URL;
   let url: URL;
   try {
-    url = new URL(href, currentOrigin);
+    current = new URL(currentUrl);
+    // Resolve relative hrefs against the full current URL so bare `#hash`
+    // and `?query` hrefs land on the current pathname instead of root.
+    url = new URL(href, currentUrl);
   } catch {
     return false;
   }
 
   if (url.protocol !== "http:" && url.protocol !== "https:") return false;
-  if (url.origin !== currentOrigin) return false;
-  if (url.pathname === currentPathname) return false;
+  if (url.origin !== current.origin) return false;
+  if (url.pathname === current.pathname) return false;
 
   return true;
 }
@@ -114,8 +131,7 @@ export function useNavigationGuard({ when, message }: NavigationGuardOptions): v
           modifierPressed: e.metaKey || e.ctrlKey || e.shiftKey || e.altKey,
           button: e.button,
         },
-        window.location.origin,
-        window.location.pathname,
+        window.location.href,
       );
       if (!intercept) return;
 
@@ -138,20 +154,38 @@ export function useNavigationGuard({ when, message }: NavigationGuardOptions): v
       }
     };
 
+    const pushSentinel = () => {
+      const inner = isSentinelState(window.history.state)
+        ? window.history.state.inner
+        : window.history.state;
+      const sentinel: SentinelState = { [SENTINEL_KEY]: true, inner };
+      window.history.pushState(sentinel, "", window.location.href);
+    };
+
     // Sentinel history entry so we can catch the first browser-back press.
-    // popstate fires after the browser has already moved the pointer back, so
-    // pre-pushing gives us something to consume without actually leaving.
-    window.history.pushState(window.history.state, "", window.location.href);
+    // popstate fires after the browser has already moved the pointer back,
+    // so pre-pushing gives us something to consume without actually leaving.
+    pushSentinel();
+
+    // When we accept a back navigation we call history.back() ourselves,
+    // which triggers a second popstate while the listener is still attached.
+    // This flag swallows that one so we don't re-prompt on the way out.
+    let skipNextPop = false;
 
     const onPopState = () => {
+      if (skipNextPop) {
+        skipNextPop = false;
+        return;
+      }
       if (window.confirm(messageRef.current)) {
         // User accepted: we already popped the sentinel, so step back once
-        // more to actually leave the studio entry.
+        // more to actually leave. Mark the resulting popstate as ours.
+        skipNextPop = true;
         window.history.back();
       } else {
         // User cancelled: re-push the sentinel so the next back press will
         // trip popstate again instead of silently leaving.
-        window.history.pushState(window.history.state, "", window.location.href);
+        pushSentinel();
       }
     };
 
@@ -165,6 +199,13 @@ export function useNavigationGuard({ when, message }: NavigationGuardOptions): v
       document.removeEventListener("click", onClickCapture, true);
       document.removeEventListener("submit", onSubmitCapture, true);
       window.removeEventListener("popstate", onPopState);
+      // If our sentinel is still on top of the history stack, pop it so
+      // back-navigation behaves normally after the guard disarms (no extra
+      // back press needed). Listener is already removed, so the resulting
+      // popstate is a no-op.
+      if (isSentinelState(window.history.state)) {
+        window.history.back();
+      }
     };
   }, [when]);
 }
