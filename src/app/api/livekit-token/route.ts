@@ -37,8 +37,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Stamp the principal's role into the LiveKit token metadata. Receivers
+    // read `participant.metadata` off the LiveKit room to verify that
+    // host-only control messages (e.g. recording_start/stop) actually came
+    // from a host. Forging this requires forging a LiveKit token, which
+    // requires the server-held LIVEKIT_API_SECRET, so the role is trustworthy
+    // at the room edge.
+    const metadata = JSON.stringify({ role: principal.kind });
     const at = new AccessToken(apiKey, apiSecret, {
       identity: participantName,
+      metadata,
     });
     at.addGrant({ roomJoin: true, room: roomName });
     const token = await at.toJwt();
