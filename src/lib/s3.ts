@@ -76,6 +76,10 @@ export function trackPrefix(sessionId: string, trackId: string): string {
   return `sessions/${sessionId}/tracks/${trackId}/`;
 }
 
+export function sessionPrefix(sessionId: string): string {
+  return `sessions/${sessionId}/`;
+}
+
 export async function getPresignedPutUrl(key: string): Promise<string> {
   const command = new PutObjectCommand({
     Bucket: bucket,
@@ -91,6 +95,58 @@ export async function getPresignedGetUrl(key: string): Promise<string> {
     Key: key,
   });
   return getSignedUrl(s3, command, { expiresIn: 3600 });
+}
+
+async function deleteObjects(keysToDelete: string[]): Promise<void> {
+  if (keysToDelete.length === 0) {
+    return;
+  }
+
+  const response = await s3.send(
+    new DeleteObjectsCommand({
+      Bucket: bucket,
+      Delete: {
+        Objects: keysToDelete.map((Key) => ({ Key })),
+        Quiet: true,
+      },
+    })
+  );
+
+  if (response.Errors && response.Errors.length > 0) {
+    const keys = response.Errors.map((error) => error.Key).filter(Boolean);
+    throw new Error(
+      `Failed to delete S3 objects${keys.length ? `: ${keys.join(", ")}` : ""}`
+    );
+  }
+}
+
+export async function deleteSessionObjects(sessionId: string): Promise<number> {
+  const prefix = sessionPrefix(sessionId);
+  let continuationToken: string | undefined;
+  let deletedObjects = 0;
+
+  do {
+    const response = await s3.send(
+      new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: prefix,
+        ContinuationToken: continuationToken,
+      })
+    );
+
+    const keysToDelete = (response.Contents ?? [])
+      .map((object) => object.Key)
+      .filter((key): key is string => Boolean(key));
+
+    await deleteObjects(keysToDelete);
+    deletedObjects += keysToDelete.length;
+
+    continuationToken = response.IsTruncated
+      ? response.NextContinuationToken
+      : undefined;
+  } while (continuationToken);
+
+  return deletedObjects;
 }
 
 export async function deleteTrackChunks(
@@ -119,17 +175,7 @@ export async function deleteTrackChunks(
           key !== finalKey && chunkKeyPattern.test(key.slice(prefix.length))
       );
 
-    if (keysToDelete.length > 0) {
-      await s3.send(
-        new DeleteObjectsCommand({
-          Bucket: bucket,
-          Delete: {
-            Objects: keysToDelete.map((Key) => ({ Key })),
-            Quiet: true,
-          },
-        })
-      );
-    }
+    await deleteObjects(keysToDelete);
 
     continuationToken = response.IsTruncated
       ? response.NextContinuationToken

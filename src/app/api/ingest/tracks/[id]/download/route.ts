@@ -20,6 +20,13 @@ export async function GET(
       );
     }
 
+    if (track.s3PurgedAt) {
+      return NextResponse.json(
+        { error: "Track recording has been purged" },
+        { status: 410 }
+      );
+    }
+
     if (!track.s3Key) {
       return NextResponse.json(
         { error: "Track recording not available" },
