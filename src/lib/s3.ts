@@ -2,8 +2,11 @@ import {
   S3Client,
   PutObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   ListObjectsV2Command,
   DeleteObjectsCommand,
+  NoSuchKey,
+  NotFound,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
@@ -91,6 +94,95 @@ export async function getPresignedGetUrl(key: string): Promise<string> {
     Key: key,
   });
   return getSignedUrl(s3, command, { expiresIn: 3600 });
+}
+
+export async function listTrackChunkParts(
+  sessionId: string,
+  trackId: string
+): Promise<{ partNumber: number; key: string; size: number }[]> {
+  const prefix = trackPrefix(sessionId, trackId);
+  const chunkKeyPattern = /^(\d+)\.webm$/;
+  const parts: { partNumber: number; key: string; size: number }[] = [];
+  let continuationToken: string | undefined;
+
+  do {
+    const response = await s3.send(
+      new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: prefix,
+        ContinuationToken: continuationToken,
+      })
+    );
+
+    for (const object of response.Contents ?? []) {
+      const key = object.Key;
+      if (!key) continue;
+      const match = chunkKeyPattern.exec(key.slice(prefix.length));
+      if (!match) continue;
+      const partNumber = Number(match[1]);
+      if (partNumber === 9999) continue;
+      parts.push({ partNumber, key, size: object.Size ?? 0 });
+    }
+
+    continuationToken = response.IsTruncated
+      ? response.NextContinuationToken
+      : undefined;
+  } while (continuationToken);
+
+  parts.sort((a, b) => a.partNumber - b.partNumber);
+  return parts;
+}
+
+export async function trackRecordingExists(
+  sessionId: string,
+  trackId: string
+): Promise<boolean> {
+  try {
+    await s3.send(
+      new HeadObjectCommand({
+        Bucket: bucket,
+        Key: trackRecordingKey(sessionId, trackId),
+      })
+    );
+    return true;
+  } catch (error) {
+    if (error instanceof NotFound || error instanceof NoSuchKey) {
+      return false;
+    }
+    // Some S3 implementations surface 404 as a generic error with the right
+    // status code instead of NotFound. Don't swallow other failures.
+    const status = (error as { $metadata?: { httpStatusCode?: number } })
+      ?.$metadata?.httpStatusCode;
+    if (status === 404) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+export async function getObjectBytes(key: string): Promise<Uint8Array> {
+  const response = await s3.send(
+    new GetObjectCommand({ Bucket: bucket, Key: key })
+  );
+  const body = response.Body;
+  if (!body) {
+    throw new Error(`S3 object ${key} returned empty body`);
+  }
+  return await body.transformToByteArray();
+}
+
+export async function putObjectBytes(
+  key: string,
+  bytes: Uint8Array
+): Promise<void> {
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: bytes,
+      ContentType: "audio/webm",
+    })
+  );
 }
 
 export async function deleteTrackChunks(
