@@ -7,7 +7,7 @@
   },
   "scripts": {
     "dev": "bash ./scripts/check-aws-auth.sh && next dev -p 3001",
-    "dev:local": "docker compose up -d && npm run db:push && npm run dev",
+    "dev:local": "bash ./scripts/dev-local.sh",
     "init:local": "npm run reset:local && npm run dev",
     "reset:local": "bash ./scripts/reset-local.sh",
     "build": "next build",
