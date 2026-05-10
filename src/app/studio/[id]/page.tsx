@@ -40,6 +40,7 @@ import {
 } from "@/components/MicMonitorToggle";
 import { useMicMonitor } from "@/hooks/useMicMonitor";
 import { useRemoteAudioLevels } from "@/hooks/useRemoteAudioLevels";
+import { useTimingDiagnostics } from "@/hooks/useTimingDiagnostics";
 import {
   CLIP_MIN_FRAMES,
   CLIP_THRESHOLD,
@@ -792,6 +793,21 @@ function RoomContent({
   // flagged a participant as "speaking" — fine for grid highlights but useless
   // for level monitoring (silent talkers + no clipping signal). See #47.
   const remoteAudio = useRemoteAudioLevels(remoteParticipants);
+
+  // Issue #7 investigation: ?timing=1 enables structured [TIMING] console logs
+  // (getStats snapshots + chunk/start/stop events) for cross-track drift
+  // analysis. No-op without the flag.
+  const timingDebug = useMemo(
+    () =>
+      typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("timing") === "1",
+    [],
+  );
+  useTimingDiagnostics({
+    enabled: timingDebug,
+    localParticipant,
+    remoteParticipants,
+  });
   // Merge remote levels into the same audioLevels map the local meter feeds.
   useEffect(() => {
     setAudioLevels((prev) => {
@@ -881,6 +897,20 @@ function RoomContent({
         const byteLength = chunk.size;
         trackerOnChunkRecorded(byteLength);
 
+        if (timingDebug) {
+          console.log(
+            "[TIMING]",
+            JSON.stringify({
+              event: "chunk",
+              t: Date.now(),
+              perfNow: performance.now(),
+              trackId,
+              chunkIndex: index,
+              chunkBytes: byteLength,
+            }),
+          );
+        }
+
         const uploadPromise = (async () => {
           const url = await getPresignedUploadUrl(sessionId, trackId, index);
           await uploadChunk(url, chunk);
@@ -891,6 +921,20 @@ function RoomContent({
 
       recorderRef.current = recorder;
       recordingStartRef.current = Date.now();
+
+      if (timingDebug) {
+        console.log(
+          "[TIMING]",
+          JSON.stringify({
+            event: "record-start",
+            t: recordingStartRef.current,
+            perfNow: performance.now(),
+            sessionStartedAt: sessionStartedAtIso,
+            trackId,
+            participant: participantName,
+          }),
+        );
+      }
 
       try {
         await recorder.start(5000);
@@ -922,6 +966,7 @@ function RoomContent({
       trackerReset,
       trackerOnChunkRecorded,
       trackerTrackUpload,
+      timingDebug,
     ],
   );
 
@@ -944,6 +989,21 @@ function RoomContent({
     try {
       const blob = await recorder.stop();
       const durationMs = Date.now() - startedAt;
+
+      if (timingDebug) {
+        console.log(
+          "[TIMING]",
+          JSON.stringify({
+            event: "record-stop",
+            t: Date.now(),
+            perfNow: performance.now(),
+            trackId,
+            startedAt,
+            durationMs,
+            finalBlobBytes: blob.size,
+          }),
+        );
+      }
 
       // Freeze denominator — recording is done, no more chunks will arrive.
       trackerFreezeRecorded();
@@ -995,6 +1055,7 @@ function RoomContent({
     trackerOnChunkRecorded,
     trackerTrackUpload,
     trackerWaitForUploads,
+    timingDebug,
   ]);
 
   // Button handler: broadcast first so remote participants start close to our
