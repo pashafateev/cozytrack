@@ -68,8 +68,10 @@ function parseControlMessage(raw: unknown): ControlMessage | null {
     return {
       type: "recording_status",
       state: obj.state,
-      ...(obj.sessionStartedAt ? { sessionStartedAt: obj.sessionStartedAt } : {}),
-      ...(obj.reason ? { reason: obj.reason } : {}),
+      ...(obj.sessionStartedAt !== undefined
+        ? { sessionStartedAt: obj.sessionStartedAt }
+        : {}),
+      ...(obj.reason !== undefined ? { reason: obj.reason } : {}),
     };
   }
   return null;

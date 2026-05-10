@@ -637,6 +637,17 @@ function RoomContent({
     recordingConfirmationTimerRef.current = null;
   }, []);
 
+  const clearRecordingConfirmationState = useCallback(
+    (clearSession = true) => {
+      clearRecordingConfirmationTimer();
+      expectedRecordingParticipantsRef.current = new Set();
+      setExpectedRecordingParticipants(new Set());
+      setUnconfirmedRecordingParticipants(new Set());
+      if (clearSession) setRecordingSessionStartedAtSync(null);
+    },
+    [clearRecordingConfirmationTimer, setRecordingSessionStartedAtSync],
+  );
+
   const showNotification = useCallback((message: string) => {
     if (notificationTimerRef.current) clearTimeout(notificationTimerRef.current);
     setNotification(message);
@@ -684,7 +695,8 @@ function RoomContent({
         if (recordingSessionStartedAtRef.current !== sessionStartedAt) return;
 
         const statuses = remoteRecordingStatusesRef.current;
-        const unconfirmed = Array.from(expected).filter((identity) => {
+        const currentExpected = expectedRecordingParticipantsRef.current;
+        const unconfirmed = Array.from(currentExpected).filter((identity) => {
           const status = statuses.get(identity);
           if (status?.sessionStartedAt !== sessionStartedAt) return true;
           return status.state !== "recording" && status.state !== "failed";
@@ -711,8 +723,8 @@ function RoomContent({
         await transport.sendControlMessage({
           type: "recording_status",
           state,
-          ...(sessionStartedAt ? { sessionStartedAt } : {}),
-          ...(reason ? { reason } : {}),
+          ...(sessionStartedAt !== undefined ? { sessionStartedAt } : {}),
+          ...(reason !== undefined ? { reason } : {}),
         });
       } catch (err) {
         console.error("Failed to broadcast recording_status:", err);
@@ -1010,11 +1022,9 @@ function RoomContent({
         return true;
       }
 
-      setRecordingSessionStartedAtSync(sessionStartedAtIso);
-      scheduleRecordingConfirmationCheck(sessionStartedAtIso);
-
       if (!streamRef.current) {
         console.warn("Cannot start recording: microphone stream unavailable");
+        clearRecordingConfirmationState();
         void broadcastRecordingStatus(
           "failed",
           sessionStartedAtIso,
@@ -1037,6 +1047,7 @@ function RoomContent({
         });
       } catch (err) {
         console.error("Failed to initialize upload:", err);
+        clearRecordingConfirmationState();
         void broadcastRecordingStatus(
           "failed",
           sessionStartedAtIso,
@@ -1069,6 +1080,7 @@ function RoomContent({
       } catch (err) {
         console.error("Failed to start recorder:", err);
         recorderRef.current = null;
+        clearRecordingConfirmationState();
         void broadcastRecordingStatus(
           "failed",
           sessionStartedAtIso,
@@ -1077,6 +1089,8 @@ function RoomContent({
         return false;
       }
 
+      setRecordingSessionStartedAtSync(sessionStartedAtIso);
+      scheduleRecordingConfirmationCheck(sessionStartedAtIso);
       setStudioStateSync("recording");
       void broadcastRecordingStatus("recording", sessionStartedAtIso);
 
@@ -1091,6 +1105,7 @@ function RoomContent({
     },
     [
       broadcastRecordingStatus,
+      clearRecordingConfirmationState,
       participantName,
       scheduleRecordingConfirmationCheck,
       selectedMic,
@@ -1112,17 +1127,14 @@ function RoomContent({
   const stopRecordingLocal = useCallback(async () => {
     const sessionStartedAtForStatus =
       recordingSessionStartedAtRef.current ?? undefined;
-    clearRecordingConfirmationTimer();
-    expectedRecordingParticipantsRef.current = new Set();
-    setExpectedRecordingParticipants(new Set());
-    setUnconfirmedRecordingParticipants(new Set());
+    if (studioStateRef.current === "finalizing") return;
+    clearRecordingConfirmationState(false);
 
     if (!recorderRef.current) {
       setRecordingSessionStartedAtSync(null);
       void broadcastRecordingStatus("connected", sessionStartedAtForStatus);
       return;
     }
-    if (studioStateRef.current === "finalizing") return;
 
     // Snapshot per-recording state into local consts BEFORE any await so a
     // hypothetical concurrent attempt to re-record (blocked by the
@@ -1185,7 +1197,7 @@ function RoomContent({
     }
   }, [
     broadcastRecordingStatus,
-    clearRecordingConfirmationTimer,
+    clearRecordingConfirmationState,
     sessionId,
     setRecordingSessionStartedAtSync,
     setStudioStateSync,
