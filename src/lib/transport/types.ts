@@ -18,9 +18,21 @@ export interface TransportEvents {
 // Discriminated union of control messages broadcast between participants via
 // the data channel. Extend this union (not a generic payload) so all senders
 // and handlers get type-checked.
+export type RecordingStatusState =
+  | "connected"
+  | "recording"
+  | "finalizing"
+  | "failed";
+
 export type ControlMessage =
   | { type: "recording_start"; sessionStartedAt: string /* ISO8601 */ }
-  | { type: "recording_stop" };
+  | { type: "recording_stop" }
+  | {
+      type: "recording_status";
+      state: RecordingStatusState;
+      sessionStartedAt?: string /* ISO8601 */;
+      reason?: string;
+    };
 
 export interface Transport {
   /**
