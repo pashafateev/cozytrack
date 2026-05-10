@@ -92,7 +92,7 @@ Self-hosted podcast recording studio. A Riverside.fm alternative focused on loca
    npm run dev:local
    ```
 
-   This starts Docker services, creates the MinIO bucket, pushes the Prisma schema, and starts Next.js on port 3001.
+   This starts Docker services with the local MinIO profile enabled, creates the MinIO bucket, pushes the Prisma schema, and starts Next.js on port 3001. `dev:local` always overrides storage settings to use local MinIO, even if `.env` contains cloud-backed S3 values.
 
 4. **Open** [http://localhost:3001](http://localhost:3001)
 
@@ -123,7 +123,7 @@ To use a real AWS S3 bucket during local development:
 
 `npm run dev` checks AWS auth up front when no custom S3 endpoint is configured and fails fast if the current AWS session is expired. Reauthenticate with `aws login` and rerun the command if needed.
 
-The local MinIO console is available at [http://localhost:9001](http://localhost:9001) with the `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` values from `.env`.
+The local MinIO console is available after `npm run dev:local` at [http://localhost:9001](http://localhost:9001) with the `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` values from `.env`.
 
 ### Local Reset
 
@@ -134,7 +134,7 @@ npm run reset:local
 ```
 
 This will:
-- start local Docker services if needed
+- start local Docker services if needed, enabling MinIO only when the configured S3 endpoint is local
 - reset the local Prisma database
 - empty the configured local MinIO bucket, or fully empty an AWS-backed dev bucket including versioned objects and delete markers
 
@@ -170,7 +170,7 @@ src/
 │   └── upload.ts              # Client-side upload functions
 prisma/
 │   └── schema.prisma          # Database schema
-docker-compose.yml             # LiveKit + Postgres + Redis + MinIO
+docker-compose.yml             # LiveKit + Postgres + Redis, plus opt-in MinIO
 livekit.yaml                   # LiveKit server config
 ```
 

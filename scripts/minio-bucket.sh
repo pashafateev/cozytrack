@@ -17,9 +17,18 @@ esac
 : "${MINIO_ROOT_USER:=minioadmin}"
 : "${MINIO_ROOT_PASSWORD:=minioadmin}"
 : "${S3_BUCKET_NAME:=cozytrack-local}"
+: "${MINIO_READY_RETRIES:=60}"
 
+attempt=1
 until mc alias set local "$MINIO_ENDPOINT" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; do
-  echo "Waiting for MinIO at $MINIO_ENDPOINT"
+  if [ "$attempt" -ge "$MINIO_READY_RETRIES" ]; then
+    echo "Timed out waiting for MinIO at $MINIO_ENDPOINT after $MINIO_READY_RETRIES attempts." >&2
+    echo "Check that MinIO is running and the configured credentials are correct." >&2
+    exit 1
+  fi
+
+  echo "Waiting for MinIO at $MINIO_ENDPOINT ($attempt/$MINIO_READY_RETRIES)"
+  attempt=$((attempt + 1))
   sleep 1
 done
 

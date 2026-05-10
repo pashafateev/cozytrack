@@ -19,14 +19,18 @@ case "$S3_BUCKET_NAME" in
     ;;
 esac
 
-docker compose up -d
+if is_local_s3_endpoint; then
+  docker compose --profile local-storage up -d
+else
+  docker compose up -d
+fi
 
 echo "Resetting database"
 npx prisma db push --force-reset --accept-data-loss >/dev/null
 
 if is_local_s3_endpoint; then
   echo "Emptying MinIO bucket $S3_BUCKET_NAME"
-  docker compose run --rm minio-mc /scripts/minio-bucket.sh empty
+  docker compose --profile local-storage --profile tools run --rm minio-mc /scripts/minio-bucket.sh empty
   echo "Local reset complete"
   exit 0
 fi
