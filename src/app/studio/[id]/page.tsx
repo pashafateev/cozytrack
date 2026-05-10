@@ -48,6 +48,7 @@ import {
 } from "@/lib/audio-meter";
 import { FinishRecordingButton } from "@/components/FinishRecordingButton";
 import { useUploadProgress } from "@/hooks/useUploadProgress";
+import { useNavigationGuard } from "@/hooks/useNavigationGuard";
 import { UploadProgressBar } from "@/components/UploadProgressBar";
 
 import { Topbar } from "@/components/ui/Topbar";
@@ -1049,17 +1050,19 @@ function RoomContent({
   }, [transport, startRecordingLocal, stopRecordingLocal, showNotification]);
 
 
-  // Warn before tab close when uploads are in flight or recording is active.
-  // This is the Layer A fix for #49 — prevents accidental data loss.
-  useEffect(() => {
-    if (!uploadTracker.hasInflight && studioState !== "recording") return;
-    const handler = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-      e.returnValue = "";
-    };
-    window.addEventListener("beforeunload", handler);
-    return () => window.removeEventListener("beforeunload", handler);
-  }, [uploadTracker.hasInflight, studioState]);
+  // Block accidental navigation while recording, finalizing, or uploading.
+  // Covers tab close (beforeunload), browser back/forward (popstate), in-app
+  // <a>/Link clicks, and form submits (e.g. the topbar sign-out POST). See
+  // #73 for the live-test repro and #49 for the original tab-close warning
+  // this supersedes.
+  useNavigationGuard({
+    when:
+      studioState === "recording" ||
+      studioState === "finalizing" ||
+      uploadTracker.hasInflight,
+    message:
+      "Recording is in progress and may be lost if you leave. Leave anyway?",
+  });
 
   useEffect(() => {
     return () => {
