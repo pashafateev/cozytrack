@@ -11,6 +11,16 @@ type Session = {
 
 const sessionStore = new Map<string, Session>();
 
+function tracksFor(sessionId: string): Track[] {
+  return sessionStore.get(sessionId)?.tracks ?? [];
+}
+
+vi.mock("@/lib/recovery", () => ({
+  // Recovery is exercised in tests/recovery.test.ts. In finalize tests we
+  // assert the orchestration around it; the recovery itself is a no-op.
+  recoverTrack: vi.fn(async (trackId: string) => ({ trackId })),
+}));
+
 vi.mock("@/lib/db", () => ({
   db: {
     session: {
@@ -48,6 +58,24 @@ vi.mock("@/lib/db", () => ({
           }
           sessionStore.set(where.id, { ...existing, ...data });
           return { count: 1 };
+        },
+      ),
+    },
+    track: {
+      findMany: vi.fn(
+        async ({
+          where,
+        }: {
+          where: { id: { in: string[] } };
+        }) => {
+          const ids = new Set(where.id.in);
+          const all: Track[] = [];
+          for (const s of sessionStore.values()) {
+            for (const t of s.tracks) {
+              if (ids.has(t.id)) all.push(structuredClone(t));
+            }
+          }
+          return all;
         },
       ),
     },
@@ -92,6 +120,73 @@ describe("POST /api/sessions/[id]/finalize", () => {
     expect(body.pending).toEqual([
       { trackId: "t2", participantName: "Bob", status: "uploading" },
     ]);
+
+    // Recovery must be attempted for the non-complete track.
+    const { recoverTrack } = (await import("@/lib/recovery")) as unknown as {
+      recoverTrack: ReturnType<typeof vi.fn>;
+    };
+    expect(recoverTrack).toHaveBeenCalledWith(
+      "t2",
+      expect.objectContaining({ chunkStitchMinAgeMs: expect.any(Number) }),
+    );
+  });
+
+  it("finalizes when recovery flips a stuck track to complete", async () => {
+    sessionStore.set("s5", {
+      id: "s5",
+      name: "demo",
+      status: "recording",
+      finalizedAt: null,
+      tracks: [{ id: "t1", participantName: "Alice", status: "uploading" }],
+    });
+
+    // Recovery is a no-op in the standard mock — simulate it flipping the
+    // track to complete so we exercise the "recovery enabled finalize" path.
+    const { recoverTrack } = (await import("@/lib/recovery")) as unknown as {
+      recoverTrack: ReturnType<typeof vi.fn>;
+    };
+    recoverTrack.mockImplementationOnce(async (trackId: string) => {
+      const s = sessionStore.get("s5")!;
+      s.tracks = s.tracks.map((t) =>
+        t.id === trackId ? { ...t, status: "complete" } : t,
+      );
+      sessionStore.set("s5", s);
+      return { trackId };
+    });
+
+    const res = await POST(req(), { params: Promise.resolve({ id: "s5" }) });
+    expect(res.status).toBe(200);
+
+    const body = (await res.json()) as Session;
+    expect(body.status).toBe("ready");
+    expect(body.finalizedAt).not.toBeNull();
+  });
+
+  it("treats recovery-failed tracks as terminal (does not block finalize)", async () => {
+    sessionStore.set("s6", {
+      id: "s6",
+      name: "demo",
+      status: "recording",
+      finalizedAt: null,
+      tracks: [{ id: "t1", participantName: "Alice", status: "uploading" }],
+    });
+
+    const { recoverTrack } = (await import("@/lib/recovery")) as unknown as {
+      recoverTrack: ReturnType<typeof vi.fn>;
+    };
+    recoverTrack.mockImplementationOnce(async (trackId: string) => {
+      const s = sessionStore.get("s6")!;
+      s.tracks = s.tracks.map((t) =>
+        t.id === trackId ? { ...t, status: "failed" } : t,
+      );
+      sessionStore.set("s6", s);
+      return { trackId };
+    });
+
+    const res = await POST(req(), { params: Promise.resolve({ id: "s6" }) });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Session;
+    expect(body.status).toBe("ready");
   });
 
   it("returns 200 and flips the session to ready when all tracks are complete", async () => {

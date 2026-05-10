@@ -38,6 +38,10 @@ model Track {
   // recording triggered from the same click (originator's local clock). Plumbed
   // now for future multi-track alignment; not yet used to align audio.
   sessionStartedAt DateTime?
+  // True when this track was recovered server-side from orphaned chunks and
+  // at least one chunk was missing from the partNumber sequence. Audio plays
+  // but has a gap. See issue #56 (server-side recovery).
+  partial         Boolean  @default(false)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 }
