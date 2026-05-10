@@ -69,9 +69,18 @@ export interface Transport {
 
   /**
    * Subscribe to control messages from other participants.
-   * Returns an unsubscribe function. The sender identity is passed so handlers
-   * can distinguish echoes of their own messages (though LiveKit's data channel
-   * does not echo to the sender — idempotency should still be enforced by state).
+   * Returns an unsubscribe function. The sender's identity and (optional)
+   * room-level metadata are passed so handlers can distinguish echoes of
+   * their own messages (though LiveKit's data channel does not echo to the
+   * sender — idempotency should still be enforced by state) and verify
+   * sender role for host-only messages. Metadata is whatever string the
+   * server stamped onto the participant's token; in cozytrack that's a JSON
+   * blob like `{"role":"host"}`. See src/lib/transport/participant-role.ts.
    */
-  onControlMessage(handler: (msg: ControlMessage, fromParticipant: string) => void): () => void;
+  onControlMessage(
+    handler: (
+      msg: ControlMessage,
+      sender: { identity: string; metadata?: string },
+    ) => void,
+  ): () => void;
 }

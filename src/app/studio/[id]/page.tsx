@@ -30,7 +30,11 @@ import { CozyRecorder } from "@/lib/recorder";
 import { forceMonoStream, getTrackChannelCount } from "@/lib/audio-downmix";
 import { getPresignedUploadUrl, uploadChunk, completeUpload } from "@/lib/upload";
 import { getToken, LIVEKIT_URL } from "@/lib/livekit";
-import { useTransport, type RecordingStatusState } from "@/lib/transport";
+import {
+  useTransport,
+  isHostSender,
+  type RecordingStatusState,
+} from "@/lib/transport";
 import { isSelectedMicBuiltIn } from "@/lib/devices";
 import { BuiltInMicWarningModal } from "@/components/BuiltInMicWarningModal";
 import {
@@ -40,6 +44,7 @@ import {
 } from "@/components/MicMonitorToggle";
 import { useMicMonitor } from "@/hooks/useMicMonitor";
 import { useRemoteAudioLevels } from "@/hooks/useRemoteAudioLevels";
+import { useTimingDiagnostics } from "@/hooks/useTimingDiagnostics";
 import {
   CLIP_MIN_FRAMES,
   CLIP_THRESHOLD,
@@ -48,6 +53,7 @@ import {
 } from "@/lib/audio-meter";
 import { FinishRecordingButton } from "@/components/FinishRecordingButton";
 import { useUploadProgress } from "@/hooks/useUploadProgress";
+import { useNavigationGuard } from "@/hooks/useNavigationGuard";
 import { UploadProgressBar } from "@/components/UploadProgressBar";
 
 import { Topbar } from "@/components/ui/Topbar";
@@ -917,6 +923,21 @@ function RoomContent({
   // flagged a participant as "speaking" — fine for grid highlights but useless
   // for level monitoring (silent talkers + no clipping signal). See #47.
   const remoteAudio = useRemoteAudioLevels(remoteParticipants);
+
+  // Issue #7 investigation: ?timing=1 enables structured [TIMING] console logs
+  // (getStats snapshots + chunk/start/stop events) for cross-track drift
+  // analysis. No-op without the flag.
+  const timingDebug = useMemo(
+    () =>
+      typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("timing") === "1",
+    [],
+  );
+  useTimingDiagnostics({
+    enabled: timingDebug,
+    localParticipant,
+    remoteParticipants,
+  });
   // Merge remote levels into the same audioLevels map the local meter feeds.
   useEffect(() => {
     setAudioLevels((prev) => {
@@ -1064,6 +1085,20 @@ function RoomContent({
         const byteLength = chunk.size;
         trackerOnChunkRecorded(byteLength);
 
+        if (timingDebug) {
+          console.log(
+            "[TIMING]",
+            JSON.stringify({
+              event: "chunk",
+              t: Date.now(),
+              perfNow: performance.now(),
+              trackId,
+              chunkIndex: index,
+              chunkBytes: byteLength,
+            }),
+          );
+        }
+
         const uploadPromise = (async () => {
           const url = await getPresignedUploadUrl(sessionId, trackId, index);
           await uploadChunk(url, chunk);
@@ -1074,6 +1109,20 @@ function RoomContent({
 
       recorderRef.current = recorder;
       recordingStartRef.current = Date.now();
+
+      if (timingDebug) {
+        console.log(
+          "[TIMING]",
+          JSON.stringify({
+            event: "record-start",
+            t: recordingStartRef.current,
+            perfNow: performance.now(),
+            sessionStartedAt: sessionStartedAtIso,
+            trackId,
+            participant: participantName,
+          }),
+        );
+      }
 
       try {
         await recorder.start(5000);
@@ -1119,6 +1168,7 @@ function RoomContent({
       trackerOnChunkRecorded,
       trackerReset,
       trackerTrackUpload,
+      timingDebug,
     ],
   );
 
@@ -1150,6 +1200,21 @@ function RoomContent({
     try {
       const blob = await recorder.stop();
       const durationMs = Date.now() - startedAt;
+
+      if (timingDebug) {
+        console.log(
+          "[TIMING]",
+          JSON.stringify({
+            event: "record-stop",
+            t: Date.now(),
+            perfNow: performance.now(),
+            trackId,
+            startedAt,
+            durationMs,
+            finalBlobBytes: blob.size,
+          }),
+        );
+      }
 
       // Freeze denominator — recording is done, no more chunks will arrive.
       trackerFreezeRecorded();
@@ -1206,16 +1271,33 @@ function RoomContent({
     trackerOnChunkRecorded,
     trackerTrackUpload,
     trackerWaitForUploads,
+    timingDebug,
   ]);
+
+  // Synchronous "request in flight" guards. Set true at the top of the click
+  // handler before any await so a rapid second click is dropped immediately
+  // (issue #74). studioStateRef is only updated mid-way through
+  // startRecordingLocal/stopRecordingLocal — between the click and that
+  // update there's an `await transport.sendControlMessage(...)` window where
+  // a second click would otherwise pass every existing guard. These refs
+  // close that window. Cleared in the finally block so a failed send does
+  // not permanently lock out the button.
+  const startingRef = useRef(false);
+  const stoppingRef = useRef(false);
 
   // Button handler: broadcast first so remote participants start close to our
   // own start time, then start locally. sessionStartedAt uses our local clock
   // so all participants share a single reference timestamp on the Track row.
   const handleStartRecording = useCallback(async () => {
+    // Host-only: guests should never reach this codepath because the button
+    // is hidden for them, but defend in depth — a guest with devtools could
+    // call this, and we still want correctness.
+    if (!isHost) return;
     // Hard invariant from issue #61: cannot start a new recording while a
     // previous one is finalizing. The button itself is disabled in that state,
     // but enforce here too for the broadcast/control-message path.
     if (
+      startingRef.current ||
       studioStateRef.current === "recording" ||
       studioStateRef.current === "finalizing" ||
       recorderRef.current
@@ -1223,44 +1305,70 @@ function RoomContent({
       return;
     }
 
-    const sessionStartedAt = new Date().toISOString();
+    startingRef.current = true;
     try {
-      await transport.sendControlMessage({ type: "recording_start", sessionStartedAt });
-    } catch (err) {
-      console.error("Failed to broadcast recording_start:", err);
-      showNotification("Couldn't tell the room to start recording");
-      return;
-    }
+      const sessionStartedAt = new Date().toISOString();
+      try {
+        await transport.sendControlMessage({ type: "recording_start", sessionStartedAt });
+      } catch (err) {
+        console.error("Failed to broadcast recording_start:", err);
+        showNotification("Couldn't tell the room to start recording");
+        return;
+      }
 
-    const started = await startRecordingLocal(sessionStartedAt);
-    if (!started) {
-      showNotification("Couldn't start your recorder — stopping the room");
+      const started = await startRecordingLocal(sessionStartedAt);
+      if (!started) {
+        showNotification("Couldn't start your recorder — stopping the room");
+        try {
+          await transport.sendControlMessage({ type: "recording_stop" });
+        } catch (err) {
+          console.error("Failed to broadcast recording_stop after start failure:", err);
+        }
+      }
+    } finally {
+      startingRef.current = false;
+    }
+  }, [isHost, transport, startRecordingLocal, showNotification]);
+
+  const handleStopRecording = useCallback(async () => {
+    if (!isHost) return;
+    if (stoppingRef.current) return;
+    stoppingRef.current = true;
+    try {
       try {
         await transport.sendControlMessage({ type: "recording_stop" });
       } catch (err) {
-        console.error("Failed to broadcast recording_stop after start failure:", err);
+        console.error("Failed to broadcast recording_stop:", err);
+        showNotification("Couldn't tell the room to stop recording");
       }
+      await stopRecordingLocal();
+    } finally {
+      stoppingRef.current = false;
     }
-  }, [transport, startRecordingLocal, showNotification]);
-
-  const handleStopRecording = useCallback(async () => {
-    try {
-      await transport.sendControlMessage({ type: "recording_stop" });
-    } catch (err) {
-      console.error("Failed to broadcast recording_stop:", err);
-      showNotification("Couldn't tell the room to stop recording");
-    }
-    await stopRecordingLocal();
-  }, [transport, stopRecordingLocal, showNotification]);
+  }, [isHost, transport, stopRecordingLocal, showNotification]);
 
   // Subscribe to remote control messages. LiveKit does not echo the sender's
   // own messages back, but startRecordingLocal/stopRecordingLocal are
   // idempotent anyway as a belt-and-braces guard.
+  //
+  // Host-only enforcement: recording_start/stop are session-wide controls.
+  // We only honor them when the sender's LiveKit token metadata identifies
+  // them as a host (see participant-role.ts). A guest cannot mint a token
+  // claiming role: "host" without LIVEKIT_API_SECRET, so this is sufficient
+  // for the trust model documented in issue #74.
   useEffect(() => {
-    const unsub = transport.onControlMessage((msg, fromParticipant) => {
+    const unsub = transport.onControlMessage((msg, sender) => {
+      if (msg.type === "recording_start" || msg.type === "recording_stop") {
+        if (!isHostSender(sender.metadata)) {
+          console.warn(
+            `Ignoring ${msg.type} from non-host sender ${sender.identity || "<unknown>"}`,
+          );
+          return;
+        }
+      }
       if (msg.type === "recording_start") {
         showNotification(
-          `Recording started by ${fromParticipant || "another participant"}`,
+          `Recording started by ${sender.identity || "another participant"}`,
         );
         void startRecordingLocal(msg.sessionStartedAt).then((started) => {
           if (!started) {
@@ -1269,10 +1377,11 @@ function RoomContent({
         });
       } else if (msg.type === "recording_stop") {
         showNotification(
-          `Recording stopped by ${fromParticipant || "another participant"}`,
+          `Recording stopped by ${sender.identity || "another participant"}`,
         );
         void stopRecordingLocal();
       } else if (msg.type === "recording_status") {
+        const fromParticipant = sender.identity;
         if (!fromParticipant) return;
         updateRemoteRecordingStatus(fromParticipant, {
           state: msg.state,
@@ -1309,17 +1418,19 @@ function RoomContent({
   ]);
 
 
-  // Warn before tab close when uploads are in flight or recording is active.
-  // This is the Layer A fix for #49 — prevents accidental data loss.
-  useEffect(() => {
-    if (!uploadTracker.hasInflight && studioState !== "recording") return;
-    const handler = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-      e.returnValue = "";
-    };
-    window.addEventListener("beforeunload", handler);
-    return () => window.removeEventListener("beforeunload", handler);
-  }, [uploadTracker.hasInflight, studioState]);
+  // Block accidental navigation while recording, finalizing, or uploading.
+  // Covers tab close (beforeunload), browser back/forward (popstate), in-app
+  // <a>/Link clicks, and form submits (e.g. the topbar sign-out POST). See
+  // #73 for the live-test repro and #49 for the original tab-close warning
+  // this supersedes.
+  useNavigationGuard({
+    when:
+      studioState === "recording" ||
+      studioState === "finalizing" ||
+      uploadTracker.hasInflight,
+    message:
+      "Recording is in progress and may be lost if you leave. Leave anyway?",
+  });
 
   useEffect(() => {
     return () => {
@@ -1539,42 +1650,70 @@ function RoomContent({
         >
           <div className="flex flex-col items-center gap-3 flex-1 justify-center">
             <div className="relative">
-              <button
-                type="button"
-                onClick={() => (isRecording ? handleStopRecording() : handleStartRecording())}
-                disabled={isFinalizing}
-                className={`w-[60px] h-[60px] rounded-full flex items-center justify-center border-2 ${
-                  isRecording ? "rec-ring" : ""
-                } ${isFinalizing ? "cursor-not-allowed" : "cursor-pointer"}`}
-                style={{
-                  background: isRecording ? "rgba(232,80,80,0.1)" : "var(--card)",
-                  borderColor: isRecording ? "var(--rec)" : "var(--border-hi)",
-                  opacity: isFinalizing ? 0.5 : 1,
-                  transition: "all 200ms ease",
-                }}
-                aria-label={
-                  isFinalizing
-                    ? "Finalizing previous recording"
-                    : isRecording
-                    ? "Stop recording"
-                    : "Start recording"
-                }
-                title={
-                  isFinalizing ? "Finalizing previous recording…" : undefined
-                }
-              >
-                {isRecording ? (
-                  <div
-                    className="w-5 h-5 rounded-[3px]"
-                    style={{ background: "var(--rec)" }}
-                  />
-                ) : (
+              {isHost ? (
+                <button
+                  type="button"
+                  onClick={() => (isRecording ? handleStopRecording() : handleStartRecording())}
+                  disabled={isFinalizing}
+                  className={`w-[60px] h-[60px] rounded-full flex items-center justify-center border-2 ${
+                    isRecording ? "rec-ring" : ""
+                  } ${isFinalizing ? "cursor-not-allowed" : "cursor-pointer"}`}
+                  style={{
+                    background: isRecording ? "rgba(232,80,80,0.1)" : "var(--card)",
+                    borderColor: isRecording ? "var(--rec)" : "var(--border-hi)",
+                    opacity: isFinalizing ? 0.5 : 1,
+                    transition: "all 200ms ease",
+                  }}
+                  aria-label={
+                    isFinalizing
+                      ? "Finalizing previous recording"
+                      : isRecording
+                      ? "Stop recording"
+                      : "Start recording"
+                  }
+                  title={
+                    isFinalizing ? "Finalizing previous recording…" : undefined
+                  }
+                >
+                  {isRecording ? (
+                    <div
+                      className="w-5 h-5 rounded-[3px]"
+                      style={{ background: "var(--rec)" }}
+                    />
+                  ) : (
+                    <div
+                      className="w-6 h-6 rounded-full"
+                      style={{ background: "var(--rec)" }}
+                    />
+                  )}
+                </button>
+              ) : (
+                // Non-host: passive indicator. Guests must not be able to
+                // start or stop the room recording (issue #74). They still
+                // see the elapsed time + upload progress below so they know
+                // their local capture is in sync with the host's lifecycle.
+                <div
+                  role="status"
+                  aria-label={isRecording ? "Recording in progress" : "Idle"}
+                  className={`w-[60px] h-[60px] rounded-full flex items-center justify-center border-2 ${
+                    isRecording ? "rec-ring" : ""
+                  }`}
+                  style={{
+                    background: isRecording ? "rgba(232,80,80,0.1)" : "var(--card)",
+                    borderColor: isRecording ? "var(--rec)" : "var(--border)",
+                    opacity: isRecording ? 1 : 0.6,
+                    transition: "all 200ms ease",
+                  }}
+                >
                   <div
                     className="w-6 h-6 rounded-full"
-                    style={{ background: "var(--rec)" }}
+                    style={{
+                      background: isRecording ? "var(--rec)" : "var(--text-3)",
+                      opacity: isRecording ? 1 : 0.4,
+                    }}
                   />
-                )}
-              </button>
+                </div>
+              )}
             </div>
             <span
               className="font-mono text-[10px] font-medium tracking-[0.08em] text-center"
@@ -1589,8 +1728,12 @@ function RoomContent({
               {isFinalizing
                 ? "FINALIZING…"
                 : isRecording
-                ? "STOP"
-                : "REC"}
+                ? isHost
+                  ? "STOP"
+                  : "REC"
+                : isHost
+                ? "REC"
+                : "IDLE"}
             </span>
             <div
               className="font-mono text-[13px] tracking-[0.06em]"
@@ -1604,6 +1747,11 @@ function RoomContent({
             {isFinalizing && (
               <span className="font-sans text-[10px] text-text-3 text-center px-2 max-w-[100px] leading-tight">
                 Finalizing previous recording…
+              </span>
+            )}
+            {!isHost && (
+              <span className="font-sans text-[10px] text-text-3 text-center px-2 max-w-[100px] leading-tight">
+                Host controls recording
               </span>
             )}
           </div>

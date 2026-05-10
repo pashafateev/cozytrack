@@ -18,6 +18,8 @@ export type {
   Transport,
   TransportEvents,
 } from "./types";
+export type { ParticipantRole } from "./participant-role";
+export { isHostSender, parseParticipantRole } from "./participant-role";
 export { useTransport } from "./use-transport";
 
 /**

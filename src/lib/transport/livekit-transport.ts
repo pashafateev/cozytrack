@@ -182,7 +182,10 @@ export class LiveKitTransport implements Transport {
   }
 
   onControlMessage(
-    handler: (msg: ControlMessage, fromParticipant: string) => void,
+    handler: (
+      msg: ControlMessage,
+      sender: { identity: string; metadata?: string },
+    ) => void,
   ): () => void {
     const fn = (
       payload: Uint8Array,
@@ -203,7 +206,10 @@ export class LiveKitTransport implements Transport {
         console.warn("onControlMessage: ignoring invalid control message", raw);
         return;
       }
-      handler(parsed, participant?.identity ?? "");
+      handler(parsed, {
+        identity: participant?.identity ?? "",
+        metadata: participant?.metadata,
+      });
     };
     this.room.on(RoomEvent.DataReceived, fn);
     return () => {

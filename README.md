@@ -11,7 +11,7 @@ Self-hosted podcast recording studio. A Riverside.fm alternative focused on loca
 │  ┌──────────────┐  ┌──────────────┐  ┌───────────────────┐  │
 │  │  LiveKit SDK  │  │  RecordRTC   │  │   Upload Client   │  │
 │  │ (WebRTC room) │  │ (local mic   │  │ (chunked upload   │  │
-│  │              │  │  recording)  │  │  to S3 via        │  │
+│  │              │  │  recording)  │  │  to S3-compatible │  │
 │  │  Audio/Video  │  │  WebM/Opus   │  │  presigned URLs)  │  │
 │  │  Preview      │  │              │  │                   │  │
 │  └──────┬───────┘  └──────┬───────┘  └────────┬──────────┘  │
@@ -20,8 +20,8 @@ Self-hosted podcast recording studio. A Riverside.fm alternative focused on loca
           │                 │                    │
           ▼                 │                    ▼
 ┌──────────────────┐        │          ┌──────────────────┐
-│   LiveKit Server │        │          │     AWS S3       │
-│   (WebRTC SFU)   │        │          │  (audio storage) │
+│   LiveKit Server │        │          │ S3-compatible   │
+│   (WebRTC SFU)   │        │          │ storage          │
 │   Port: 7880     │        │          │                  │
 └──────────────────┘        │          └──────────────────┘
                             │
@@ -44,9 +44,9 @@ Self-hosted podcast recording studio. A Riverside.fm alternative focused on loca
 
 ### How It Works
 
-1. **Local-first recording**: Each participant records their own microphone locally using RecordRTC. Audio never passes through the server — it goes straight from the browser to S3.
+1. **Local-first recording**: Each participant records their own microphone locally using RecordRTC. Audio never passes through the server — it goes straight from the browser to S3-compatible storage.
 2. **Live preview via WebRTC**: LiveKit provides real-time audio/video preview between participants so everyone can hear each other during recording.
-3. **Crash-safe uploads**: Audio is chunked every 5 seconds and uploaded to S3 via presigned URLs. If the browser crashes, you only lose the last few seconds.
+3. **Crash-safe uploads**: Audio is chunked every 5 seconds and uploaded to S3-compatible storage via presigned URLs. If the browser crashes, you only lose the last few seconds.
 4. **No transcoding needed**: Each track is stored as a separate WebM/Opus file. Download individual tracks and mix in your DAW.
 
 ## Tech Stack
@@ -54,11 +54,11 @@ Self-hosted podcast recording studio. A Riverside.fm alternative focused on loca
 - **Next.js 15** (App Router, TypeScript) — Frontend + API
 - **LiveKit** — WebRTC rooms for live audio/video preview
 - **RecordRTC** — Local browser audio recording
-- **AWS S3** — Audio file storage
+- **S3-compatible storage** — Audio file storage via AWS S3 in production or MinIO for fully local dev
 - **PostgreSQL** — Session and track metadata
 - **Prisma** — Database ORM
 - **Tailwind CSS** — Styling
-- **Docker Compose** — Local dev services (LiveKit, Postgres, Redis)
+- **Docker Compose** — Local dev services (LiveKit, Postgres, Redis, MinIO)
 
 ## Quick Start
 
@@ -66,7 +66,7 @@ Self-hosted podcast recording studio. A Riverside.fm alternative focused on loca
 
 - Node.js 20.19+ (or Node.js 22.12+)
 - Docker & Docker Compose
-- AWS account with S3 bucket configured
+- AWS account with S3 bucket configured only if you are not using the default local MinIO flow
 
 ### Setup
 
@@ -82,31 +82,48 @@ Self-hosted podcast recording studio. A Riverside.fm alternative focused on loca
 
    ```bash
    cp .env.example .env
-    # Edit .env with your AWS credentials or ensure your local AWS profile is configured
    ```
 
-3. **Start infrastructure:**
+   Edit `.env` and set `AUTH_SECRET` and `HOST_PASSWORD`. The storage defaults already point at local MinIO.
+
+3. **Start the fully local dev stack:**
+
+   ```bash
+   npm run dev:local
+   ```
+
+   This starts Docker services with the local MinIO profile enabled, creates the MinIO bucket, pushes the Prisma schema, and starts Next.js on port 3001. `dev:local` always overrides storage settings to use local MinIO, even if `.env` contains cloud-backed S3 values.
+
+4. **Open** [http://localhost:3001](http://localhost:3001)
+
+### Cloud-backed S3 Dev
+
+The default `.env.example` uses local MinIO:
+
+```env
+S3_BUCKET_NAME=cozytrack-local
+S3_ENDPOINT=http://localhost:9000
+S3_FORCE_PATH_STYLE=true
+AWS_ACCESS_KEY_ID=minioadmin
+AWS_SECRET_ACCESS_KEY=minioadmin
+```
+
+To use a real AWS S3 bucket during local development:
+
+1. Set `S3_BUCKET_NAME` to your dev bucket.
+2. Clear `S3_ENDPOINT` and `S3_FORCE_PATH_STYLE`.
+3. Replace the local fake AWS credentials with real credentials, or remove them and rely on your local AWS profile.
+4. Start services and the app:
 
    ```bash
    docker compose up -d
-   ```
-
-4. **Run database migrations:**
-
-   ```bash
-   npx prisma migrate dev --name init
-   ```
-
-5. **Start the dev server:**
-
-   ```bash
+   npm run db:push
    npm run dev
    ```
 
-   `npm run dev` now checks local AWS auth up front and fails fast if the current session is expired.
-   Reauthenticate with `aws login` and rerun the command if needed.
+`npm run dev` checks AWS auth up front when no custom S3 endpoint is configured and fails fast if the current AWS session is expired. Reauthenticate with `aws login` and rerun the command if needed.
 
-6. **Open** [http://localhost:3001](http://localhost:3001)
+The local MinIO console is available after `npm run dev:local` at [http://localhost:9001](http://localhost:9001) with the `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` values from `.env`.
 
 ### Local Reset
 
@@ -117,9 +134,9 @@ npm run reset:local
 ```
 
 This will:
-- start local Docker services if needed
+- start local Docker services if needed, enabling MinIO only when the configured S3 endpoint is local
 - reset the local Prisma database
-- fully empty the configured S3 bucket, including versioned objects and delete markers
+- empty the configured local MinIO bucket, or fully empty an AWS-backed dev bucket including versioned objects and delete markers
 
 Safety guard:
 - the reset script refuses to run unless `S3_BUCKET_NAME` contains `dev`, `local`, or `test`
@@ -153,7 +170,7 @@ src/
 │   └── upload.ts              # Client-side upload functions
 prisma/
 │   └── schema.prisma          # Database schema
-docker-compose.yml             # LiveKit + Postgres + Redis
+docker-compose.yml             # LiveKit + Postgres + Redis, plus opt-in MinIO
 livekit.yaml                   # LiveKit server config
 ```
 
@@ -162,14 +179,21 @@ livekit.yaml                   # LiveKit server config
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DATABASE_URL` | PostgreSQL connection string | `postgresql://cozytrack:cozytrack@localhost:5433/cozytrack` |
+| `DIRECT_DATABASE_URL` | Direct PostgreSQL connection for Prisma migrations and schema pushes. Locally this can match `DATABASE_URL`; `npm run dev:local` fills it from `DATABASE_URL` if omitted. | `postgresql://cozytrack:cozytrack@localhost:5433/cozytrack` |
 | `LIVEKIT_API_KEY` | LiveKit API key | `devkey` |
 | `LIVEKIT_API_SECRET` | LiveKit API secret | `cozytrack-local-livekit-secret-32` |
 | `LIVEKIT_URL` | LiveKit server URL (server-side) | `ws://localhost:7880` |
 | `NEXT_PUBLIC_LIVEKIT_URL` | LiveKit server URL (client-side) | `ws://localhost:7880` |
-| `AWS_ACCESS_KEY_ID` | Optional AWS access key for local env-based auth | — |
-| `AWS_SECRET_ACCESS_KEY` | Optional AWS secret key for local env-based auth | — |
-| `AWS_REGION` | AWS region | `us-west-2` |
-| `S3_BUCKET_NAME` | S3 bucket for recordings | `cozytrack-dev-pasha` |
+| `AWS_ACCESS_KEY_ID` | AWS-compatible access key. Defaults to local MinIO credentials. | `minioadmin` |
+| `AWS_SECRET_ACCESS_KEY` | AWS-compatible secret key. Defaults to local MinIO credentials. | `minioadmin` |
+| `AWS_REGION` | S3 signing region. `npm run dev:local` ignores this and uses `LOCAL_AWS_REGION` instead. | `us-east-1` |
+| `LOCAL_AWS_REGION` | Optional local-only signing region override for `npm run dev:local`. | `us-east-1` |
+| `S3_BUCKET_NAME` | S3-compatible bucket for recordings | `cozytrack-local` |
+| `S3_ENDPOINT` | Optional S3-compatible endpoint. Set to local MinIO for fully local dev; leave empty for AWS S3. | `http://localhost:9000` |
+| `S3_FORCE_PATH_STYLE` | Forces path-style S3 URLs for MinIO and other local endpoints. | `true` |
+| `MINIO_ROOT_USER` | Local MinIO console and API user. | `minioadmin` |
+| `MINIO_ROOT_PASSWORD` | Local MinIO console and API password. | `minioadmin` |
+| `MINIO_API_CORS_ALLOW_ORIGIN` | Comma-separated origins allowed by local MinIO. | `http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001` |
 | `AUTH_SECRET` | 32+ char secret for signing host + guest session JWTs. Generate with `openssl rand -hex 32`. | — (required) |
 | `HOST_PASSWORD` | Plaintext password for host sign-in. **Minimum 12 characters.** Hashed with scrypt at startup. | — (required) |
 | `COZYTRACK_API_KEY` | Shared secret checked against the `X-API-Key` header on `/api/ingest/*` (external-consumer endpoints used by tools like podline's `sd ct-ingest`). Browser-facing routes under `/api/sessions*` and `/api/tracks/*` are not gated by this key. Skipped in `NODE_ENV=development` for requests from `127.0.0.1` / `::1`. | — |
