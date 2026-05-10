@@ -186,7 +186,8 @@ livekit.yaml                   # LiveKit server config
 | `NEXT_PUBLIC_LIVEKIT_URL` | LiveKit server URL (client-side) | `ws://localhost:7880` |
 | `AWS_ACCESS_KEY_ID` | AWS-compatible access key. Defaults to local MinIO credentials. | `minioadmin` |
 | `AWS_SECRET_ACCESS_KEY` | AWS-compatible secret key. Defaults to local MinIO credentials. | `minioadmin` |
-| `AWS_REGION` | S3 signing region | `us-east-1` |
+| `AWS_REGION` | S3 signing region. `npm run dev:local` ignores this and uses `LOCAL_AWS_REGION` instead. | `us-east-1` |
+| `LOCAL_AWS_REGION` | Optional local-only signing region override for `npm run dev:local`. | `us-east-1` |
 | `S3_BUCKET_NAME` | S3-compatible bucket for recordings | `cozytrack-local` |
 | `S3_ENDPOINT` | Optional S3-compatible endpoint. Set to local MinIO for fully local dev; leave empty for AWS S3. | `http://localhost:9000` |
 | `S3_FORCE_PATH_STYLE` | Forces path-style S3 URLs for MinIO and other local endpoints. | `true` |

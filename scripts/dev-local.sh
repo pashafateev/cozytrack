@@ -13,7 +13,7 @@ export MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
 export MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
 export AWS_ACCESS_KEY_ID="$MINIO_ROOT_USER"
 export AWS_SECRET_ACCESS_KEY="$MINIO_ROOT_PASSWORD"
-export AWS_REGION="${AWS_REGION:-us-east-1}"
+export AWS_REGION="${LOCAL_AWS_REGION:-us-east-1}"
 export S3_BUCKET_NAME="${LOCAL_S3_BUCKET_NAME:-cozytrack-local}"
 export S3_FORCE_PATH_STYLE="true"
 
