@@ -52,23 +52,27 @@ describe("audio meter math", () => {
 
   it("when clipping latches, the indicator must remain visible for exactly the configured hold frames", () => {
     let state: ClipHoldState = { consecutiveClipFrames: 0, holdFrames: 0 };
+    const holdFrames = 4;
     const visible: boolean[] = [];
 
     for (let index = 0; index < CLIP_MIN_FRAMES; index += 1) {
-      const step = advanceClipHold(state, CLIP_THRESHOLD, CLIP_MIN_FRAMES);
+      const step = advanceClipHold(state, CLIP_THRESHOLD, holdFrames);
       state = step.state;
       visible.push(step.isClipping);
     }
 
-    for (let index = 0; index < CLIP_MIN_FRAMES; index += 1) {
-      const step = advanceClipHold(state, 0, CLIP_MIN_FRAMES);
+    for (let index = 1; index < holdFrames; index += 1) {
+      const step = advanceClipHold(state, 0, holdFrames);
       state = step.state;
       visible.push(step.isClipping);
     }
 
-    const release = advanceClipHold(state, 0, CLIP_MIN_FRAMES);
+    const release = advanceClipHold(state, 0, holdFrames);
 
-    expect(visible).toEqual([false, true, true, false]);
+    expect(visible).toEqual([
+      ...Array.from({ length: Math.max(0, CLIP_MIN_FRAMES - 1) }, () => false),
+      ...Array.from({ length: holdFrames }, () => true),
+    ]);
     expect(release.isClipping).toBe(false);
     expect(release.state.holdFrames).toBe(0);
   });
