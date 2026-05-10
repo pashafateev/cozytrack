@@ -19,14 +19,28 @@ import {
 import type {
   ControlMessage,
   RemoteParticipant,
+  RecordingStatusState,
   Transport,
   TransportEvents,
 } from "./types";
 
 const CONTROL_TOPIC = "control";
+const RECORDING_STATUS_STATES = new Set<RecordingStatusState>([
+  "connected",
+  "recording",
+  "finalizing",
+  "failed",
+]);
 
 function toRemoteParticipant(p: LKRemoteParticipant): RemoteParticipant {
   return { identity: p.identity, name: p.name };
+}
+
+function isRecordingStatusState(value: unknown): value is RecordingStatusState {
+  return (
+    typeof value === "string" &&
+    RECORDING_STATUS_STATES.has(value as RecordingStatusState)
+  );
 }
 
 // Runtime guard: validate that an arbitrary parsed JSON value matches the
@@ -42,6 +56,21 @@ function parseControlMessage(raw: unknown): ControlMessage | null {
   }
   if (obj.type === "recording_stop") {
     return { type: "recording_stop" };
+  }
+  if (obj.type === "recording_status") {
+    if (!isRecordingStatusState(obj.state)) return null;
+    if (
+      obj.sessionStartedAt !== undefined &&
+      typeof obj.sessionStartedAt !== "string"
+    )
+      return null;
+    if (obj.reason !== undefined && typeof obj.reason !== "string") return null;
+    return {
+      type: "recording_status",
+      state: obj.state,
+      ...(obj.sessionStartedAt ? { sessionStartedAt: obj.sessionStartedAt } : {}),
+      ...(obj.reason ? { reason: obj.reason } : {}),
+    };
   }
   return null;
 }
