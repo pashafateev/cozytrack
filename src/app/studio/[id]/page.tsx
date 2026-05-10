@@ -46,9 +46,8 @@ import { useMicMonitor } from "@/hooks/useMicMonitor";
 import { useRemoteAudioLevels } from "@/hooks/useRemoteAudioLevels";
 import { useTimingDiagnostics } from "@/hooks/useTimingDiagnostics";
 import {
-  CLIP_MIN_FRAMES,
-  CLIP_THRESHOLD,
-  SHAPING_EXPONENT,
+  advanceClipHold,
+  shapeLevel,
   smoothLevel,
 } from "@/lib/audio-meter";
 import { FinishRecordingButton } from "@/components/FinishRecordingButton";
@@ -876,27 +875,24 @@ function RoomContent({
 
       const rms = Math.sqrt(sumSquares / dataArray.length);
       const normalized = Math.min(1, Math.max(0, (rms - 0.01) / 0.12));
-      const targetLevel = Math.round(Math.pow(normalized, SHAPING_EXPONENT) * 255);
+      const targetLevel = Math.round(shapeLevel(normalized) * 255);
       const smoothedLevel = Math.round(
         smoothLevel(localLevelRef.current, targetLevel)
       );
       localLevelRef.current = smoothedLevel;
 
-      // Clipping flag: peak >= -1 dBFS for CLIP_MIN_FRAMES consecutive frames,
-      // then hold the visible flag briefly so a single transient peak still
-      // registers. The hold count here is in RAF frames (~60Hz), giving ~500ms.
-      if (peak >= CLIP_THRESHOLD) {
-        localClipFramesRef.current += 1;
-        if (localClipFramesRef.current >= CLIP_MIN_FRAMES) {
-          localClipHoldRef.current = 30;
-        }
-      } else {
-        localClipFramesRef.current = 0;
-      }
-      // Compute visibility from the CURRENT hold first, then decrement, so a
-      // hold of N yields N visible frames (not N-1).
-      const isClipping = localClipHoldRef.current > 0;
-      if (isClipping) localClipHoldRef.current -= 1;
+      // Hold the visible clip flag briefly; 30 RAF frames is roughly 500ms.
+      const clipStep = advanceClipHold(
+        {
+          consecutiveClipFrames: localClipFramesRef.current,
+          holdFrames: localClipHoldRef.current,
+        },
+        peak,
+        30,
+      );
+      localClipFramesRef.current = clipStep.state.consecutiveClipFrames;
+      localClipHoldRef.current = clipStep.state.holdFrames;
+      const isClipping = clipStep.isClipping;
       // Avoid setState every frame when nothing changed.
       setLocalClipping((prev) => (prev === isClipping ? prev : isClipping));
 
