@@ -125,7 +125,10 @@ describe("POST /api/sessions/[id]/finalize", () => {
     const { recoverTrack } = (await import("@/lib/recovery")) as unknown as {
       recoverTrack: ReturnType<typeof vi.fn>;
     };
-    expect(recoverTrack).toHaveBeenCalledWith("t2");
+    expect(recoverTrack).toHaveBeenCalledWith(
+      "t2",
+      expect.objectContaining({ chunkStitchMinAgeMs: expect.any(Number) }),
+    );
   });
 
   it("finalizes when recovery flips a stuck track to complete", async () => {

@@ -27,12 +27,12 @@ export async function POST(
       const stuck = session.tracks.filter((t) => t.status !== "complete");
 
       // Layer B (issue #56): before reporting pending tracks back to the
-      // client, attempt server-side recovery of orphaned chunks. A track that
-      // recovers here flips to "complete" or "failed" so the next status
-      // check can proceed without the user retrying.
+      // client, attempt server-side recovery of orphaned chunks. The 30s
+      // gate skips chunk-stitching while other participants may still be
+      // uploading; the cheap recording.webm-exists check always runs.
       for (const t of stuck) {
         try {
-          await recoverTrack(t.id);
+          await recoverTrack(t.id, { chunkStitchMinAgeMs: 30_000 });
         } catch (err) {
           console.error(`[finalize] recoverTrack failed for ${t.id}:`, err);
         }

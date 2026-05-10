@@ -31,6 +31,9 @@ export async function POST(req: NextRequest) {
         status: "complete",
         s3Key: s3Key,
         durationMs: durationMs ?? null,
+        // Reset any premature partial flag from racing recovery — the client
+        // successfully produced and uploaded its merged blob.
+        partial: false,
       },
     });
 

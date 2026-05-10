@@ -3,10 +3,13 @@ import { db } from "@/lib/db";
 import { isApiAuthorized } from "@/lib/api-auth";
 import { recoverTrack, type RecoveryResult } from "@/lib/recovery";
 
-// Tracks must be untouched for this long before the sweep treats them as
-// orphaned. Inline recovery (in /finalize) acts immediately; this endpoint
-// is the long-tail safety net for sessions that were never finalized.
-const STALE_MS = 10 * 60 * 1000;
+// The chunk-stitch gate. Recovery only stitches when the newest chunk has
+// been quiet for at least this long; protects active long-running recordings
+// (Track.updatedAt does not reflect chunk activity, see issue #56 review).
+const ACTIVITY_QUIET_MS = 10 * 60 * 1000;
+// Coarse DB pre-filter to avoid scanning brand-new tracks. The real staleness
+// signal is the S3 LastModified check inside recoverTrack.
+const DB_PREFILTER_MS = 60 * 1000;
 const MAX_TRACKS = 50;
 
 export async function POST(req: NextRequest) {
@@ -15,7 +18,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const cutoff = new Date(Date.now() - STALE_MS);
+    const cutoff = new Date(Date.now() - DB_PREFILTER_MS);
 
     const stuck = await db.track.findMany({
       where: {
@@ -30,7 +33,11 @@ export async function POST(req: NextRequest) {
     const results: (RecoveryResult | { trackId: string; error: string })[] = [];
     for (const t of stuck) {
       try {
-        results.push(await recoverTrack(t.id));
+        results.push(
+          await recoverTrack(t.id, {
+            chunkStitchMinAgeMs: ACTIVITY_QUIET_MS,
+          })
+        );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[admin recover] track=${t.id} failed:`, err);

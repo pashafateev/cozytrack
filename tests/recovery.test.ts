@@ -10,7 +10,13 @@ type Track = {
 
 const trackStore = new Map<string, Track>();
 const s3Objects = new Map<string, Uint8Array>();
+const s3Timestamps = new Map<string, Date>();
 const putCalls: { key: string; bytes: Uint8Array }[] = [];
+
+function putS3(key: string, bytes: Uint8Array, lastModified?: Date) {
+  s3Objects.set(key, bytes);
+  s3Timestamps.set(key, lastModified ?? new Date(0));
+}
 
 vi.mock("@/lib/db", () => ({
   db: {
@@ -65,7 +71,12 @@ vi.mock("@/lib/s3", () => ({
   listTrackChunkParts: vi.fn(async (sessionId: string, trackId: string) => {
     const prefix = `sessions/${sessionId}/tracks/${trackId}/`;
     const pattern = /^(\d+)\.webm$/;
-    const parts: { partNumber: number; key: string; size: number }[] = [];
+    const parts: {
+      partNumber: number;
+      key: string;
+      size: number;
+      lastModified?: Date;
+    }[] = [];
     for (const key of s3Objects.keys()) {
       if (!key.startsWith(prefix)) continue;
       const m = pattern.exec(key.slice(prefix.length));
@@ -76,6 +87,7 @@ vi.mock("@/lib/s3", () => ({
         partNumber,
         key,
         size: s3Objects.get(key)?.byteLength ?? 0,
+        lastModified: s3Timestamps.get(key),
       });
     }
     parts.sort((a, b) => a.partNumber - b.partNumber);
@@ -88,6 +100,7 @@ vi.mock("@/lib/s3", () => ({
   }),
   putObjectBytes: vi.fn(async (key: string, bytes: Uint8Array) => {
     s3Objects.set(key, bytes);
+    s3Timestamps.set(key, new Date());
     putCalls.push({ key, bytes });
   }),
 }));
@@ -97,6 +110,7 @@ import { recoverTrack } from "@/lib/recovery";
 beforeEach(() => {
   trackStore.clear();
   s3Objects.clear();
+  s3Timestamps.clear();
   putCalls.length = 0;
   vi.clearAllMocks();
 });
@@ -231,5 +245,88 @@ describe("recoverTrack", () => {
     expect(result.outcome).toBe("recovered_partial");
     expect(result.partial).toBe(true);
     expect(result.missingPartNumbers).toEqual([0]);
+  });
+
+  it("skips chunk-stitch when newest chunk is younger than the gate (active upload race)", async () => {
+    seedTrack();
+    const now = Date.now();
+    // Two chunks, newest one 5 seconds old — still actively uploading.
+    putS3(
+      "sessions/s1/tracks/t1/0.webm",
+      new Uint8Array([0xaa]),
+      new Date(now - 60_000)
+    );
+    putS3(
+      "sessions/s1/tracks/t1/1.webm",
+      new Uint8Array([0xbb]),
+      new Date(now - 5_000)
+    );
+
+    const result = await recoverTrack("t1", { chunkStitchMinAgeMs: 30_000 });
+
+    expect(result.outcome).toBe("skipped_active");
+    expect(result.chunkCount).toBe(2);
+    // Track was not touched — still in recording status, still not partial.
+    expect(trackStore.get("t1")?.status).toBe("recording");
+    expect(trackStore.get("t1")?.partial).toBe(false);
+    expect(putCalls).toHaveLength(0);
+  });
+
+  it("proceeds with chunk-stitch when newest chunk is older than the gate", async () => {
+    seedTrack();
+    const now = Date.now();
+    putS3(
+      "sessions/s1/tracks/t1/0.webm",
+      new Uint8Array([0xaa]),
+      new Date(now - 60_000)
+    );
+    putS3(
+      "sessions/s1/tracks/t1/1.webm",
+      new Uint8Array([0xbb]),
+      new Date(now - 45_000)
+    );
+
+    const result = await recoverTrack("t1", { chunkStitchMinAgeMs: 30_000 });
+
+    expect(result.outcome).toBe("recovered_from_chunks");
+    expect(trackStore.get("t1")?.status).toBe("complete");
+  });
+
+  it("still recovers from recording.webm even when gate is set (cheap check is unconditional)", async () => {
+    seedTrack();
+    putS3(
+      "sessions/s1/tracks/t1/recording.webm",
+      new Uint8Array([1, 2, 3]),
+      new Date() // very recent
+    );
+
+    const result = await recoverTrack("t1", { chunkStitchMinAgeMs: 30_000 });
+
+    expect(result.outcome).toBe("recovered_from_recording");
+    expect(trackStore.get("t1")?.status).toBe("complete");
+  });
+
+  it("marks failed_too_large when chunk bytes exceed the configured cap", async () => {
+    seedTrack();
+    putS3(
+      "sessions/s1/tracks/t1/0.webm",
+      new Uint8Array(500),
+      new Date(0)
+    );
+    putS3(
+      "sessions/s1/tracks/t1/1.webm",
+      new Uint8Array(600),
+      new Date(0)
+    );
+
+    const result = await recoverTrack("t1", { maxStitchBytes: 1000 });
+
+    expect(result.outcome).toBe("failed_too_large");
+    expect(result.status).toBe("failed");
+    expect(trackStore.get("t1")?.status).toBe("failed");
+    // Chunks must remain in S3 for manual repair.
+    expect(s3Objects.has("sessions/s1/tracks/t1/0.webm")).toBe(true);
+    expect(s3Objects.has("sessions/s1/tracks/t1/1.webm")).toBe(true);
+    expect(putCalls).toHaveLength(0);
   });
 });

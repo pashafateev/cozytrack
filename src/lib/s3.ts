@@ -99,10 +99,17 @@ export async function getPresignedGetUrl(key: string): Promise<string> {
 export async function listTrackChunkParts(
   sessionId: string,
   trackId: string
-): Promise<{ partNumber: number; key: string; size: number }[]> {
+): Promise<
+  { partNumber: number; key: string; size: number; lastModified?: Date }[]
+> {
   const prefix = trackPrefix(sessionId, trackId);
   const chunkKeyPattern = /^(\d+)\.webm$/;
-  const parts: { partNumber: number; key: string; size: number }[] = [];
+  const parts: {
+    partNumber: number;
+    key: string;
+    size: number;
+    lastModified?: Date;
+  }[] = [];
   let continuationToken: string | undefined;
 
   do {
@@ -121,7 +128,12 @@ export async function listTrackChunkParts(
       if (!match) continue;
       const partNumber = Number(match[1]);
       if (partNumber === 9999) continue;
-      parts.push({ partNumber, key, size: object.Size ?? 0 });
+      parts.push({
+        partNumber,
+        key,
+        size: object.Size ?? 0,
+        lastModified: object.LastModified,
+      });
     }
 
     continuationToken = response.IsTruncated
