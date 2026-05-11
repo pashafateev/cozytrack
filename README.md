@@ -211,6 +211,17 @@ External ingest tools (e.g. podline's `sd ct-ingest`) hit a separate `/api/inges
 
 Long-term plan: this scheme gets replaced by podflow-as-IdP (see `pashafateev/podflow#11`, `pashafateev/cozytrack#36`, `pashafateev/cozytrack#37`). The JWT primitive stays; only the token issuer changes.
 
+## Ingest cleanup
+
+After a downstream processor has downloaded and processed a ready session, it can purge raw recording files:
+
+```http
+POST /api/ingest/sessions/:id/purge-files
+X-API-Key: <COZYTRACK_API_KEY>
+```
+
+The purge deletes all S3 objects under `sessions/<id>/` and stamps `s3PurgedAt` on that session's tracks. Repeated calls for already-purged sessions are safe. Browser and ingest track download endpoints return `410 Gone` for purged tracks.
+
 ## Finishing a recording
 
 When a recorder is done capturing in the studio:
