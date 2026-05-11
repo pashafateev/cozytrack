@@ -1,49 +1,11 @@
 #!/usr/bin/env node
 
-import fs from "node:fs";
 import { PrismaClient } from "@prisma/client";
-
-function loadEnvFile(path, { override = false } = {}) {
-  if (!fs.existsSync(path)) {
-    return;
-  }
-
-  const lines = fs.readFileSync(path, "utf8").split(/\r?\n/);
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) {
-      continue;
-    }
-
-    const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
-    if (!match) {
-      continue;
-    }
-
-    const [, key, rawValue] = match;
-    if (!override && process.env[key] !== undefined) {
-      continue;
-    }
-
-    let value = rawValue.trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-
-    process.env[key] = value;
-  }
-}
-
-function loadEnv() {
-  loadEnvFile(".env");
-  loadEnvFile(".env.local", { override: true });
-  if (!process.env.DIRECT_DATABASE_URL && process.env.DATABASE_URL) {
-    process.env.DIRECT_DATABASE_URL = process.env.DATABASE_URL;
-  }
-}
+import {
+  loadEnv,
+  parsePositiveInteger,
+  readOptionValue,
+} from "./script-utils.mjs";
 
 function usage() {
   console.log(`Usage: node scripts/purge-ready-sessions.mjs [options]
@@ -75,17 +37,17 @@ function parseArgs(argv) {
     if (arg === "--yes") {
       options.yes = true;
     } else if (arg === "--base-url") {
-      options.baseUrl = argv[++i];
+      options.baseUrl = readOptionValue(argv, i, arg);
+      i += 1;
     } else if (arg === "--api-key") {
-      options.apiKey = argv[++i];
+      options.apiKey = readOptionValue(argv, i, arg);
+      i += 1;
     } else if (arg === "--session-id") {
-      options.sessionIds.push(argv[++i]);
+      options.sessionIds.push(readOptionValue(argv, i, arg));
+      i += 1;
     } else if (arg === "--limit") {
-      const limit = Number(argv[++i]);
-      if (!Number.isInteger(limit) || limit < 1) {
-        throw new Error("--limit must be a positive integer");
-      }
-      options.limit = limit;
+      options.limit = parsePositiveInteger(readOptionValue(argv, i, arg), arg);
+      i += 1;
     } else if (arg === "--help" || arg === "-h") {
       options.help = true;
     } else {
@@ -157,11 +119,8 @@ async function main() {
       include: {
         tracks: {
           select: {
-            id: true,
-            participantName: true,
             s3PurgedAt: true,
           },
-          orderBy: { createdAt: "asc" },
         },
       },
       orderBy: { createdAt: "asc" },
@@ -177,7 +136,9 @@ async function main() {
       `${options.yes ? "Purging" : "Dry run:"} ${sessions.length} ready session(s).`,
     );
     for (const session of sessions) {
-      console.log(`- ${session.id}: ${session.name} — ${trackSummary(session.tracks)}`);
+      console.log(
+        `- ${session.id}: ${session.name} — ${trackSummary(session.tracks)}`,
+      );
     }
 
     if (!options.yes) {

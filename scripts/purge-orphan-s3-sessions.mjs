@@ -1,54 +1,18 @@
 #!/usr/bin/env node
 
-import fs from "node:fs";
 import { PrismaClient } from "@prisma/client";
 import {
   DeleteObjectsCommand,
   ListObjectsV2Command,
   S3Client,
 } from "@aws-sdk/client-s3";
+import {
+  loadEnv,
+  parsePositiveInteger,
+  readOptionValue,
+} from "./script-utils.mjs";
 
-function loadEnvFile(path, { override = false } = {}) {
-  if (!fs.existsSync(path)) {
-    return;
-  }
-
-  const lines = fs.readFileSync(path, "utf8").split(/\r?\n/);
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) {
-      continue;
-    }
-
-    const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
-    if (!match) {
-      continue;
-    }
-
-    const [, key, rawValue] = match;
-    if (!override && process.env[key] !== undefined) {
-      continue;
-    }
-
-    let value = rawValue.trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-
-    process.env[key] = value;
-  }
-}
-
-function loadEnv() {
-  loadEnvFile(".env");
-  loadEnvFile(".env.local", { override: true });
-  if (!process.env.DIRECT_DATABASE_URL && process.env.DATABASE_URL) {
-    process.env.DIRECT_DATABASE_URL = process.env.DATABASE_URL;
-  }
-}
+const DB_LOOKUP_BATCH_SIZE = 500;
 
 function usage() {
   console.log(`Usage: node scripts/purge-orphan-s3-sessions.mjs [options]
@@ -78,11 +42,8 @@ function parseArgs(argv) {
     } else if (arg === "--allow-production-bucket") {
       options.allowProductionBucket = true;
     } else if (arg === "--limit") {
-      const limit = Number(argv[++i]);
-      if (!Number.isInteger(limit) || limit < 1) {
-        throw new Error("--limit must be a positive integer");
-      }
-      options.limit = limit;
+      options.limit = parsePositiveInteger(readOptionValue(argv, i, arg), arg);
+      i += 1;
     } else if (arg === "--help" || arg === "-h") {
       options.help = true;
     } else {
@@ -128,7 +89,7 @@ function buildS3ClientConfig() {
 }
 
 function isProtectedBucketName(bucket) {
-  return !/(dev|local|test)/i.test(bucket);
+  return !/(^|[.-])(dev|local|test)([.-]|$)/i.test(bucket);
 }
 
 function sessionIdFromPrefix(prefix) {
@@ -165,11 +126,24 @@ async function listSessionPrefixes({ s3, bucket }) {
 }
 
 async function getExistingSessionIds({ prisma, sessionIds }) {
-  const rows = await prisma.session.findMany({
-    where: { id: { in: sessionIds } },
-    select: { id: true },
-  });
-  return new Set(rows.map((row) => row.id));
+  const existingSessionIds = new Set();
+
+  for (let index = 0; index < sessionIds.length; index += DB_LOOKUP_BATCH_SIZE) {
+    const batch = sessionIds.slice(index, index + DB_LOOKUP_BATCH_SIZE);
+    if (batch.length === 0) {
+      continue;
+    }
+
+    const rows = await prisma.session.findMany({
+      where: { id: { in: batch } },
+      select: { id: true },
+    });
+    for (const row of rows) {
+      existingSessionIds.add(row.id);
+    }
+  }
+
+  return existingSessionIds;
 }
 
 async function deletePrefix({ s3, bucket, prefix }) {
@@ -258,7 +232,10 @@ async function main() {
   try {
     const prefixes = await listSessionPrefixes({ s3, bucket });
     const sessionIds = prefixes.map(sessionIdFromPrefix).filter(Boolean);
-    const existingSessionIds = await getExistingSessionIds({ prisma, sessionIds });
+    const existingSessionIds = await getExistingSessionIds({
+      prisma,
+      sessionIds,
+    });
     const orphanPrefixes = prefixes
       .filter((prefix) => {
         const sessionId = sessionIdFromPrefix(prefix);
