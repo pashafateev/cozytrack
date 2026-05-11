@@ -40,7 +40,7 @@ vi.mock("@/lib/db", () => ({
           where,
           data,
         }: {
-          where: { sessionId: string };
+          where: { sessionId: string; s3PurgedAt?: null };
           data: { s3PurgedAt: Date };
         }) => {
           const session = mocks.sessionStore.get(where.sessionId);
@@ -48,11 +48,17 @@ vi.mock("@/lib/db", () => ({
             return { count: 0 };
           }
 
+          let count = 0;
           for (const track of session.tracks) {
+            if (where.s3PurgedAt === null && track.s3PurgedAt !== null) {
+              continue;
+            }
+
             track.s3PurgedAt = data.s3PurgedAt;
+            count += 1;
           }
 
-          return { count: session.tracks.length };
+          return { count };
         },
       ),
     },
@@ -185,8 +191,45 @@ describe("POST /api/ingest/sessions/[id]/purge-files", () => {
     expect(body).toEqual({
       sessionId: "s3",
       deletedObjects: 0,
-      purgedTracks: 2,
+      purgedTracks: 0,
       s3PurgedAt: s3PurgedAt.toISOString(),
+    });
+  });
+
+  it("preserves existing purge timestamps when only some tracks are unpurged", async () => {
+    mocks.deleteSessionObjects.mockResolvedValueOnce(1);
+    const existingPurgedAt = new Date("2026-05-10T12:00:00.000Z");
+    mocks.sessionStore.set("s5", {
+      id: "s5",
+      name: "demo",
+      status: "ready",
+      tracks: [
+        { id: "t1", s3PurgedAt: existingPurgedAt },
+        { id: "t2", s3PurgedAt: null },
+      ],
+    });
+
+    const res = await POST(req("s5"), {
+      params: Promise.resolve({ id: "s5" }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      deletedObjects: number;
+      purgedTracks: number;
+      s3PurgedAt: string;
+    };
+    expect(body.deletedObjects).toBe(1);
+    expect(body.purgedTracks).toBe(1);
+
+    const tracks = mocks.sessionStore.get("s5")!.tracks;
+    expect(tracks[0].s3PurgedAt?.toISOString()).toBe(
+      existingPurgedAt.toISOString(),
+    );
+    expect(tracks[1].s3PurgedAt?.toISOString()).toBe(body.s3PurgedAt);
+    expect(await updateManyMock()).toHaveBeenCalledWith({
+      where: { sessionId: "s5", s3PurgedAt: null },
+      data: { s3PurgedAt: expect.any(Date) },
     });
   });
 

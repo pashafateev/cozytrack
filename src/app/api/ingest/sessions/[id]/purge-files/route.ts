@@ -51,16 +51,16 @@ export async function POST(
       );
     }
 
-    const purgedTracks = session.tracks.length;
     const existingPurgedAt = latestPurgedAt(session.tracks);
     const alreadyPurged =
-      purgedTracks > 0 && session.tracks.every((track) => track.s3PurgedAt);
+      session.tracks.length > 0 &&
+      session.tracks.every((track) => track.s3PurgedAt);
 
     if (alreadyPurged && existingPurgedAt) {
       return NextResponse.json({
         sessionId: id,
         deletedObjects: 0,
-        purgedTracks,
+        purgedTracks: 0,
         s3PurgedAt: existingPurgedAt,
       });
     }
@@ -68,15 +68,15 @@ export async function POST(
     const deletedObjects = await deleteSessionObjects(id);
     const s3PurgedAt = new Date();
 
-    await db.track.updateMany({
-      where: { sessionId: id },
+    const updateResult = await db.track.updateMany({
+      where: { sessionId: id, s3PurgedAt: null },
       data: { s3PurgedAt },
     });
 
     return NextResponse.json({
       sessionId: id,
       deletedObjects,
-      purgedTracks,
+      purgedTracks: updateResult.count,
       s3PurgedAt,
     });
   } catch (error) {

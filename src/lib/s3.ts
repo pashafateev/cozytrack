@@ -153,32 +153,36 @@ export async function deleteTrackChunks(
   sessionId: string,
   trackId: string
 ): Promise<void> {
-  const prefix = trackPrefix(sessionId, trackId);
-  const finalKey = trackRecordingKey(sessionId, trackId);
-  const chunkKeyPattern = /^\d+\.webm$/;
-  let continuationToken: string | undefined;
+  try {
+    const prefix = trackPrefix(sessionId, trackId);
+    const finalKey = trackRecordingKey(sessionId, trackId);
+    const chunkKeyPattern = /^\d+\.webm$/;
+    let continuationToken: string | undefined;
 
-  do {
-    const response = await s3.send(
-      new ListObjectsV2Command({
-        Bucket: bucket,
-        Prefix: prefix,
-        ContinuationToken: continuationToken,
-      })
-    );
-
-    const keysToDelete = (response.Contents ?? [])
-      .map((object) => object.Key)
-      .filter((key): key is string => Boolean(key))
-      .filter(
-        (key) =>
-          key !== finalKey && chunkKeyPattern.test(key.slice(prefix.length))
+    do {
+      const response = await s3.send(
+        new ListObjectsV2Command({
+          Bucket: bucket,
+          Prefix: prefix,
+          ContinuationToken: continuationToken,
+        })
       );
 
-    await deleteObjects(keysToDelete);
+      const keysToDelete = (response.Contents ?? [])
+        .map((object) => object.Key)
+        .filter((key): key is string => Boolean(key))
+        .filter(
+          (key) =>
+            key !== finalKey && chunkKeyPattern.test(key.slice(prefix.length))
+        );
 
-    continuationToken = response.IsTruncated
-      ? response.NextContinuationToken
-      : undefined;
-  } while (continuationToken);
+      await deleteObjects(keysToDelete);
+
+      continuationToken = response.IsTruncated
+        ? response.NextContinuationToken
+        : undefined;
+    } while (continuationToken);
+  } catch (error) {
+    console.error("Failed to delete track chunks:", error);
+  }
 }
