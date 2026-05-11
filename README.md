@@ -222,6 +222,17 @@ X-API-Key: <COZYTRACK_API_KEY>
 
 The purge deletes all S3 objects under `sessions/<id>/` and stamps `s3PurgedAt` on that session's tracks. Repeated calls for already-purged sessions are safe. Browser and ingest track download endpoints return `410 Gone` for purged tracks.
 
+For historical cleanup, use dry-run scripts first:
+
+```sh
+npm run purge:ready -- --base-url https://<app-host>
+npm run purge:orphans
+```
+
+`purge:ready` finds ready DB sessions with unpurged tracks and calls the purge endpoint when rerun with `--yes`. `purge:orphans` compares `sessions/<id>/` S3 prefixes against DB `Session.id` rows and deletes only S3-only prefixes when rerun with `--yes`. For bucket names that do not include `dev`, `local`, or `test`, orphan deletion also requires `--allow-production-bucket`.
+
+Both scripts load `.env` and `.env.local`. `purge:ready` needs DB access for discovery plus `COZYTRACK_API_KEY` and `--base-url`/`COZYTRACK_PURGE_BASE_URL` when using `--yes`. `purge:orphans` needs DB access plus the S3 env vars.
+
 ## Finishing a recording
 
 When a recorder is done capturing in the studio:

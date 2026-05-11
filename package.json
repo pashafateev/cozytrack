@@ -10,6 +10,8 @@
     "dev:local": "bash ./scripts/dev-local.sh",
     "init:local": "npm run reset:local && npm run dev",
     "reset:local": "bash ./scripts/reset-local.sh",
+    "purge:ready": "node scripts/purge-ready-sessions.mjs",
+    "purge:orphans": "node scripts/purge-orphan-s3-sessions.mjs",
     "build": "next build",
     "vercel-build": "if [ \"$VERCEL_ENV\" = \"production\" ]; then prisma migrate deploy; fi && next build",
     "start": "next start",
