@@ -14,6 +14,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { verifyHostCookie, verifyGuestCookie, AUTH_COOKIES, isGuestCookieName } from "@/lib/auth";
+import { isApiAuthorized } from "@/lib/api-auth";
 
 const PUBLIC_PATHS = [
   "/signin",
@@ -31,6 +32,10 @@ const PUBLIC_PREFIXES = ["/join/", "/_next/", "/favicon.ico"];
 function isPublic(pathname: string): boolean {
   if (PUBLIC_PATHS.includes(pathname)) return true;
   return PUBLIC_PREFIXES.some((p) => pathname.startsWith(p));
+}
+
+function isIngestApiPath(pathname: string): boolean {
+  return pathname === "/api/ingest" || pathname.startsWith("/api/ingest/");
 }
 
 /**
@@ -68,6 +73,13 @@ export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   if (isPublic(pathname)) return NextResponse.next();
+
+  if (isIngestApiPath(pathname)) {
+    if (!isApiAuthorized(req)) {
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    }
+    return NextResponse.next();
+  }
 
   const hostCookie = req.cookies.get(AUTH_COOKIES.host)?.value;
   const host = await verifyHostCookie(hostCookie);
