@@ -28,7 +28,12 @@ import {
 import { v4 as uuidv4 } from "uuid";
 import { CozyRecorder } from "@/lib/recorder";
 import { forceMonoStream, getTrackChannelCount } from "@/lib/audio-downmix";
-import { getPresignedUploadUrl, uploadChunk, completeUpload } from "@/lib/upload";
+import {
+  getPresignedUploadTarget,
+  getPresignedUploadUrl,
+  uploadChunk,
+  completeUpload,
+} from "@/lib/upload";
 import { getToken, LIVEKIT_URL } from "@/lib/livekit";
 import {
   useTransport,
@@ -545,6 +550,7 @@ function RoomContent({
   const transport = useTransport();
   const recorderRef = useRef<CozyRecorder | null>(null);
   const trackIdRef = useRef<string>("");
+  const recordingUploadTokenRef = useRef<string | undefined>(undefined);
   // Raw stream straight from getUserMedia — retained so we can stop the
   // underlying device tracks on teardown.
   const rawStreamRef = useRef<MediaStream | null>(null);
@@ -1052,16 +1058,24 @@ function RoomContent({
 
       trackIdRef.current = uuidv4();
       const trackId = trackIdRef.current;
+      recordingUploadTokenRef.current = undefined;
 
       try {
-        await getPresignedUploadUrl(sessionId, trackId, 0, participantName, {
-          deviceInfo: {
-            deviceLabel: selectedMicLabel,
-            deviceId: selectedMic,
-            isBuiltInMic: selectedMicIsBuiltIn,
+        const initialUpload = await getPresignedUploadTarget(
+          sessionId,
+          trackId,
+          0,
+          participantName,
+          {
+            deviceInfo: {
+              deviceLabel: selectedMicLabel,
+              deviceId: selectedMic,
+              isBuiltInMic: selectedMicIsBuiltIn,
+            },
+            sessionStartedAt: sessionStartedAtIso,
           },
-          sessionStartedAt: sessionStartedAtIso,
-        });
+        );
+        recordingUploadTokenRef.current = initialUpload.recordingToken;
       } catch (err) {
         console.error("Failed to initialize upload:", err);
         clearRecordingConfirmationState();
@@ -1096,7 +1110,14 @@ function RoomContent({
         }
 
         const uploadPromise = (async () => {
-          const url = await getPresignedUploadUrl(sessionId, trackId, index);
+          const url = await getPresignedUploadUrl(
+            sessionId,
+            trackId,
+            index,
+            undefined,
+            undefined,
+            recordingUploadTokenRef.current,
+          );
           await uploadChunk(url, chunk);
         })();
 
@@ -1189,6 +1210,7 @@ function RoomContent({
     // tears down immediately — even if the upload pipeline below hangs.
     const recorder = recorderRef.current;
     const trackId = trackIdRef.current;
+    const recordingUploadToken = recordingUploadTokenRef.current;
     const startedAt = recordingStartRef.current;
     setStudioStateSync("finalizing");
     void broadcastRecordingStatus("finalizing", sessionStartedAtForStatus);
@@ -1223,14 +1245,21 @@ function RoomContent({
       const finalBytes = blob.size;
       trackerOnChunkRecorded(finalBytes);
       const finalUpload = (async () => {
-        const url = await getPresignedUploadUrl(sessionId, trackId, 9999);
+        const url = await getPresignedUploadUrl(
+          sessionId,
+          trackId,
+          9999,
+          undefined,
+          undefined,
+          recordingUploadToken,
+        );
         await uploadChunk(url, blob);
       })();
       await trackerTrackUpload(finalBytes, finalUpload, { rethrow: true });
 
       // Wait for any background chunk uploads still settling.
       await trackerWaitForUploads();
-      await completeUpload(sessionId, trackId, durationMs);
+      await completeUpload(sessionId, trackId, durationMs, recordingUploadToken);
 
       setHasRecorded(true);
     } catch (err) {
@@ -1239,6 +1268,7 @@ function RoomContent({
       console.error("Failed to stop recording:", err);
     } finally {
       recorderRef.current = null;
+      recordingUploadTokenRef.current = undefined;
       // Hard invariant from issue #61: do not leave `finalizing` until the
       // chunk-upload promise set is drained, regardless of error path. If the
       // happy path above already drained, this is effectively a no-op.

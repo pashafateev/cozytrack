@@ -13,16 +13,27 @@ export interface TrackInitInfo {
   sessionStartedAt?: string;
 }
 
-export async function getPresignedUploadUrl(
+export interface PresignedUploadTarget {
+  url: string;
+  recordingToken?: string;
+}
+
+export async function getPresignedUploadTarget(
   sessionId: string,
   trackId: string,
   partNumber: number,
   participantName?: string,
   trackInit?: TrackInitInfo,
-): Promise<string> {
+  recordingToken?: string,
+): Promise<PresignedUploadTarget> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (recordingToken) {
+    headers["X-Cozytrack-Recording-Token"] = recordingToken;
+  }
+
   const res = await fetch("/api/upload/presign", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify({
       sessionId,
       trackId,
@@ -49,7 +60,30 @@ export async function getPresignedUploadUrl(
   }
 
   const data = await res.json();
-  return data.url;
+  return {
+    url: data.url,
+    recordingToken:
+      typeof data.recordingToken === "string" ? data.recordingToken : undefined,
+  };
+}
+
+export async function getPresignedUploadUrl(
+  sessionId: string,
+  trackId: string,
+  partNumber: number,
+  participantName?: string,
+  trackInit?: TrackInitInfo,
+  recordingToken?: string,
+): Promise<string> {
+  const target = await getPresignedUploadTarget(
+    sessionId,
+    trackId,
+    partNumber,
+    participantName,
+    trackInit,
+    recordingToken,
+  );
+  return target.url;
 }
 
 export async function uploadChunk(url: string, chunk: Blob): Promise<void> {
@@ -69,11 +103,17 @@ export async function uploadChunk(url: string, chunk: Blob): Promise<void> {
 export async function completeUpload(
   sessionId: string,
   trackId: string,
-  durationMs?: number
+  durationMs?: number,
+  recordingToken?: string,
 ): Promise<void> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (recordingToken) {
+    headers["X-Cozytrack-Recording-Token"] = recordingToken;
+  }
+
   const res = await fetch("/api/upload/complete", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify({ sessionId, trackId, durationMs }),
   });
 
