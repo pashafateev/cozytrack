@@ -16,10 +16,16 @@ const GUEST_COOKIE_PREFIX = "cozytrack_guest_"; // + sessionId
 const HOST_SESSION_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
 const GUEST_SESSION_TTL_SECONDS = 60 * 60 * 12; // 12 hours
 const INVITE_TOKEN_TTL_SECONDS = 60 * 60 * 48; // 48 hours
+const RECORDING_UPLOAD_TTL_SECONDS = 60 * 60 * 12; // 12 hours
 
 export type HostPrincipal = { kind: "host" };
 export type GuestPrincipal = { kind: "guest"; sessionId: string; name: string };
 export type Principal = HostPrincipal | GuestPrincipal;
+export type RecordingUploadPrincipal = {
+  kind: "recording_upload";
+  sessionId: string;
+  trackId: string;
+};
 
 function getSecret(): Uint8Array {
   const secret = process.env.AUTH_SECRET;
@@ -117,6 +123,42 @@ export async function verifyGuestCookie(
   }
 }
 
+// ---------- Recording upload tokens ----------
+
+export async function issueRecordingUploadToken(
+  sessionId: string,
+  trackId: string,
+): Promise<string> {
+  return await new SignJWT({ sessionId, trackId })
+    .setProtectedHeader({ alg: "HS256" })
+    .setIssuer("cozytrack")
+    .setAudience("cozytrack:recording-upload")
+    .setSubject(`recording-upload:${sessionId}:${trackId}`)
+    .setIssuedAt()
+    .setExpirationTime(`${RECORDING_UPLOAD_TTL_SECONDS}s`)
+    .sign(getSecret());
+}
+
+export async function verifyRecordingUploadToken(
+  token: string | undefined,
+  sessionId: string,
+  trackId: string,
+): Promise<RecordingUploadPrincipal | null> {
+  if (!token) return null;
+  try {
+    const { payload } = await jwtVerify(token, getSecret(), {
+      issuer: "cozytrack",
+      audience: "cozytrack:recording-upload",
+    });
+    if (payload.sessionId !== sessionId || payload.trackId !== trackId) {
+      return null;
+    }
+    return { kind: "recording_upload", sessionId, trackId };
+  } catch {
+    return null;
+  }
+}
+
 function guestCookieName(sessionId: string): string {
   // Cookie names are per-session so a guest invited to one session doesn't
   // accidentally carry credentials into another.
@@ -176,4 +218,5 @@ export const AUTH_TTLS = {
   hostSession: HOST_SESSION_TTL_SECONDS,
   guestSession: GUEST_SESSION_TTL_SECONDS,
   invite: INVITE_TOKEN_TTL_SECONDS,
+  recordingUpload: RECORDING_UPLOAD_TTL_SECONDS,
 } as const;
