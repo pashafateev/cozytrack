@@ -34,8 +34,12 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const requestRecordingToken =
+      req.headers.get("x-cozytrack-recording-token") ?? undefined;
+    const isRecordingStart = partNumber === 0 && !requestRecordingToken;
+
     let recordingToken: string | undefined;
-    if (partNumber === 0) {
+    if (isRecordingStart) {
       // Starting a recording still requires normal host/guest auth. The
       // returned recording token is scoped to this session+track so later
       // chunks can keep uploading if the login cookie expires mid-take.
@@ -103,10 +107,8 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "forbidden" }, { status: 403 });
       }
       if (!principal) {
-        const token =
-          req.headers.get("x-cozytrack-recording-token") ?? undefined;
         const uploadPrincipal = await verifyRecordingUploadToken(
-          token,
+          requestRecordingToken,
           sessionId,
           trackId,
         );

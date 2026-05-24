@@ -166,6 +166,42 @@ describe("recording upload auth", () => {
     expect(body.key).toBe("sessions/s1/tracks/t1/47.webm");
   });
 
+  it("keeps presigning the first recorded chunk with the recording token after cookies expire", async () => {
+    mocks.resolvePrincipal.mockResolvedValueOnce({ kind: "host" });
+
+    const start = await presignUpload(
+      postJson(
+        "/api/upload/presign",
+        {
+          sessionId: "s1",
+          trackId: "t1",
+          partNumber: 0,
+          participantName: "Alice",
+        },
+      ),
+    );
+    const { recordingToken } = (await start.json()) as {
+      recordingToken: string;
+    };
+
+    const res = await presignUpload(
+      postJson(
+        "/api/upload/presign",
+        { sessionId: "s1", trackId: "t1", partNumber: 0 },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      key: string;
+      recordingToken?: string;
+      url: string;
+    };
+    expect(body.key).toBe("sessions/s1/tracks/t1/0.webm");
+    expect(body.recordingToken).toBeUndefined();
+  });
+
   it("keeps presigning the final recording upload with the recording token after cookies expire", async () => {
     mocks.resolvePrincipal.mockResolvedValueOnce({ kind: "host" });
 
