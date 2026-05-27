@@ -11,6 +11,12 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 type S3ClientConfig = NonNullable<ConstructorParameters<typeof S3Client>[0]>;
+type S3Env = {
+  AWS_REGION?: string;
+  S3_ENDPOINT?: string;
+  S3_FORCE_PATH_STYLE?: string;
+  [key: string]: string | undefined;
+};
 
 function cleanEnv(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
@@ -34,7 +40,7 @@ function booleanEnv(value: string | undefined): boolean | undefined {
 }
 
 export function buildS3ClientConfig(
-  env: NodeJS.ProcessEnv = process.env,
+  env: S3Env = process.env,
 ): S3ClientConfig {
   const endpoint = cleanEnv(env.S3_ENDPOINT);
   const forcePathStyle = booleanEnv(env.S3_FORCE_PATH_STYLE) ?? Boolean(endpoint);

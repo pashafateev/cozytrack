@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  validation:
+    name: Baseline validation
+    runs-on: ubuntu-latest
+    env:
+      AUTH_SECRET: cozytrack-ci-auth-secret-32-characters
+      HOST_PASSWORD: cozytrack-ci-password
+      DATABASE_URL: postgresql://cozytrack:cozytrack@localhost:5432/cozytrack
+      DIRECT_DATABASE_URL: postgresql://cozytrack:cozytrack@localhost:5432/cozytrack
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: cozytrack-local-livekit-secret-32
+      LIVEKIT_URL: ws://localhost:7880
+      NEXT_PUBLIC_LIVEKIT_URL: ws://localhost:7880
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: cozytrack-ci
+      AWS_SECRET_ACCESS_KEY: cozytrack-ci
+      S3_BUCKET_NAME: cozytrack-ci-test
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Validate Prisma schema
+        run: npx prisma validate
+
+      - name: Build
+        run: npm run build

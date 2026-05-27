@@ -17,6 +17,7 @@
     "start": "next start",
     "postinstall": "prisma generate",
     "lint": "next lint",
+    "typecheck": "tsc --noEmit --incremental false",
     "db:migrate": "prisma migrate dev",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
