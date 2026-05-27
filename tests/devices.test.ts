@@ -75,6 +75,8 @@ describe("resolveDefaultDevice", () => {
   });
 
   it("does not match an unrelated device when the parsed fallback label is empty", () => {
+    // Chrome can briefly expose "Default - " during device transitions; an
+    // empty parsed name must not match every label via endsWith("").
     const devices = [
       dev("default", "Default - ", ""),
       dev("abc123", "Focusrite Scarlett 2i2", ""),
@@ -115,5 +117,31 @@ describe("isSelectedMicBuiltIn", () => {
   it("does not warn for an unknown deviceId", () => {
     const devices = [dev("abc123", "Focusrite Scarlett 2i2", "g1")];
     expect(isSelectedMicBuiltIn(devices, "missing")).toBe(false);
+  });
+
+  it("when a USB mic shares the default label stem, no built-in warning must appear", () => {
+    const devices = [
+      dev("default", "Default - Shure MV7", ""),
+      dev("abc123", "USB Audio - Shure MV7", ""),
+      dev("xyz789", "MacBook Pro Microphone", ""),
+    ];
+    expect(isSelectedMicBuiltIn(devices, "default")).toBe(false);
+  });
+
+  it("when the device list is empty, lookup must return empty results without throwing", () => {
+    expect(resolveDefaultDevice([], "default")).toBeUndefined();
+    expect(isSelectedMicBuiltIn([], "default")).toBe(false);
+  });
+
+  it("when multiple default-like entries exist, the selected default must resolve gracefully", () => {
+    const devices = [
+      dev("default", "Default - Shure MV7", "g1"),
+      dev("communications", "Default - MacBook Pro Microphone", "g2"),
+      dev("abc123", "Shure MV7", "g1"),
+      dev("xyz789", "MacBook Pro Microphone", "g2"),
+    ];
+
+    expect(resolveDefaultDevice(devices, "default")?.deviceId).toBe("abc123");
+    expect(isSelectedMicBuiltIn(devices, "default")).toBe(false);
   });
 });

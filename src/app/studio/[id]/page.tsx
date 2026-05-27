@@ -28,9 +28,18 @@ import {
 import { v4 as uuidv4 } from "uuid";
 import { CozyRecorder } from "@/lib/recorder";
 import { forceMonoStream, getTrackChannelCount } from "@/lib/audio-downmix";
-import { getPresignedUploadUrl, uploadChunk, completeUpload } from "@/lib/upload";
+import {
+  getPresignedUploadTarget,
+  getPresignedUploadUrl,
+  uploadChunk,
+  completeUpload,
+} from "@/lib/upload";
 import { getToken, LIVEKIT_URL } from "@/lib/livekit";
-import { useTransport, isHostSender } from "@/lib/transport";
+import {
+  useTransport,
+  isHostSender,
+  type RecordingStatusState,
+} from "@/lib/transport";
 import { isSelectedMicBuiltIn } from "@/lib/devices";
 import { BuiltInMicWarningModal } from "@/components/BuiltInMicWarningModal";
 import {
@@ -42,9 +51,8 @@ import { useMicMonitor } from "@/hooks/useMicMonitor";
 import { useRemoteAudioLevels } from "@/hooks/useRemoteAudioLevels";
 import { useTimingDiagnostics } from "@/hooks/useTimingDiagnostics";
 import {
-  CLIP_MIN_FRAMES,
-  CLIP_THRESHOLD,
-  SHAPING_EXPONENT,
+  advanceClipHold,
+  shapeLevel,
   smoothLevel,
 } from "@/lib/audio-meter";
 import { FinishRecordingButton } from "@/components/FinishRecordingButton";
@@ -67,6 +75,12 @@ import {
 
 type StudioState = "prejoin" | "connected" | "recording" | "finalizing";
 type AudioQualityMode = "full" | "bandwidth-saving";
+type RemoteRecordingStatus = {
+  state: RecordingStatusState;
+  sessionStartedAt?: string;
+  reason?: string;
+  updatedAt: number;
+};
 
 // ---------- Audio Quality Presets ----------
 
@@ -80,6 +94,8 @@ const BANDWIDTH_SAVING_PUBLISH = {
   dtx: true,
 } as const;
 
+const RECORDING_CONFIRMATION_TIMEOUT_MS = 4000;
+
 // ---------- Helpers ----------
 
 function formatElapsed(totalMs: number): string {
@@ -88,6 +104,11 @@ function formatElapsed(totalMs: number): string {
   const m = Math.floor((totalSec % 3600) / 60).toString().padStart(2, "0");
   const s = (totalSec % 60).toString().padStart(2, "0");
   return `${h}:${m}:${s}`;
+}
+
+function formatParticipantList(names: string[]): string {
+  if (names.length <= 2) return names.join(" and ");
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
 }
 
 function isMobileBrowser(navigatorInfo: Navigator): boolean {
@@ -529,6 +550,7 @@ function RoomContent({
   const transport = useTransport();
   const recorderRef = useRef<CozyRecorder | null>(null);
   const trackIdRef = useRef<string>("");
+  const recordingUploadTokenRef = useRef<string | undefined>(undefined);
   // Raw stream straight from getUserMedia — retained so we can stop the
   // underlying device tracks on teardown.
   const rawStreamRef = useRef<MediaStream | null>(null);
@@ -595,6 +617,48 @@ function RoomContent({
   const [elapsedMs, setElapsedMs] = useState(0);
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const [recordingSessionStartedAt, setRecordingSessionStartedAt] =
+    useState<string | null>(null);
+  const recordingSessionStartedAtRef = useRef<string | null>(null);
+  const setRecordingSessionStartedAtSync = useCallback((next: string | null) => {
+    recordingSessionStartedAtRef.current = next;
+    setRecordingSessionStartedAt(next);
+  }, []);
+  const [remoteRecordingStatuses, setRemoteRecordingStatuses] = useState<
+    Map<string, RemoteRecordingStatus>
+  >(() => new Map());
+  const remoteRecordingStatusesRef = useRef(remoteRecordingStatuses);
+  const [expectedRecordingParticipants, setExpectedRecordingParticipants] =
+    useState<Set<string>>(() => new Set());
+  const expectedRecordingParticipantsRef = useRef<Set<string>>(new Set());
+  const [
+    unconfirmedRecordingParticipants,
+    setUnconfirmedRecordingParticipants,
+  ] = useState<Set<string>>(() => new Set());
+  const recordingConfirmationTimerRef =
+    useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    remoteRecordingStatusesRef.current = remoteRecordingStatuses;
+  }, [remoteRecordingStatuses]);
+
+  const clearRecordingConfirmationTimer = useCallback(() => {
+    if (!recordingConfirmationTimerRef.current) return;
+    clearTimeout(recordingConfirmationTimerRef.current);
+    recordingConfirmationTimerRef.current = null;
+  }, []);
+
+  const clearRecordingConfirmationState = useCallback(
+    (clearSession = true) => {
+      clearRecordingConfirmationTimer();
+      expectedRecordingParticipantsRef.current = new Set();
+      setExpectedRecordingParticipants(new Set());
+      setUnconfirmedRecordingParticipants(new Set());
+      if (clearSession) setRecordingSessionStartedAtSync(null);
+    },
+    [clearRecordingConfirmationTimer, setRecordingSessionStartedAtSync],
+  );
+
   const showNotification = useCallback((message: string) => {
     if (notificationTimerRef.current) clearTimeout(notificationTimerRef.current);
     setNotification(message);
@@ -609,6 +673,76 @@ function RoomContent({
       if (notificationTimerRef.current) clearTimeout(notificationTimerRef.current);
     };
   }, []);
+
+  useEffect(() => clearRecordingConfirmationTimer, [
+    clearRecordingConfirmationTimer,
+  ]);
+
+  const updateRemoteRecordingStatus = useCallback(
+    (identity: string, status: RemoteRecordingStatus) => {
+      setRemoteRecordingStatuses((prev) => {
+        const next = new Map(prev);
+        next.set(identity, status);
+        remoteRecordingStatusesRef.current = next;
+        return next;
+      });
+    },
+    [],
+  );
+
+  const scheduleRecordingConfirmationCheck = useCallback(
+    (sessionStartedAt: string) => {
+      const expected = new Set(
+        remoteParticipants.map((p) => p.identity).filter(Boolean),
+      );
+      expectedRecordingParticipantsRef.current = expected;
+      setExpectedRecordingParticipants(expected);
+      setUnconfirmedRecordingParticipants(new Set());
+      clearRecordingConfirmationTimer();
+
+      if (expected.size === 0) return;
+
+      recordingConfirmationTimerRef.current = setTimeout(() => {
+        if (recordingSessionStartedAtRef.current !== sessionStartedAt) return;
+
+        const statuses = remoteRecordingStatusesRef.current;
+        const currentExpected = expectedRecordingParticipantsRef.current;
+        const unconfirmed = Array.from(currentExpected).filter((identity) => {
+          const status = statuses.get(identity);
+          if (status?.sessionStartedAt !== sessionStartedAt) return true;
+          return status.state !== "recording" && status.state !== "failed";
+        });
+
+        if (unconfirmed.length === 0) return;
+
+        setUnconfirmedRecordingParticipants(new Set(unconfirmed));
+        showNotification(
+          `Recording not confirmed by ${formatParticipantList(unconfirmed)}`,
+        );
+      }, RECORDING_CONFIRMATION_TIMEOUT_MS);
+    },
+    [clearRecordingConfirmationTimer, remoteParticipants, showNotification],
+  );
+
+  const broadcastRecordingStatus = useCallback(
+    async (
+      state: RecordingStatusState,
+      sessionStartedAt?: string,
+      reason?: string,
+    ) => {
+      try {
+        await transport.sendControlMessage({
+          type: "recording_status",
+          state,
+          ...(sessionStartedAt !== undefined ? { sessionStartedAt } : {}),
+          ...(reason !== undefined ? { reason } : {}),
+        });
+      } catch (err) {
+        console.error("Failed to broadcast recording_status:", err);
+      }
+    },
+    [transport],
+  );
 
   const switchAudioQuality = useCallback(
     async (mode: AudioQualityMode): Promise<boolean> => {
@@ -747,27 +881,24 @@ function RoomContent({
 
       const rms = Math.sqrt(sumSquares / dataArray.length);
       const normalized = Math.min(1, Math.max(0, (rms - 0.01) / 0.12));
-      const targetLevel = Math.round(Math.pow(normalized, SHAPING_EXPONENT) * 255);
+      const targetLevel = Math.round(shapeLevel(normalized) * 255);
       const smoothedLevel = Math.round(
         smoothLevel(localLevelRef.current, targetLevel)
       );
       localLevelRef.current = smoothedLevel;
 
-      // Clipping flag: peak >= -1 dBFS for CLIP_MIN_FRAMES consecutive frames,
-      // then hold the visible flag briefly so a single transient peak still
-      // registers. The hold count here is in RAF frames (~60Hz), giving ~500ms.
-      if (peak >= CLIP_THRESHOLD) {
-        localClipFramesRef.current += 1;
-        if (localClipFramesRef.current >= CLIP_MIN_FRAMES) {
-          localClipHoldRef.current = 30;
-        }
-      } else {
-        localClipFramesRef.current = 0;
-      }
-      // Compute visibility from the CURRENT hold first, then decrement, so a
-      // hold of N yields N visible frames (not N-1).
-      const isClipping = localClipHoldRef.current > 0;
-      if (isClipping) localClipHoldRef.current -= 1;
+      // Hold the visible clip flag briefly; 30 RAF frames is roughly 500ms.
+      const clipStep = advanceClipHold(
+        {
+          consecutiveClipFrames: localClipFramesRef.current,
+          holdFrames: localClipHoldRef.current,
+        },
+        peak,
+        30,
+      );
+      localClipFramesRef.current = clipStep.state.consecutiveClipFrames;
+      localClipHoldRef.current = clipStep.state.holdFrames;
+      const isClipping = clipStep.isClipping;
       // Avoid setState every frame when nothing changed.
       setLocalClipping((prev) => (prev === isClipping ? prev : isClipping));
 
@@ -826,6 +957,37 @@ function RoomContent({
     });
   }, [remoteAudio.levels, participantName]);
 
+  useEffect(() => {
+    const liveIdentities = new Set(remoteParticipants.map((p) => p.identity));
+
+    setRemoteRecordingStatuses((prev) => {
+      let next = prev;
+      for (const identity of prev.keys()) {
+        if (!liveIdentities.has(identity)) {
+          if (next === prev) next = new Map(prev);
+          next.delete(identity);
+        }
+      }
+      remoteRecordingStatusesRef.current = next;
+      return next;
+    });
+
+    setExpectedRecordingParticipants((prev) => {
+      const next = new Set(
+        Array.from(prev).filter((identity) => liveIdentities.has(identity)),
+      );
+      expectedRecordingParticipantsRef.current = next;
+      return next;
+    });
+
+    setUnconfirmedRecordingParticipants(
+      (prev) =>
+        new Set(
+          Array.from(prev).filter((identity) => liveIdentities.has(identity)),
+        ),
+    );
+  }, [remoteParticipants]);
+
   // Tick the elapsed-time display while recording. The interval is bound to
   // `recording`, NOT `finalizing` — once we enter `finalizing` the timer tears
   // down and the displayed value freezes at the stop-moment value. If we
@@ -868,26 +1030,61 @@ function RoomContent({
       // (control-message) start paths honor the invariant.
       if (studioStateRef.current === "finalizing") {
         console.warn("Ignoring recording_start: currently finalizing previous recording");
-        return;
+        void broadcastRecordingStatus(
+          "failed",
+          sessionStartedAtIso,
+          "still finalizing previous recording",
+        );
+        return false;
       }
-      if (studioStateRef.current === "recording" || recorderRef.current) return;
-      if (!streamRef.current) return;
+      if (studioStateRef.current === "recording" || recorderRef.current) {
+        void broadcastRecordingStatus(
+          "recording",
+          recordingSessionStartedAtRef.current ?? sessionStartedAtIso,
+        );
+        return true;
+      }
+
+      if (!streamRef.current) {
+        console.warn("Cannot start recording: microphone stream unavailable");
+        clearRecordingConfirmationState();
+        void broadcastRecordingStatus(
+          "failed",
+          sessionStartedAtIso,
+          "microphone stream unavailable",
+        );
+        return false;
+      }
 
       trackIdRef.current = uuidv4();
       const trackId = trackIdRef.current;
+      recordingUploadTokenRef.current = undefined;
 
       try {
-        await getPresignedUploadUrl(sessionId, trackId, 0, participantName, {
-          deviceInfo: {
-            deviceLabel: selectedMicLabel,
-            deviceId: selectedMic,
-            isBuiltInMic: selectedMicIsBuiltIn,
+        const initialUpload = await getPresignedUploadTarget(
+          sessionId,
+          trackId,
+          0,
+          participantName,
+          {
+            deviceInfo: {
+              deviceLabel: selectedMicLabel,
+              deviceId: selectedMic,
+              isBuiltInMic: selectedMicIsBuiltIn,
+            },
+            sessionStartedAt: sessionStartedAtIso,
           },
-          sessionStartedAt: sessionStartedAtIso,
-        });
+        );
+        recordingUploadTokenRef.current = initialUpload.recordingToken;
       } catch (err) {
         console.error("Failed to initialize upload:", err);
-        return;
+        clearRecordingConfirmationState();
+        void broadcastRecordingStatus(
+          "failed",
+          sessionStartedAtIso,
+          "upload initialization failed",
+        );
+        return false;
       }
 
       trackerReset();
@@ -913,7 +1110,14 @@ function RoomContent({
         }
 
         const uploadPromise = (async () => {
-          const url = await getPresignedUploadUrl(sessionId, trackId, index);
+          const url = await getPresignedUploadUrl(
+            sessionId,
+            trackId,
+            index,
+            undefined,
+            undefined,
+            recordingUploadTokenRef.current,
+          );
           await uploadChunk(url, chunk);
         })();
 
@@ -942,10 +1146,19 @@ function RoomContent({
       } catch (err) {
         console.error("Failed to start recorder:", err);
         recorderRef.current = null;
-        return;
+        clearRecordingConfirmationState();
+        void broadcastRecordingStatus(
+          "failed",
+          sessionStartedAtIso,
+          "recorder failed to start",
+        );
+        return false;
       }
 
+      setRecordingSessionStartedAtSync(sessionStartedAtIso);
+      scheduleRecordingConfirmationCheck(sessionStartedAtIso);
       setStudioStateSync("recording");
+      void broadcastRecordingStatus("recording", sessionStartedAtIso);
 
       // Auto-switch to bandwidth-saving mode for the LiveKit preview
       const switched = await switchAudioQuality("bandwidth-saving");
@@ -954,18 +1167,23 @@ function RoomContent({
       } else {
         showNotification("Couldn't switch audio quality — check console");
       }
+      return true;
     },
     [
-      sessionId,
+      broadcastRecordingStatus,
+      clearRecordingConfirmationState,
       participantName,
+      scheduleRecordingConfirmationCheck,
       selectedMic,
-      selectedMicLabel,
       selectedMicIsBuiltIn,
+      selectedMicLabel,
+      sessionId,
+      setRecordingSessionStartedAtSync,
       setStudioStateSync,
       showNotification,
       switchAudioQuality,
-      trackerReset,
       trackerOnChunkRecorded,
+      trackerReset,
       trackerTrackUpload,
       timingDebug,
     ],
@@ -974,8 +1192,16 @@ function RoomContent({
   // Core recording stop. Idempotent: no-op when we have no active recorder or
   // we're already finalizing.
   const stopRecordingLocal = useCallback(async () => {
-    if (!recorderRef.current) return;
+    const sessionStartedAtForStatus =
+      recordingSessionStartedAtRef.current ?? undefined;
     if (studioStateRef.current === "finalizing") return;
+    clearRecordingConfirmationState(false);
+
+    if (!recorderRef.current) {
+      setRecordingSessionStartedAtSync(null);
+      void broadcastRecordingStatus("connected", sessionStartedAtForStatus);
+      return;
+    }
 
     // Snapshot per-recording state into local consts BEFORE any await so a
     // hypothetical concurrent attempt to re-record (blocked by the
@@ -984,8 +1210,10 @@ function RoomContent({
     // tears down immediately — even if the upload pipeline below hangs.
     const recorder = recorderRef.current;
     const trackId = trackIdRef.current;
+    const recordingUploadToken = recordingUploadTokenRef.current;
     const startedAt = recordingStartRef.current;
     setStudioStateSync("finalizing");
+    void broadcastRecordingStatus("finalizing", sessionStartedAtForStatus);
 
     try {
       const blob = await recorder.stop();
@@ -1017,14 +1245,21 @@ function RoomContent({
       const finalBytes = blob.size;
       trackerOnChunkRecorded(finalBytes);
       const finalUpload = (async () => {
-        const url = await getPresignedUploadUrl(sessionId, trackId, 9999);
+        const url = await getPresignedUploadUrl(
+          sessionId,
+          trackId,
+          9999,
+          undefined,
+          undefined,
+          recordingUploadToken,
+        );
         await uploadChunk(url, blob);
       })();
       await trackerTrackUpload(finalBytes, finalUpload, { rethrow: true });
 
       // Wait for any background chunk uploads still settling.
       await trackerWaitForUploads();
-      await completeUpload(sessionId, trackId, durationMs);
+      await completeUpload(sessionId, trackId, durationMs, recordingUploadToken);
 
       setHasRecorded(true);
     } catch (err) {
@@ -1033,6 +1268,7 @@ function RoomContent({
       console.error("Failed to stop recording:", err);
     } finally {
       recorderRef.current = null;
+      recordingUploadTokenRef.current = undefined;
       // Hard invariant from issue #61: do not leave `finalizing` until the
       // chunk-upload promise set is drained, regardless of error path. If the
       // happy path above already drained, this is effectively a no-op.
@@ -1042,6 +1278,8 @@ function RoomContent({
         console.error("Failed while draining chunk uploads:", drainErr);
       }
       setStudioStateSync("connected");
+      setRecordingSessionStartedAtSync(null);
+      void broadcastRecordingStatus("connected", sessionStartedAtForStatus);
       // Best-effort restoration of full-quality preview. Fire-and-forget —
       // a failure here must not keep us stuck in `finalizing`.
       void switchAudioQuality("full").catch((err) => {
@@ -1049,7 +1287,10 @@ function RoomContent({
       });
     }
   }, [
+    broadcastRecordingStatus,
+    clearRecordingConfirmationState,
     sessionId,
+    setRecordingSessionStartedAtSync,
     setStudioStateSync,
     switchAudioQuality,
     trackerFreezeRecorded,
@@ -1086,8 +1327,10 @@ function RoomContent({
       studioStateRef.current === "recording" ||
       studioStateRef.current === "finalizing" ||
       recorderRef.current
-    )
+    ) {
       return;
+    }
+
     startingRef.current = true;
     try {
       const sessionStartedAt = new Date().toISOString();
@@ -1095,12 +1338,23 @@ function RoomContent({
         await transport.sendControlMessage({ type: "recording_start", sessionStartedAt });
       } catch (err) {
         console.error("Failed to broadcast recording_start:", err);
+        showNotification("Couldn't tell the room to start recording");
+        return;
       }
-      await startRecordingLocal(sessionStartedAt);
+
+      const started = await startRecordingLocal(sessionStartedAt);
+      if (!started) {
+        showNotification("Couldn't start your recorder — stopping the room");
+        try {
+          await transport.sendControlMessage({ type: "recording_stop" });
+        } catch (err) {
+          console.error("Failed to broadcast recording_stop after start failure:", err);
+        }
+      }
     } finally {
       startingRef.current = false;
     }
-  }, [isHost, transport, startRecordingLocal]);
+  }, [isHost, transport, startRecordingLocal, showNotification]);
 
   const handleStopRecording = useCallback(async () => {
     if (!isHost) return;
@@ -1111,12 +1365,13 @@ function RoomContent({
         await transport.sendControlMessage({ type: "recording_stop" });
       } catch (err) {
         console.error("Failed to broadcast recording_stop:", err);
+        showNotification("Couldn't tell the room to stop recording");
       }
       await stopRecordingLocal();
     } finally {
       stoppingRef.current = false;
     }
-  }, [isHost, transport, stopRecordingLocal]);
+  }, [isHost, transport, stopRecordingLocal, showNotification]);
 
   // Subscribe to remote control messages. LiveKit does not echo the sender's
   // own messages back, but startRecordingLocal/stopRecordingLocal are
@@ -1141,16 +1396,52 @@ function RoomContent({
         showNotification(
           `Recording started by ${sender.identity || "another participant"}`,
         );
-        void startRecordingLocal(msg.sessionStartedAt);
+        void startRecordingLocal(msg.sessionStartedAt).then((started) => {
+          if (!started) {
+            showNotification("Couldn't start your recorder — check your mic");
+          }
+        });
       } else if (msg.type === "recording_stop") {
         showNotification(
           `Recording stopped by ${sender.identity || "another participant"}`,
         );
         void stopRecordingLocal();
+      } else if (msg.type === "recording_status") {
+        const fromParticipant = sender.identity;
+        if (!fromParticipant) return;
+        updateRemoteRecordingStatus(fromParticipant, {
+          state: msg.state,
+          sessionStartedAt: msg.sessionStartedAt,
+          reason: msg.reason,
+          updatedAt: Date.now(),
+        });
+
+        if (msg.sessionStartedAt === recordingSessionStartedAtRef.current) {
+          setUnconfirmedRecordingParticipants((prev) => {
+            if (!prev.has(fromParticipant)) return prev;
+            const next = new Set(prev);
+            next.delete(fromParticipant);
+            return next;
+          });
+        }
+
+        if (msg.state === "failed") {
+          showNotification(
+            `${fromParticipant} could not start recording${
+              msg.reason ? `: ${msg.reason}` : ""
+            }`,
+          );
+        }
       }
     });
     return unsub;
-  }, [transport, startRecordingLocal, stopRecordingLocal, showNotification]);
+  }, [
+    transport,
+    startRecordingLocal,
+    stopRecordingLocal,
+    showNotification,
+    updateRemoteRecordingStatus,
+  ]);
 
 
   // Block accidental navigation while recording, finalizing, or uploading.
@@ -1192,11 +1483,64 @@ function RoomContent({
 
   const isRecording = studioState === "recording";
   const isFinalizing = studioState === "finalizing";
-  // Treat `finalizing` as still uploading: the recorder has stopped but
-  // chunks are draining, so the sidebar indicator should not look idle.
-  const isUploading = isRecording || isFinalizing;
 
-  const localStatus: Status = isUploading ? "recording" : "connected";
+  const localStatus: Status = isFinalizing
+    ? "uploading"
+    : isRecording
+    ? "recording"
+    : "connected";
+
+  const getRemoteStatus = useCallback(
+    (identity: string): Status => {
+      const remoteStatus = remoteRecordingStatuses.get(identity);
+      const matchesCurrentSession =
+        recordingSessionStartedAt !== null &&
+        remoteStatus?.sessionStartedAt === recordingSessionStartedAt;
+
+      if (
+        remoteStatus?.state === "failed" &&
+        (recordingSessionStartedAt === null || matchesCurrentSession)
+      ) {
+        return "failed";
+      }
+      if (
+        remoteStatus?.state === "finalizing" &&
+        (recordingSessionStartedAt === null || matchesCurrentSession)
+      ) {
+        return "uploading";
+      }
+      if (
+        remoteStatus?.state === "recording" &&
+        (recordingSessionStartedAt === null || matchesCurrentSession)
+      ) {
+        return "recording";
+      }
+      if (
+        remoteStatus?.state === "connected" &&
+        (recordingSessionStartedAt === null || matchesCurrentSession)
+      ) {
+        return "connected";
+      }
+      if (unconfirmedRecordingParticipants.has(identity)) {
+        return "unconfirmed";
+      }
+      if (
+        recordingSessionStartedAt !== null &&
+        isRecording &&
+        expectedRecordingParticipants.has(identity)
+      ) {
+        return "starting";
+      }
+      return "connected";
+    },
+    [
+      expectedRecordingParticipants,
+      isRecording,
+      recordingSessionStartedAt,
+      remoteRecordingStatuses,
+      unconfirmedRecordingParticipants,
+    ],
+  );
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
@@ -1290,11 +1634,7 @@ function RoomContent({
               micLabel={undefined /* Remote mic label — needs #28 (LiveKit metadata propagation). */}
               isBuiltIn={false /* Remote built-in detection — needs #28. */}
               level={audioLevels.get(p.identity) ?? 0}
-              // studioState is local-only, so showing localStatus on remote
-              // strips was misleading (guests appeared to be "Recording" whenever
-              // the host hit record). Remote per-participant status is tracked
-              // in #30; until then we show a stable "connected" for remotes.
-              status="connected"
+              status={getRemoteStatus(p.identity)}
               clipping={remoteAudio.clipping.has(p.identity)}
             />
           ))}

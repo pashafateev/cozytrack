@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { deleteTrackChunks, trackRecordingKey } from "@/lib/s3";
-import { resolvePrincipal } from "@/lib/auth";
+import { resolvePrincipal, verifyRecordingUploadToken } from "@/lib/auth";
 
 export async function POST(req: NextRequest) {
   try {
@@ -16,10 +16,29 @@ export async function POST(req: NextRequest) {
     }
 
     const principal = await resolvePrincipal(req, sessionId);
-    if (!principal) {
-      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    if (principal?.kind === "guest" && principal.sessionId !== sessionId) {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
-    if (principal.kind === "guest" && principal.sessionId !== sessionId) {
+    if (!principal) {
+      const token = req.headers.get("x-cozytrack-recording-token") ?? undefined;
+      const uploadPrincipal = await verifyRecordingUploadToken(
+        token,
+        sessionId,
+        trackId,
+      );
+      if (!uploadPrincipal) {
+        return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+      }
+    }
+
+    const existingTrack = await db.track.findUnique({
+      where: { id: trackId },
+      select: { sessionId: true },
+    });
+    if (!existingTrack) {
+      return NextResponse.json({ error: "Track not found" }, { status: 404 });
+    }
+    if (existingTrack.sessionId !== sessionId) {
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
 

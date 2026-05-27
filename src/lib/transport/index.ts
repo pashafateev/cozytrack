@@ -14,6 +14,7 @@ import type { Transport } from "./types";
 export type {
   ControlMessage,
   RemoteParticipant,
+  RecordingStatusState,
   Transport,
   TransportEvents,
 } from "./types";

@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { trackPartKey, trackRecordingKey, getPresignedPutUrl } from "@/lib/s3";
-import { resolvePrincipal } from "@/lib/auth";
+import {
+  issueRecordingUploadToken,
+  resolvePrincipal,
+  verifyRecordingUploadToken,
+} from "@/lib/auth";
 
 function getUploadErrorMessage(error: unknown): string {
   if (!(error instanceof Error)) {
@@ -30,17 +34,23 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // AuthZ: host can presign for any session; guest only for the session
-    // their cookie is scoped to. This is where we enforce the S3 blast radius.
-    const principal = await resolvePrincipal(req, sessionId);
-    if (!principal) {
-      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-    }
-    if (principal.kind === "guest" && principal.sessionId !== sessionId) {
-      return NextResponse.json({ error: "forbidden" }, { status: 403 });
-    }
+    const requestRecordingToken =
+      req.headers.get("x-cozytrack-recording-token") ?? undefined;
+    const isRecordingStart = partNumber === 0 && !requestRecordingToken;
 
-    if (partNumber === 0) {
+    let recordingToken: string | undefined;
+    if (isRecordingStart) {
+      // Starting a recording still requires normal host/guest auth. The
+      // returned recording token is scoped to this session+track so later
+      // chunks can keep uploading if the login cookie expires mid-take.
+      const principal = await resolvePrincipal(req, sessionId);
+      if (!principal) {
+        return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+      }
+      if (principal.kind === "guest" && principal.sessionId !== sessionId) {
+        return NextResponse.json({ error: "forbidden" }, { status: 403 });
+      }
+
       const existingSession = await db.session.findUnique({
         where: { id: sessionId },
         select: { id: true },
@@ -87,6 +97,25 @@ export async function POST(req: NextRequest) {
           },
         });
       }
+
+      recordingToken = await issueRecordingUploadToken(sessionId, trackId);
+    } else {
+      // Subsequent chunks and the final recording.webm upload accept either
+      // the original principal cookie or the recording-scoped upload token.
+      const principal = await resolvePrincipal(req, sessionId);
+      if (principal?.kind === "guest" && principal.sessionId !== sessionId) {
+        return NextResponse.json({ error: "forbidden" }, { status: 403 });
+      }
+      if (!principal) {
+        const uploadPrincipal = await verifyRecordingUploadToken(
+          requestRecordingToken,
+          sessionId,
+          trackId,
+        );
+        if (!uploadPrincipal) {
+          return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
     }
 
     const key =
@@ -95,7 +124,7 @@ export async function POST(req: NextRequest) {
         : trackPartKey(sessionId, trackId, partNumber);
     const url = await getPresignedPutUrl(key);
 
-    return NextResponse.json({ url, key });
+    return NextResponse.json({ url, key, recordingToken });
   } catch (error) {
     console.error("Failed to generate presigned URL:", error);
     return NextResponse.json(

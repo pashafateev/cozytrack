@@ -10,6 +10,8 @@
     "dev:local": "bash ./scripts/dev-local.sh",
     "init:local": "npm run reset:local && npm run dev",
     "reset:local": "bash ./scripts/reset-local.sh",
+    "purge:ready": "node scripts/purge-ready-sessions.mjs",
+    "purge:orphans": "node scripts/purge-orphan-s3-sessions.mjs",
     "build": "next build",
     "vercel-build": "if [ \"$VERCEL_ENV\" = \"production\" ]; then prisma migrate deploy; fi && next build",
     "start": "next start",
@@ -35,6 +37,7 @@
     "uuid": "^10.0.0"
   },
   "devDependencies": {
+    "@testing-library/react": "^16.3.2",
     "@types/node": "22.19.17",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
@@ -43,6 +46,7 @@
     "@vitest/coverage-v8": "^4.1.5",
     "eslint": "^9.0.0",
     "eslint-config-next": "^15.0.0",
+    "happy-dom": "^20.9.0",
     "postcss": "^8.4.0",
     "prisma": "^6.0.0",
     "tailwindcss": "^3.4.0",

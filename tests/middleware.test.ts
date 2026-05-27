@@ -54,6 +54,22 @@ describe("auth middleware", () => {
     );
     expect(res.status).toBe(200);
   });
+
+  it("lets recording-token upload requests reach the route handler without cookies", async () => {
+    const res = await middleware(
+      makeReq("http://localhost:3001/api/upload/presign", {
+        "x-cozytrack-recording-token": "recording-token",
+      })
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("keeps upload requests without cookies or recording token unauthorized", async () => {
+    const res = await middleware(
+      makeReq("http://localhost:3001/api/upload/presign")
+    );
+    expect(res.status).toBe(401);
+  });
 });
 
 describe("middleware matcher", () => {

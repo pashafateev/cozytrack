@@ -1,16 +1,7 @@
 "use client";
 
 import type { UploadProgress } from "@/hooks/useUploadProgress";
-
-type UploadPhase = "idle" | "uploading" | "done" | "error";
-
-function getPhase(progress: UploadProgress, recordingStopped: boolean): UploadPhase {
-  if (progress.lastError) return "error";
-  if (progress.bytesRecorded === 0) return "idle";
-  if (recordingStopped && progress.fraction >= 1 && progress.chunksInFlight === 0)
-    return "done";
-  return "uploading";
-}
+import { getUploadPhase, type UploadPhase } from "@/lib/upload-progress";
 
 export function UploadProgressBar({
   progress,
@@ -19,7 +10,7 @@ export function UploadProgressBar({
   progress: UploadProgress;
   recordingStopped: boolean;
 }) {
-  const phase = getPhase(progress, recordingStopped);
+  const phase = getUploadPhase(progress, recordingStopped);
   const pct = Math.round(progress.fraction * 100);
 
   // Colors per phase.

@@ -74,6 +74,13 @@ function isGuestAllowedForSessionEndpoint(pathname: string): boolean {
   );
 }
 
+function isRecordingUploadEndpoint(pathname: string): boolean {
+  return (
+    pathname === "/api/upload/presign" ||
+    pathname === "/api/upload/complete"
+  );
+}
+
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
@@ -107,6 +114,17 @@ export async function middleware(req: NextRequest) {
     if (guestCookies.length > 0) {
       return NextResponse.next();
     }
+  }
+
+  // Active recordings carry a short-lived, track-scoped upload token. The
+  // route handler validates the token against the request body; middleware only
+  // lets the body-bearing upload request reach that handler after cookies age
+  // out mid-recording.
+  if (
+    isRecordingUploadEndpoint(pathname) &&
+    req.headers.has("x-cozytrack-recording-token")
+  ) {
+    return NextResponse.next();
   }
 
   // API routes return JSON 401; pages redirect to sign-in.

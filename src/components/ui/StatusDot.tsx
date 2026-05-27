@@ -5,14 +5,23 @@
  * compact "is this track connected / recording / uploading?" indicator.
  */
 
-type Status = "connected" | "recording" | "uploading" | "failed" | "idle";
+type Status =
+  | "connected"
+  | "starting"
+  | "recording"
+  | "uploading"
+  | "unconfirmed"
+  | "failed"
+  | "idle";
 
 const MAP: Record<Status, { label: string; color: string; blink: boolean }> = {
-  connected: { label: "Connected", color: "var(--ok)",   blink: false },
-  recording: { label: "Recording", color: "var(--rec)",  blink: true  },
-  uploading: { label: "Uploading…",color: "var(--warn)", blink: false },
-  failed:    { label: "Failed",    color: "var(--rec)",  blink: false },
-  idle:      { label: "Idle",      color: "var(--text-3)",blink: false },
+  connected:   { label: "Connected",   color: "var(--ok)",     blink: false },
+  starting:    { label: "Starting…",   color: "var(--warn)",   blink: true  },
+  recording:   { label: "Recording",   color: "var(--rec)",    blink: true  },
+  uploading:   { label: "Uploading…",  color: "var(--warn)",   blink: false },
+  unconfirmed: { label: "Unconfirmed", color: "var(--warn)",   blink: false },
+  failed:      { label: "Failed",      color: "var(--rec)",    blink: false },
+  idle:        { label: "Idle",        color: "var(--text-3)", blink: false },
 };
 
 export function StatusDot({ status }: { status: Status }) {
