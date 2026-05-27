@@ -8,8 +8,12 @@ export default defineConfig({
     },
   },
   test: {
-    environment: "happy-dom",
-    include: ["tests/**/*.test.ts"],
-    exclude: ["tests/integration/**/*.test.ts"],
+    environment: "node",
+    include: ["tests/integration/**/*.test.ts"],
+    hookTimeout: 30_000,
+    testTimeout: 30_000,
+    sequence: {
+      concurrent: false,
+    },
   },
 });
