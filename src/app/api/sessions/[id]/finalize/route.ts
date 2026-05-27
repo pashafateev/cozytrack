@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { recoverTrack } from "@/lib/recovery";
 
 export async function POST(
   _req: NextRequest,
@@ -23,8 +24,29 @@ export async function POST(
     }
 
     if (session.status !== "ready") {
-      const pending = session.tracks
-        .filter((t) => t.status !== "complete")
+      const stuck = session.tracks.filter((t) => t.status !== "complete");
+
+      // Layer B (issue #56): before reporting pending tracks back to the
+      // client, attempt server-side recovery of orphaned chunks. The 30s
+      // gate skips chunk-stitching while other participants may still be
+      // uploading; the cheap recording.webm-exists check always runs.
+      for (const t of stuck) {
+        try {
+          await recoverTrack(t.id, { chunkStitchMinAgeMs: 30_000 });
+        } catch (err) {
+          console.error(`[finalize] recoverTrack failed for ${t.id}:`, err);
+        }
+      }
+
+      const refreshed = stuck.length
+        ? await db.track.findMany({
+            where: { id: { in: stuck.map((t) => t.id) } },
+            select: { id: true, participantName: true, status: true },
+          })
+        : [];
+
+      const pending = refreshed
+        .filter((t) => t.status !== "complete" && t.status !== "failed")
         .map((t) => ({
           trackId: t.id,
           participantName: t.participantName,
