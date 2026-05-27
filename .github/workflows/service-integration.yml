@@ -1,0 +1,81 @@
+name: Service integration
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  service-integration:
+    name: Prisma and storage integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: cozytrack
+          POSTGRES_PASSWORD: cozytrack
+          POSTGRES_DB: cozytrack
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cozytrack -d cozytrack"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      COZYTRACK_INTEGRATION_TEST: "1"
+      AUTH_SECRET: cozytrack-ci-auth-secret-32-characters
+      DATABASE_URL: postgresql://cozytrack:cozytrack@localhost:5432/cozytrack
+      DIRECT_DATABASE_URL: postgresql://cozytrack:cozytrack@localhost:5432/cozytrack
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      S3_BUCKET_NAME: cozytrack-ci-test
+      S3_ENDPOINT: http://127.0.0.1:9000
+      S3_FORCE_PATH_STYLE: "true"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Start MinIO
+        run: |
+          docker run --rm -d \
+            --name cozytrack-minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            quay.io/minio/minio:latest server /data
+
+      - name: Wait for MinIO
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null; then
+              exit 0
+            fi
+            echo "Waiting for MinIO ($attempt/60)"
+            sleep 1
+          done
+          echo "Timed out waiting for MinIO" >&2
+          exit 1
+
+      - name: Apply Prisma migrations
+        run: npx prisma migrate deploy
+
+      - name: Run service integration tests
+        run: npm run test:integration
