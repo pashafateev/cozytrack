@@ -27,7 +27,6 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      final_message: ${{ steps.run_codex.outputs.final-message }}
       pr_number: ${{ steps.pr_context.outputs.number }}
     steps:
       - name: Resolve PR context
@@ -57,6 +56,11 @@ jobs:
               "same_repo",
               pr.head.repo?.full_name === `${context.repo.owner}/${context.repo.repo}` ? "true" : "false",
             );
+
+      - name: Initialize Codex feedback artifact
+        run: |
+          mkdir -p .codex-review
+          : > .codex-review/final-message.md
 
       - name: Skip fork PR
         if: steps.pr_context.outputs.same_repo != 'true'
@@ -117,25 +121,53 @@ jobs:
             ${{ steps.pr_context.outputs.title }}
             ${{ steps.pr_context.outputs.body }}
 
+      - name: Write Codex feedback artifact
+        if: steps.run_codex.outputs['final-message'] != ''
+        env:
+          CODEX_FINAL_MESSAGE: ${{ steps.run_codex.outputs['final-message'] }}
+        run: printf '%s\n' "$CODEX_FINAL_MESSAGE" > .codex-review/final-message.md
+
+      - name: Upload Codex feedback artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-review-feedback
+          path: .codex-review/final-message.md
+          if-no-files-found: error
+          retention-days: 1
+
   post_feedback:
     runs-on: ubuntu-latest
     needs: codex
-    if: needs.codex.outputs.final_message != ''
+    if: needs.codex.result == 'success' && needs.codex.outputs.pr_number != ''
     permissions:
+      actions: read
       issues: write
-      pull-requests: write
     steps:
+      - name: Download Codex feedback artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-review-feedback
+          path: .codex-review
+
       - name: Report Codex feedback
         uses: actions/github-script@v7
         env:
-          CODEX_FINAL_MESSAGE: ${{ needs.codex.outputs.final_message }}
+          CODEX_FINAL_MESSAGE_FILE: .codex-review/final-message.md
         with:
           github-token: ${{ github.token }}
           script: |
+            const fs = require("node:fs");
+            const message = fs.readFileSync(process.env.CODEX_FINAL_MESSAGE_FILE, "utf8").trim();
+            if (!message) {
+              core.notice("No Codex feedback to post.");
+              return;
+            }
+
             const body = [
               "## Codex review",
               "",
-              process.env.CODEX_FINAL_MESSAGE,
+              message,
             ].join("\n");
 
             await github.rest.issues.createComment({
