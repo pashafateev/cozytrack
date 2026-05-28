@@ -3,18 +3,68 @@ name: Codex review
 on:
   pull_request:
     types: [opened, ready_for_review, reopened]
+  issue_comment:
+    types: [created]
 
 jobs:
   codex:
-    if: github.event.pull_request.draft == false && github.event.pull_request.user.type != 'Bot'
+    if: >-
+      ${{
+        (
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.draft == false &&
+          github.event.pull_request.user.type != 'Bot'
+        ) ||
+        (
+          github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request &&
+          startsWith(github.event.comment.body, '/codex review') &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+        )
+      }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read
     outputs:
       final_message: ${{ steps.run_codex.outputs.final-message }}
+      pr_number: ${{ steps.pr_context.outputs.number }}
     steps:
+      - name: Resolve PR context
+        id: pr_context
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.eventName === "pull_request"
+              ? context.payload.pull_request.number
+              : context.payload.issue.number;
+
+            const pr = context.eventName === "pull_request"
+              ? context.payload.pull_request
+              : (await github.rest.pulls.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: prNumber,
+                })).data;
+
+            core.setOutput("number", String(pr.number));
+            core.setOutput("base_ref", pr.base.ref);
+            core.setOutput("base_sha", pr.base.sha);
+            core.setOutput("head_sha", pr.head.sha);
+            core.setOutput("title", pr.title ?? "");
+            core.setOutput("body", pr.body ?? "");
+            core.setOutput(
+              "same_repo",
+              pr.head.repo?.full_name === `${context.repo.owner}/${context.repo.repo}` ? "true" : "false",
+            );
+
+      - name: Skip fork PR
+        if: steps.pr_context.outputs.same_repo != 'true'
+        run: echo "Codex review is skipped for forked pull requests."
+
       - name: Check OpenAI API key
         id: api_key
+        if: steps.pr_context.outputs.same_repo == 'true'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
@@ -26,16 +76,16 @@ jobs:
           fi
 
       - uses: actions/checkout@v5
-        if: steps.api_key.outputs.available == 'true'
+        if: steps.pr_context.outputs.same_repo == 'true' && steps.api_key.outputs.available == 'true'
         with:
-          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          ref: refs/pull/${{ steps.pr_context.outputs.number }}/merge
           persist-credentials: false
 
       - name: Pre-fetch PR refs
-        if: steps.api_key.outputs.available == 'true'
+        if: steps.pr_context.outputs.same_repo == 'true' && steps.api_key.outputs.available == 'true'
         env:
-          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE_REF: ${{ steps.pr_context.outputs.base_ref }}
+          PR_NUMBER: ${{ steps.pr_context.outputs.number }}
         run: |
           git fetch --no-tags origin \
             "$PR_BASE_REF" \
@@ -43,7 +93,7 @@ jobs:
 
       - name: Run Codex review
         id: run_codex
-        if: steps.api_key.outputs.available == 'true'
+        if: steps.pr_context.outputs.same_repo == 'true' && steps.api_key.outputs.available == 'true'
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -53,9 +103,10 @@ jobs:
 
             Scope:
             - Repository: ${{ github.repository }}
-            - PR: #${{ github.event.pull_request.number }}
-            - Base SHA: ${{ github.event.pull_request.base.sha }}
-            - Head SHA: ${{ github.event.pull_request.head.sha }}
+            - PR: #${{ steps.pr_context.outputs.number }}
+            - Base SHA: ${{ steps.pr_context.outputs.base_sha }}
+            - Head SHA: ${{ steps.pr_context.outputs.head_sha }}
+            - Trigger: ${{ github.event_name }}
 
             Review only the changes introduced by this PR. Do not suggest broad refactors or style-only changes.
             Prioritize actionable findings with file and line references. If there are no findings, say that clearly.
@@ -63,8 +114,8 @@ jobs:
 
             Pull request title and body:
             ----
-            ${{ github.event.pull_request.title }}
-            ${{ github.event.pull_request.body }}
+            ${{ steps.pr_context.outputs.title }}
+            ${{ steps.pr_context.outputs.body }}
 
   post_feedback:
     runs-on: ubuntu-latest
@@ -90,6 +141,6 @@ jobs:
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
+              issue_number: Number("${{ needs.codex.outputs.pr_number }}"),
               body,
             });
