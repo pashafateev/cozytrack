@@ -30,7 +30,77 @@ export S3_ENDPOINT="${COZYTRACK_BROWSER_S3_ENDPOINT:-http://127.0.0.1:9000}"
 export S3_FORCE_PATH_STYLE=true
 export MINIO_API_CORS_ALLOW_ORIGIN="${MINIO_API_CORS_ALLOW_ORIGIN:-http://127.0.0.1:${COZYTRACK_BROWSER_PORT},http://localhost:${COZYTRACK_BROWSER_PORT},http://127.0.0.1:3001,http://localhost:3001}"
 
+assert_local_database_url() {
+  node -e '
+    const value = process.argv[1];
+    let parsed;
+    try {
+      parsed = new URL(value);
+    } catch (error) {
+      console.error(`Invalid DATABASE_URL: ${error.message}`);
+      process.exit(1);
+    }
+
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
+    const allowed = new Set(["localhost", "127.0.0.1", "::1"]);
+    if (!allowed.has(hostname)) {
+      console.error(`Refusing to run browser smoke test against non-local database host: ${hostname}`);
+      process.exit(1);
+    }
+  ' "$1"
+}
+
+assert_test_bucket() {
+  bucket_lc="$(printf '%s' "$S3_BUCKET_NAME" | tr '[:upper:]' '[:lower:]')"
+  case "$bucket_lc" in
+    *ci*|*test*|*local*)
+      ;;
+    *)
+      echo "Refusing to run browser smoke test against non-test bucket: $S3_BUCKET_NAME" >&2
+      exit 1
+      ;;
+  esac
+}
+
+wait_for_postgres() {
+  for attempt in $(seq 1 60); do
+    if docker compose exec -T postgres pg_isready -U cozytrack -d cozytrack >/dev/null 2>&1; then
+      return 0
+    fi
+
+    echo "Waiting for Postgres ($attempt/60)"
+    sleep 1
+  done
+
+  echo "Timed out waiting for Postgres" >&2
+  exit 1
+}
+
+wait_for_tcp() {
+  host="$1"
+  port="$2"
+  name="$3"
+
+  for attempt in $(seq 1 60); do
+    if (echo >"/dev/tcp/$host/$port") >/dev/null 2>&1; then
+      return 0
+    fi
+
+    echo "Waiting for $name at $host:$port ($attempt/60)"
+    sleep 1
+  done
+
+  echo "Timed out waiting for $name at $host:$port" >&2
+  exit 1
+}
+
+assert_local_database_url "$DATABASE_URL"
+assert_local_database_url "$DIRECT_DATABASE_URL"
+assert_test_bucket
+
 docker compose --profile local-storage up -d postgres redis livekit minio
+wait_for_postgres
+wait_for_tcp 127.0.0.1 7880 LiveKit
 docker compose --profile local-storage --profile tools run --rm minio-mc /scripts/minio-bucket.sh provision
 
 npx prisma db push
