@@ -145,6 +145,7 @@ jobs:
     permissions:
       actions: read
       issues: write
+      pull-requests: write
     steps:
       - name: Download Codex feedback artifact
         uses: actions/download-artifact@v4
