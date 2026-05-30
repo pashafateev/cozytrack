@@ -57,11 +57,6 @@ jobs:
               pr.head.repo?.full_name === `${context.repo.owner}/${context.repo.repo}` ? "true" : "false",
             );
 
-      - name: Initialize Codex feedback artifact
-        run: |
-          mkdir -p .codex-review
-          : > .codex-review/final-message.md
-
       - name: Skip fork PR
         if: steps.pr_context.outputs.same_repo != 'true'
         run: echo "Codex review is skipped for forked pull requests."
@@ -95,6 +90,11 @@ jobs:
             "$PR_BASE_REF" \
             "+refs/pull/$PR_NUMBER/head"
 
+      - name: Initialize Codex feedback artifact
+        run: |
+          mkdir -p codex-review-output
+          : > codex-review-output/final-message.md
+
       - name: Run Codex review
         id: run_codex
         if: steps.pr_context.outputs.same_repo == 'true' && steps.api_key.outputs.available == 'true'
@@ -125,14 +125,16 @@ jobs:
         if: steps.run_codex.outputs['final-message'] != ''
         env:
           CODEX_FINAL_MESSAGE: ${{ steps.run_codex.outputs['final-message'] }}
-        run: printf '%s\n' "$CODEX_FINAL_MESSAGE" > .codex-review/final-message.md
+        run: |
+          mkdir -p codex-review-output
+          printf '%s\n' "$CODEX_FINAL_MESSAGE" > codex-review-output/final-message.md
 
       - name: Upload Codex feedback artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: codex-review-feedback
-          path: .codex-review/final-message.md
+          path: codex-review-output/final-message.md
           if-no-files-found: error
           retention-days: 1
 
@@ -143,17 +145,18 @@ jobs:
     permissions:
       actions: read
       issues: write
+      pull-requests: write
     steps:
       - name: Download Codex feedback artifact
         uses: actions/download-artifact@v4
         with:
           name: codex-review-feedback
-          path: .codex-review
+          path: codex-review-output
 
       - name: Report Codex feedback
         uses: actions/github-script@v7
         env:
-          CODEX_FINAL_MESSAGE_FILE: .codex-review/final-message.md
+          CODEX_FINAL_MESSAGE_FILE: codex-review-output/final-message.md
         with:
           github-token: ${{ github.token }}
           script: |
