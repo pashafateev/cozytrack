@@ -147,6 +147,33 @@ To reset everything and immediately start the app:
 npm run init:local
 ```
 
+## Testing
+
+Fast validation:
+
+```bash
+npm test
+npm run typecheck
+```
+
+`npm run test:integration` expects `COZYTRACK_INTEGRATION_TEST=1` plus local
+Postgres and S3-compatible storage environment variables. The GitHub Actions
+service integration workflow documents the exact CI values.
+
+Browser recording smoke test:
+
+```bash
+npx playwright install chromium
+npm run test:browser
+```
+
+`npm run test:browser` starts the local Docker services, provisions a local
+MinIO bucket, pushes the Prisma schema, starts Next.js on port 3101, signs in
+as the host with test-only credentials, records with Chromium's fake
+microphone, and verifies a complete track row plus a non-empty
+`recording.webm` object in MinIO. It is intentionally single-browser coverage;
+the multi-participant E2E harness remains separate.
+
 ## Project Structure
 
 ```
