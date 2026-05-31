@@ -1579,6 +1579,7 @@ function RoomContent({
 
   const handleRetryLocalBackupUpload = useCallback(async () => {
     if (backupAction !== "idle") return;
+    if (studioStateRef.current !== "connected") return;
     const current = recoveryBackupRef.current;
     if (!isRecoverableBackup(current)) return;
 
@@ -1610,6 +1611,7 @@ function RoomContent({
 
   const handleDownloadLocalBackup = useCallback(async () => {
     if (backupAction !== "idle") return;
+    if (studioStateRef.current !== "connected") return;
     const current = recoveryBackupRef.current;
     if (!isRecoverableBackup(current)) return;
 
@@ -1636,6 +1638,7 @@ function RoomContent({
 
   const handleClearLocalBackup = useCallback(async () => {
     if (backupAction !== "idle") return;
+    if (studioStateRef.current !== "connected") return;
     const current = recoveryBackupRef.current;
     if (!isRecoverableBackup(current)) return;
     if (!window.confirm("Clear this local recording backup?")) return;
@@ -1895,8 +1898,8 @@ function RoomContent({
   );
 
   const showBackupPanel =
-    Boolean(backupError) ||
-    (studioState !== "recording" && isRecoverableBackup(recoveryBackup));
+    studioState === "connected" &&
+    (Boolean(backupError) || isRecoverableBackup(recoveryBackup));
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
