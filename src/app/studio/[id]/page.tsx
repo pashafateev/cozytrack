@@ -34,6 +34,12 @@ import {
   uploadChunk,
   completeUpload,
 } from "@/lib/upload";
+import {
+  browserRecordingBackupStore,
+  recordingBackupId,
+  type RecordingBackupManifest,
+} from "@/lib/recording-backup";
+import { retryLocalRecordingBackupUpload } from "@/lib/recording-backup-upload";
 import { getToken, LIVEKIT_URL } from "@/lib/livekit";
 import {
   useTransport,
@@ -60,14 +66,18 @@ import { useUploadProgress } from "@/hooks/useUploadProgress";
 import { useNavigationGuard } from "@/hooks/useNavigationGuard";
 import { UploadProgressBar } from "@/components/UploadProgressBar";
 
+import { Button } from "@/components/ui/Button";
 import { Topbar } from "@/components/ui/Topbar";
 import { VUMeter, DbScale } from "@/components/ui/VUMeter";
 import { StatusDot, type Status } from "@/components/ui/StatusDot";
 import {
   IcoAlert,
+  IcoDownload,
   IcoLink,
   IcoMic,
   IcoPlus,
+  IcoTrash,
+  IcoUpload,
   IcoX,
 } from "@/components/ui/Icon";
 
@@ -109,6 +119,29 @@ function formatElapsed(totalMs: number): string {
 function formatParticipantList(names: string[]): string {
   if (names.length <= 2) return names.join(" and ");
   return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  return `${(kb / 1024).toFixed(1)} MB`;
+}
+
+function backupByteCount(manifest: RecordingBackupManifest): number {
+  return manifest.chunks.reduce((sum, chunk) => sum + chunk.byteSize, 0);
+}
+
+function isRecoverableBackup(
+  manifest: RecordingBackupManifest | null,
+): manifest is RecordingBackupManifest {
+  return Boolean(
+    manifest && manifest.state !== "uploaded" && manifest.chunks.length > 0,
+  );
+}
+
+function backupErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Local recording backup failed";
 }
 
 function isMobileBrowser(navigatorInfo: Navigator): boolean {
@@ -496,6 +529,109 @@ function InviteLinkModal({
   );
 }
 
+function LocalRecordingBackupPanel({
+  manifest,
+  error,
+  action,
+  onRetry,
+  onDownload,
+  onClear,
+}: {
+  manifest: RecordingBackupManifest | null;
+  error: string | null;
+  action: "idle" | "retrying" | "downloading" | "clearing";
+  onRetry: () => void;
+  onDownload: () => void;
+  onClear: () => void;
+}) {
+  const hasChunks = Boolean(manifest && manifest.chunks.length > 0);
+  const isBusy = action !== "idle";
+  const totalBytes = manifest ? backupByteCount(manifest) : 0;
+  const statusText =
+    action === "retrying"
+      ? "Retrying upload from local backup..."
+      : manifest?.state === "failed"
+      ? "Remote upload failed. Local backup is available in this browser."
+      : manifest?.state === "uploading"
+      ? "Uploading local backup..."
+      : manifest
+      ? "Local recording backup found in this browser."
+      : "Local recording backup is unavailable.";
+
+  return (
+    <div
+      role="alert"
+      className="rounded-lg border px-4 py-3.5 flex flex-col gap-3"
+      style={{
+        background: "rgba(232,168,48,0.08)",
+        borderColor: "rgba(232,168,48,0.28)",
+      }}
+    >
+      <div className="flex items-start gap-3">
+        <span className="mt-0.5 flex-shrink-0">
+          <IcoAlert size={15} color="var(--warn)" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <h2 className="text-[13px] font-semibold text-warn">
+            Local recording backup
+          </h2>
+          <p className="mt-1 text-[12px] leading-5 text-text-2">
+            {statusText}
+          </p>
+          {manifest && (
+            <p className="mt-1 font-mono text-[10px] text-text-3">
+              {manifest.participantName} - {manifest.chunks.length} chunk
+              {manifest.chunks.length === 1 ? "" : "s"} - {formatBytes(totalBytes)}
+            </p>
+          )}
+          {manifest?.persistentStorage === false && (
+            <p className="mt-1 text-[11px] leading-4 text-text-3">
+              Browser persistence was not granted, so keep this tab open until
+              the backup is handled.
+            </p>
+          )}
+          {error && (
+            <p className="mt-1 text-[11px] leading-4 text-rec">{error}</p>
+          )}
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          type="button"
+          size="sm"
+          variant="primary"
+          onClick={onRetry}
+          disabled={!hasChunks || isBusy}
+        >
+          <IcoUpload size={13} />
+          {action === "retrying" ? "Retrying" : "Retry upload"}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="subtle"
+          onClick={onDownload}
+          disabled={!hasChunks || isBusy}
+        >
+          <IcoDownload size={13} />
+          {action === "downloading" ? "Preparing" : "Download"}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="danger"
+          onClick={onClear}
+          disabled={!hasChunks || isBusy}
+        >
+          <IcoTrash size={13} />
+          {action === "clearing" ? "Clearing" : "Clear"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 // ---------- Room Content (inside LiveKitRoom) ----------
 
 /**
@@ -612,6 +748,20 @@ function RoomContent({
   const [notification, setNotification] = useState<string | null>(null);
   const notificationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [hasRecorded, setHasRecorded] = useState(false);
+  const [recoveryBackup, setRecoveryBackup] =
+    useState<RecordingBackupManifest | null>(null);
+  const recoveryBackupRef = useRef<RecordingBackupManifest | null>(null);
+  const [backupError, setBackupError] = useState<string | null>(null);
+  const [backupAction, setBackupAction] = useState<
+    "idle" | "retrying" | "downloading" | "clearing"
+  >("idle");
+  const setRecoveryBackupSync = useCallback(
+    (manifest: RecordingBackupManifest | null) => {
+      recoveryBackupRef.current = manifest;
+      setRecoveryBackup(manifest);
+    },
+    [],
+  );
 
   // Elapsed recording timer
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -673,6 +823,27 @@ function RoomContent({
       if (notificationTimerRef.current) clearTimeout(notificationTimerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadLocalBackups() {
+      try {
+        const backups = await browserRecordingBackupStore.listBackups(sessionId);
+        if (cancelled) return;
+        const backup = backups.find((item) => isRecoverableBackup(item)) ?? null;
+        if (backup) {
+          setRecoveryBackupSync(backup);
+          setBackupError(null);
+        }
+      } catch (error) {
+        if (!cancelled) setBackupError(backupErrorMessage(error));
+      }
+    }
+    void loadLocalBackups();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, setRecoveryBackupSync]);
 
   useEffect(() => clearRecordingConfirmationTimer, [
     clearRecordingConfirmationTimer,
@@ -1076,6 +1247,21 @@ function RoomContent({
           },
         );
         recordingUploadTokenRef.current = initialUpload.recordingToken;
+        try {
+          const backup = await browserRecordingBackupStore.startBackup({
+            sessionId,
+            trackId,
+            participantName,
+            recordingToken: initialUpload.recordingToken,
+          });
+          setRecoveryBackupSync(backup);
+          setBackupError(null);
+        } catch (backupErr) {
+          console.error("Failed to initialize local recording backup:", backupErr);
+          setRecoveryBackupSync(null);
+          setBackupError(backupErrorMessage(backupErr));
+          showNotification("Local backup unavailable - remote upload only");
+        }
       } catch (err) {
         console.error("Failed to initialize upload:", err);
         clearRecordingConfirmationState();
@@ -1109,16 +1295,67 @@ function RoomContent({
           );
         }
 
-        const uploadPromise = (async () => {
-          const url = await getPresignedUploadUrl(
+        const capturedAt = new Date();
+        const backupSave = browserRecordingBackupStore
+          .saveChunk({
             sessionId,
             trackId,
-            index,
-            undefined,
-            undefined,
-            recordingUploadTokenRef.current,
-          );
-          await uploadChunk(url, chunk);
+            chunkIndex: index,
+            chunk,
+            capturedAt,
+          })
+          .then((backup) => {
+            setRecoveryBackupSync(backup);
+            setBackupError(null);
+            return backup;
+          })
+          .catch((backupErr) => {
+            console.error("Failed to write local recording backup:", backupErr);
+            setBackupError(backupErrorMessage(backupErr));
+            return null;
+          });
+
+        const uploadPromise = (async () => {
+          const savedBackup = await backupSave;
+          try {
+            const url = await getPresignedUploadUrl(
+              sessionId,
+              trackId,
+              index,
+              undefined,
+              undefined,
+              recordingUploadTokenRef.current,
+            );
+            await uploadChunk(url, chunk);
+          } catch (uploadErr) {
+            if (savedBackup) {
+              try {
+                const backup = await browserRecordingBackupStore.markChunkFailed(
+                  sessionId,
+                  trackId,
+                  index,
+                  uploadErr,
+                );
+                setRecoveryBackupSync(backup);
+              } catch (backupErr) {
+                console.error("Failed to mark local backup chunk failed:", backupErr);
+              }
+            }
+            throw uploadErr;
+          }
+          if (savedBackup) {
+            try {
+              const backup = await browserRecordingBackupStore.markChunkUploaded(
+                sessionId,
+                trackId,
+                index,
+              );
+              setRecoveryBackupSync(backup);
+            } catch (backupErr) {
+              console.error("Failed to mark local backup chunk uploaded:", backupErr);
+              setBackupError(backupErrorMessage(backupErr));
+            }
+          }
         })();
 
         void trackerTrackUpload(byteLength, uploadPromise);
@@ -1179,6 +1416,7 @@ function RoomContent({
       selectedMicLabel,
       sessionId,
       setRecordingSessionStartedAtSync,
+      setRecoveryBackupSync,
       setStudioStateSync,
       showNotification,
       switchAudioQuality,
@@ -1210,6 +1448,7 @@ function RoomContent({
     // tears down immediately — even if the upload pipeline below hangs.
     const recorder = recorderRef.current;
     const trackId = trackIdRef.current;
+    const backupId = trackId ? recordingBackupId(sessionId, trackId) : null;
     const recordingUploadToken = recordingUploadTokenRef.current;
     const startedAt = recordingStartRef.current;
     setStudioStateSync("finalizing");
@@ -1236,6 +1475,17 @@ function RoomContent({
 
       // Freeze denominator — recording is done, no more chunks will arrive.
       trackerFreezeRecorded();
+      if (backupId) {
+        try {
+          const backup = await browserRecordingBackupStore.markBackupAvailable(
+            backupId,
+            durationMs,
+          );
+          setRecoveryBackupSync(backup);
+        } catch (backupErr) {
+          console.error("Failed to mark local backup available:", backupErr);
+        }
+      }
 
       // The final recording.webm upload is critical: if it fails, we must
       // NOT call completeUpload (which marks the track complete and lets
@@ -1262,10 +1512,33 @@ function RoomContent({
       await completeUpload(sessionId, trackId, durationMs, recordingUploadToken);
 
       setHasRecorded(true);
+      if (backupId) {
+        try {
+          await browserRecordingBackupStore.clearBackup(backupId, "verified-upload");
+          setRecoveryBackupSync(null);
+          setBackupError(null);
+        } catch (backupErr) {
+          console.error("Failed to clear uploaded local backup:", backupErr);
+          setBackupError(backupErrorMessage(backupErr));
+        }
+      }
     } catch (err) {
       // Final upload (or stop()) failed. lastError is already populated by
       // trackUpload's rethrow path; the recording stays incomplete.
       console.error("Failed to stop recording:", err);
+      if (backupId) {
+        try {
+          const backup = await browserRecordingBackupStore.markBackupFailed(
+            backupId,
+            err,
+          );
+          setRecoveryBackupSync(backup);
+          setBackupError(null);
+        } catch (backupErr) {
+          console.error("Failed to mark local backup failed:", backupErr);
+          setBackupError(backupErrorMessage(backupErr));
+        }
+      }
     } finally {
       recorderRef.current = null;
       recordingUploadTokenRef.current = undefined;
@@ -1291,6 +1564,7 @@ function RoomContent({
     clearRecordingConfirmationState,
     sessionId,
     setRecordingSessionStartedAtSync,
+    setRecoveryBackupSync,
     setStudioStateSync,
     switchAudioQuality,
     trackerFreezeRecorded,
@@ -1299,6 +1573,84 @@ function RoomContent({
     trackerWaitForUploads,
     timingDebug,
   ]);
+
+  const handleRetryLocalBackupUpload = useCallback(async () => {
+    if (backupAction !== "idle") return;
+    if (studioStateRef.current !== "connected") return;
+    const current = recoveryBackupRef.current;
+    if (!isRecoverableBackup(current)) return;
+
+    setBackupAction("retrying");
+    setBackupError(null);
+    try {
+      const latest =
+        (await browserRecordingBackupStore.getBackup(current.id)) ?? current;
+      const recovered = await retryLocalRecordingBackupUpload(latest);
+      setRecoveryBackupSync(recovered);
+      await browserRecordingBackupStore.clearBackup(recovered.id, "verified-upload");
+      setRecoveryBackupSync(null);
+      setHasRecorded(true);
+      showNotification("Local backup uploaded");
+    } catch (error) {
+      const message = backupErrorMessage(error);
+      setBackupError(message);
+      try {
+        const latest = await browserRecordingBackupStore.getBackup(current.id);
+        if (latest) setRecoveryBackupSync(latest);
+      } catch (backupErr) {
+        console.error("Failed to refresh local backup after retry:", backupErr);
+      }
+      showNotification("Retry failed - local backup kept");
+    } finally {
+      setBackupAction("idle");
+    }
+  }, [backupAction, setRecoveryBackupSync, showNotification]);
+
+  const handleDownloadLocalBackup = useCallback(async () => {
+    if (backupAction !== "idle") return;
+    if (studioStateRef.current !== "connected") return;
+    const current = recoveryBackupRef.current;
+    if (!isRecoverableBackup(current)) return;
+
+    setBackupAction("downloading");
+    setBackupError(null);
+    try {
+      const recording = await browserRecordingBackupStore.buildRecordingBlob(
+        current.id,
+      );
+      const url = URL.createObjectURL(recording);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `cozytrack-${current.sessionId.slice(0, 8)}-${current.trackId.slice(0, 8)}.webm`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (error) {
+      setBackupError(backupErrorMessage(error));
+    } finally {
+      setBackupAction("idle");
+    }
+  }, [backupAction]);
+
+  const handleClearLocalBackup = useCallback(async () => {
+    if (backupAction !== "idle") return;
+    if (studioStateRef.current !== "connected") return;
+    const current = recoveryBackupRef.current;
+    if (!isRecoverableBackup(current)) return;
+    if (!window.confirm("Clear this local recording backup?")) return;
+
+    setBackupAction("clearing");
+    setBackupError(null);
+    try {
+      await browserRecordingBackupStore.clearBackup(current.id, "user-confirmed");
+      setRecoveryBackupSync(null);
+    } catch (error) {
+      setBackupError(backupErrorMessage(error));
+    } finally {
+      setBackupAction("idle");
+    }
+  }, [backupAction, setRecoveryBackupSync]);
 
   // Synchronous "request in flight" guards. Set true at the top of the click
   // handler before any await so a rapid second click is dropped immediately
@@ -1542,6 +1894,10 @@ function RoomContent({
     ],
   );
 
+  const showBackupPanel =
+    studioState === "connected" &&
+    (Boolean(backupError) || isRecoverableBackup(recoveryBackup));
+
   return (
     <div className="flex flex-col flex-1 min-h-0">
       {/* Notification toast */}
@@ -1652,6 +2008,17 @@ function RoomContent({
               onVolumeChange={onMonitorVolumeChange}
             />
           </div>
+
+          {showBackupPanel && (
+            <LocalRecordingBackupPanel
+              manifest={recoveryBackup}
+              error={backupError}
+              action={backupAction}
+              onRetry={handleRetryLocalBackupUpload}
+              onDownload={handleDownloadLocalBackup}
+              onClear={handleClearLocalBackup}
+            />
+          )}
 
           {/* Finish recording (post-stop) — surfaces after the local recorder
               has produced at least one track and the studio is no longer in

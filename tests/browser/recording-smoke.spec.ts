@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import {
   DeleteObjectsCommand,
   HeadObjectCommand,
@@ -98,12 +98,12 @@ test.afterAll(async () => {
   await db.$disconnect();
 });
 
-test("records a host track through the browser and stores a completed WebM", async ({
-  page,
-}) => {
+async function createAndJoinHostStudio(
+  page: Page,
+  sessionName: string,
+  participantName: string,
+): Promise<string> {
   const hostPassword = requiredEnv("HOST_PASSWORD");
-  const sessionName = `Browser smoke ${Date.now()}`;
-  const participantName = "Browser Smoke Host";
 
   await test.step("sign in and create a session", async () => {
     await page.goto("/signin?return_to=/");
@@ -137,6 +137,20 @@ test("records a host track through the browser and stores a completed WebM", asy
       page.getByRole("button", { name: "Start recording" }),
     ).toBeVisible();
   });
+
+  return sessionId;
+}
+
+test("records a host track through the browser and stores a completed WebM", async ({
+  page,
+}) => {
+  const sessionName = `Browser smoke ${Date.now()}`;
+  const participantName = "Browser Smoke Host";
+  const sessionId = await createAndJoinHostStudio(
+    page,
+    sessionName,
+    participantName,
+  );
 
   await test.step("start and stop a short recording", async () => {
     await page.waitForTimeout(1_000);
@@ -188,5 +202,106 @@ test("records a host track through the browser and stores a completed WebM", asy
   await test.step("finish the recording from the studio UI", async () => {
     await page.getByRole("button", { name: "Finish recording" }).click();
     await expect(page.getByText("Ready for ingest")).toBeVisible({ timeout: 45_000 });
+  });
+});
+
+test("recovers a failed final upload from the local browser backup", async ({
+  page,
+}) => {
+  const sessionName = `Browser recovery ${Date.now()}`;
+  const participantName = "Browser Recovery Host";
+  const sessionId = await createAndJoinHostStudio(
+    page,
+    sessionName,
+    participantName,
+  );
+  let failedFinalUpload = false;
+
+  await page.route("**/*", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (
+      !failedFinalUpload &&
+      request.method() === "PUT" &&
+      url.pathname.endsWith("/recording.webm")
+    ) {
+      failedFinalUpload = true;
+      await route.fulfill({
+        status: 503,
+        contentType: "text/plain",
+        body: "forced final upload failure",
+      });
+      return;
+    }
+
+    await route.continue();
+  });
+
+  await test.step("record until a local backup chunk exists and force final upload failure", async () => {
+    await page.waitForTimeout(1_000);
+    await page.getByRole("button", { name: "Start recording" }).click();
+    await expect(
+      page.getByRole("button", { name: "Stop recording" }),
+    ).toBeVisible();
+
+    await page.waitForTimeout(6_000);
+    await page.getByRole("button", { name: "Stop recording" }).click();
+    await expect(page.getByText("FINALIZING").first()).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Start recording" }),
+    ).toBeVisible({ timeout: 45_000 });
+    await expect(page.getByText("Local recording backup")).toBeVisible();
+    await expect(
+      page.getByText(
+        "Remote upload failed. Local backup is available in this browser.",
+      ),
+    ).toBeVisible();
+    expect(failedFinalUpload).toBe(true);
+  });
+
+  await test.step("retry upload from the local backup", async () => {
+    const retryUpload = page.getByRole("button", { name: "Retry upload" });
+    await expect(retryUpload).toBeEnabled();
+    await retryUpload.click();
+    await expect(page.getByText("Local backup uploaded")).toBeVisible();
+    await expect(page.getByText("Local recording backup")).toBeHidden({
+      timeout: 45_000,
+    });
+    await expect(
+      page.getByRole("button", { name: "Finish recording" }),
+    ).toBeVisible();
+  });
+
+  await test.step("assert recovered track metadata and stored recording", async () => {
+    await expect
+      .poll(
+        async () => {
+          const track = await db.track.findFirst({
+            where: { sessionId, participantName },
+            select: { status: true },
+          });
+          return track?.status ?? null;
+        },
+        { timeout: 30_000 },
+      )
+      .toBe("complete");
+
+    const track = await db.track.findFirstOrThrow({
+      where: { sessionId, participantName },
+      select: { durationMs: true, s3Key: true },
+    });
+
+    expect(track.durationMs).toBeGreaterThan(0);
+    expect(track.s3Key).toMatch(
+      new RegExp(`^sessions/${sessionId}/tracks/[^/]+/recording\\.webm$`),
+    );
+
+    const head = await createS3Client().send(
+      new HeadObjectCommand({
+        Bucket: requiredEnv("S3_BUCKET_NAME"),
+        Key: track.s3Key,
+      }),
+    );
+    expect(head.ContentLength).toBeGreaterThan(0);
   });
 });
