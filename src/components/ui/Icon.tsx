@@ -69,6 +69,30 @@ export const IcoDownload = (p: IconProps) => (
   />
 );
 
+export const IcoUpload = (p: IconProps) => (
+  <Paths
+    {...p}
+    d={[
+      "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4",
+      "M17 8l-5-5-5 5",
+      "M12 3v12",
+    ]}
+  />
+);
+
+export const IcoTrash = (p: IconProps) => (
+  <Paths
+    {...p}
+    d={[
+      "M3 6h18",
+      "M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2",
+      "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6",
+      "M10 11v6",
+      "M14 11v6",
+    ]}
+  />
+);
+
 export const IcoPlay = (p: IconProps) => <Paths {...p} fill={p.fill ?? "currentColor"} d="M5 3l14 9-14 9V3z" />;
 export const IcoPause = (p: IconProps) => <Paths {...p} d={["M6 4h4v16H6z", "M14 4h4v16h-4z"]} />;
 export const IcoChevron = (p: IconProps) => <Paths {...p} d="M15 18l-6-6 6-6" />;
