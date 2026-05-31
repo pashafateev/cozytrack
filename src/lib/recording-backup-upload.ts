@@ -51,5 +51,5 @@ export async function retryLocalRecordingBackupUpload(
     throw error;
   }
 
-  return await backupStore.markBackupUploaded(manifest.id);
+  return await backupStore.markBackupAvailable(manifest.id, manifest.durationMs);
 }

@@ -139,7 +139,10 @@ describe("recording backup store", () => {
       undefined,
       "recording-token",
     );
-    expect(retried.state).toBe("uploaded");
+    expect(retried.state).toBe("available");
+    await expect(store.buildRecordingBlob(manifest.id)).resolves.toBeInstanceOf(
+      Blob,
+    );
   });
 
   it("clears local chunks only for explicit user or verified-upload cleanup", async () => {

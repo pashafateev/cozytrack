@@ -1514,9 +1514,6 @@ function RoomContent({
       setHasRecorded(true);
       if (backupId) {
         try {
-          const uploadedBackup =
-            await browserRecordingBackupStore.markBackupUploaded(backupId);
-          setRecoveryBackupSync(uploadedBackup);
           await browserRecordingBackupStore.clearBackup(backupId, "verified-upload");
           setRecoveryBackupSync(null);
           setBackupError(null);
@@ -1588,9 +1585,9 @@ function RoomContent({
     try {
       const latest =
         (await browserRecordingBackupStore.getBackup(current.id)) ?? current;
-      const uploaded = await retryLocalRecordingBackupUpload(latest);
-      setRecoveryBackupSync(uploaded);
-      await browserRecordingBackupStore.clearBackup(uploaded.id, "verified-upload");
+      const recovered = await retryLocalRecordingBackupUpload(latest);
+      setRecoveryBackupSync(recovered);
+      await browserRecordingBackupStore.clearBackup(recovered.id, "verified-upload");
       setRecoveryBackupSync(null);
       setHasRecorded(true);
       showNotification("Local backup uploaded");
