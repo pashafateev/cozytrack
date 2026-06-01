@@ -21,6 +21,9 @@ interface Track {
   durationMs: number | null;
   format: string;
   status: string;
+  participantIdentity: string | null;
+  segmentIndex: number;
+  partial: boolean;
   createdAt: string;
   deviceLabel: string | null;
   isBuiltInMic: boolean;
@@ -249,6 +252,12 @@ export default function SessionDetailPage() {
                       </div>
                       <div className="font-mono text-[10px] text-text-3 mt-0.5">
                         {formatDuration(t.durationMs)}
+                        {t.segmentIndex > 0 && (
+                          <span className="ml-1 text-warn">seg {t.segmentIndex + 1}</span>
+                        )}
+                        {t.partial && (
+                          <span className="ml-1 text-warn">partial</span>
+                        )}
                       </div>
                     </div>
 
@@ -283,7 +292,7 @@ export default function SessionDetailPage() {
                     {/* Status + download */}
                     <div className="flex items-center gap-2.5 flex-shrink-0">
                       <span className="font-mono text-[10px] text-text-3 uppercase">
-                        {t.status}
+                        {t.segmentIndex > 0 ? `segment ${t.segmentIndex + 1}` : t.status}
                       </span>
                       {t.status === "complete" && (
                         <Button

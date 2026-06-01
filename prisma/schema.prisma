@@ -17,6 +17,10 @@ model Session {
   name        String
   status      String    @default("recording") // recording | ready
   finalizedAt DateTime?
+  // Non-null while the host-controlled room recording is actively rolling.
+  // Rejoining participants poll this field so a missed LiveKit data-channel
+  // start event can be resumed as a new segment under the same logical identity.
+  activeRecordingStartedAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   tracks      Track[]
@@ -27,6 +31,11 @@ model Track {
   sessionId       String
   session         Session  @relation(fields: [sessionId], references: [id])
   participantName String
+  // Stable browser/session identity used to group reconnect-created physical
+  // segments into one logical participant stream. Display names remain editable
+  // and are intentionally not used as the durable reconnect key.
+  participantIdentity String?
+  segmentIndex    Int      @default(0)
   s3Key           String
   durationMs      Int?
   format          String   @default("webm")
@@ -45,4 +54,6 @@ model Track {
   partial         Boolean  @default(false)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+
+  @@index([sessionId, participantIdentity, sessionStartedAt])
 }

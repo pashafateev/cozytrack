@@ -7,6 +7,9 @@ type Track = {
   s3Key: string;
   status: string;
   durationMs: number | null;
+  participantIdentity?: string | null;
+  segmentIndex?: number;
+  sessionStartedAt?: Date | null;
 };
 
 const mocks = vi.hoisted(() => ({
@@ -31,6 +34,17 @@ vi.mock("@/lib/db", () => ({
           return track ? { ...track } : null;
         },
       ),
+      count: vi.fn(async ({ where }: { where: Partial<Track> }) => {
+        return Array.from(mocks.tracks.values()).filter((track) => {
+          return Object.entries(where).every(([key, value]) => {
+            const actual = track[key as keyof Track];
+            if (actual instanceof Date && value instanceof Date) {
+              return actual.getTime() === value.getTime();
+            }
+            return actual === value;
+          });
+        }).length;
+      }),
       create: vi.fn(async ({ data }: { data: Track }) => {
         const track = { ...data, status: "recording", durationMs: null };
         mocks.tracks.set(track.id, track);
@@ -133,6 +147,41 @@ describe("recording upload auth", () => {
     expect(body.url).toBe("https://s3.example/sessions/s1/tracks/t1/0.webm");
     expect(body.recordingToken).toEqual(expect.any(String));
     expect(mocks.tracks.get("t1")?.participantName).toBe("Alice");
+  });
+
+  it("groups reconnect segments by stable participant identity", async () => {
+    mocks.resolvePrincipal.mockResolvedValue({ kind: "host" });
+    const sessionStartedAt = "2026-06-01T12:00:00.000Z";
+
+    await presignUpload(
+      postJson("/api/upload/presign", {
+        sessionId: "s1",
+        trackId: "t1",
+        partNumber: 0,
+        participantName: "Alice",
+        participantIdentity: "browser-alice",
+        sessionStartedAt,
+      }),
+    );
+    await presignUpload(
+      postJson("/api/upload/presign", {
+        sessionId: "s1",
+        trackId: "t2",
+        partNumber: 0,
+        participantName: "Alice Renamed",
+        participantIdentity: "browser-alice",
+        sessionStartedAt,
+      }),
+    );
+
+    expect(mocks.tracks.get("t1")).toMatchObject({
+      participantIdentity: "browser-alice",
+      segmentIndex: 0,
+    });
+    expect(mocks.tracks.get("t2")).toMatchObject({
+      participantIdentity: "browser-alice",
+      segmentIndex: 1,
+    });
   });
 
   it("keeps presigning chunks with the recording token after cookies expire", async () => {

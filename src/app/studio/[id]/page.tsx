@@ -105,6 +105,7 @@ const BANDWIDTH_SAVING_PUBLISH = {
 } as const;
 
 const RECORDING_CONFIRMATION_TIMEOUT_MS = 4000;
+const PARTICIPANT_IDENTITY_STORAGE_PREFIX = "cozytrack:participant-identity:";
 
 // ---------- Helpers ----------
 
@@ -142,6 +143,21 @@ function isRecoverableBackup(
 
 function backupErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Local recording backup failed";
+}
+
+function getStoredParticipantIdentity(sessionId: string): string {
+  const storageKey = `${PARTICIPANT_IDENTITY_STORAGE_PREFIX}${sessionId}`;
+  try {
+    const existing = window.localStorage.getItem(storageKey);
+    if (existing) return existing;
+    const next = uuidv4();
+    window.localStorage.setItem(storageKey, next);
+    return next;
+  } catch {
+    // Storage can be blocked in private modes. A tab-scoped identity still
+    // avoids coupling logical reconnect identity to mutable display names.
+    return uuidv4();
+  }
 }
 
 function isMobileBrowser(navigatorInfo: Navigator): boolean {
@@ -667,6 +683,7 @@ function RoomContent({
   onMonitorEnabledChange,
   onMonitorVolumeChange,
   isHost,
+  participantIdentity,
 }: {
   sessionId: string;
   participantName: string;
@@ -680,6 +697,7 @@ function RoomContent({
   onMonitorEnabledChange: (enabled: boolean) => void;
   onMonitorVolumeChange: (volume: number) => void;
   isHost: boolean;
+  participantIdentity: string;
 }) {
   const remoteParticipants = useRemoteParticipants();
   const { localParticipant } = useLocalParticipant();
@@ -1244,6 +1262,7 @@ function RoomContent({
               isBuiltInMic: selectedMicIsBuiltIn,
             },
             sessionStartedAt: sessionStartedAtIso,
+            participantIdentity,
           },
         );
         recordingUploadTokenRef.current = initialUpload.recordingToken;
@@ -1409,6 +1428,7 @@ function RoomContent({
     [
       broadcastRecordingStatus,
       clearRecordingConfirmationState,
+      participantIdentity,
       participantName,
       scheduleRecordingConfirmationCheck,
       selectedMic,
@@ -1652,6 +1672,53 @@ function RoomContent({
     }
   }, [backupAction, setRecoveryBackupSync]);
 
+  const updateServerRecordingState = useCallback(
+    async (active: boolean, sessionStartedAt?: string): Promise<boolean> => {
+      try {
+        const res = await fetch(`/api/sessions/${sessionId}/recording-state`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ active, sessionStartedAt }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error ?? res.statusText);
+        }
+        return true;
+      } catch (err) {
+        console.error("Failed to update server recording state:", err);
+        return false;
+      }
+    },
+    [sessionId],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function resumeActiveRecording() {
+      if (studioStateRef.current !== "connected") return;
+      try {
+        const res = await fetch(`/api/sessions/${sessionId}/recording-state`);
+        if (!res.ok) return;
+        const body: { active?: boolean; sessionStartedAt?: string | null } =
+          await res.json();
+        if (cancelled || studioStateRef.current !== "connected") return;
+        if (!body.active || !body.sessionStartedAt) return;
+
+        showNotification("Active recording detected — resuming as a new segment");
+        void startRecordingLocal(body.sessionStartedAt);
+      } catch (err) {
+        console.error("Failed to check active recording state:", err);
+      }
+    }
+
+    void resumeActiveRecording();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, showNotification, startRecordingLocal]);
+
   // Synchronous "request in flight" guards. Set true at the top of the click
   // handler before any await so a rapid second click is dropped immediately
   // (issue #74). studioStateRef is only updated mid-way through
@@ -1686,16 +1753,24 @@ function RoomContent({
     startingRef.current = true;
     try {
       const sessionStartedAt = new Date().toISOString();
+      const serverMarkedActive = await updateServerRecordingState(true, sessionStartedAt);
+      if (!serverMarkedActive) {
+        showNotification("Couldn't mark the room recording active");
+        return;
+      }
+
       try {
         await transport.sendControlMessage({ type: "recording_start", sessionStartedAt });
       } catch (err) {
         console.error("Failed to broadcast recording_start:", err);
+        void updateServerRecordingState(false);
         showNotification("Couldn't tell the room to start recording");
         return;
       }
 
       const started = await startRecordingLocal(sessionStartedAt);
       if (!started) {
+        void updateServerRecordingState(false);
         showNotification("Couldn't start your recorder — stopping the room");
         try {
           await transport.sendControlMessage({ type: "recording_stop" });
@@ -1706,13 +1781,20 @@ function RoomContent({
     } finally {
       startingRef.current = false;
     }
-  }, [isHost, transport, startRecordingLocal, showNotification]);
+  }, [
+    isHost,
+    transport,
+    startRecordingLocal,
+    showNotification,
+    updateServerRecordingState,
+  ]);
 
   const handleStopRecording = useCallback(async () => {
     if (!isHost) return;
     if (stoppingRef.current) return;
     stoppingRef.current = true;
     try {
+      void updateServerRecordingState(false);
       try {
         await transport.sendControlMessage({ type: "recording_stop" });
       } catch (err) {
@@ -1723,7 +1805,7 @@ function RoomContent({
     } finally {
       stoppingRef.current = false;
     }
-  }, [isHost, transport, stopRecordingLocal, showNotification]);
+  }, [isHost, transport, stopRecordingLocal, showNotification, updateServerRecordingState]);
 
   // Subscribe to remote control messages. LiveKit does not echo the sender's
   // own messages back, but startRecordingLocal/stopRecordingLocal are
@@ -2169,6 +2251,7 @@ export default function StudioPage() {
 
   const [studioState, setStudioState] = useState<StudioState>("prejoin");
   const [participantName, setParticipantName] = useState("");
+  const [participantIdentity, setParticipantIdentity] = useState("");
   const [selectedMic, setSelectedMic] = useState("");
   const [mics, setMics] = useState<MediaDeviceInfo[]>([]);
   const [token, setToken] = useState("");
@@ -2181,6 +2264,10 @@ export default function StudioPage() {
   // arriving via /join have their display name recorded in the cookie; we
   // use it to prefill the prejoin form.
   const [isHost, setIsHost] = useState(false);
+
+  useEffect(() => {
+    setParticipantIdentity(getStoredParticipantIdentity(sessionId));
+  }, [sessionId]);
 
   useEffect(() => {
     setMonitorEnabled(getStoredMonitorEnabled());
@@ -2315,7 +2402,7 @@ export default function StudioPage() {
   }
 
   function handleJoin() {
-    if (!participantName.trim()) return;
+    if (!participantName.trim() || !participantIdentity) return;
 
     if (
       selectedMicDevice &&
@@ -2410,13 +2497,13 @@ export default function StudioPage() {
 
               <button
                 onClick={handleJoin}
-                disabled={!participantName.trim() || connecting}
+                disabled={!participantName.trim() || !participantIdentity || connecting}
                 className="w-full py-[11px] text-[15px] font-semibold font-sans rounded-md border disabled:cursor-not-allowed"
                 style={{
-                  background: !participantName.trim() || connecting ? "var(--card)" : "var(--amber)",
-                  color: !participantName.trim() || connecting ? "var(--text-3)" : "var(--bg)",
-                  borderColor: !participantName.trim() || connecting ? "var(--border)" : "var(--amber)",
-                  opacity: !participantName.trim() || connecting ? 0.8 : 1,
+                  background: !participantName.trim() || !participantIdentity || connecting ? "var(--card)" : "var(--amber)",
+                  color: !participantName.trim() || !participantIdentity || connecting ? "var(--text-3)" : "var(--bg)",
+                  borderColor: !participantName.trim() || !participantIdentity || connecting ? "var(--border)" : "var(--amber)",
+                  opacity: !participantName.trim() || !participantIdentity || connecting ? 0.8 : 1,
                 }}
               >
                 {connecting ? "Connecting…" : "Join Studio"}
@@ -2470,6 +2557,7 @@ export default function StudioPage() {
           onMonitorEnabledChange={setMonitorEnabled}
           onMonitorVolumeChange={setMonitorVolume}
           isHost={isHost}
+          participantIdentity={participantIdentity}
         />
       </LiveKitRoom>
     </StudioFrame>

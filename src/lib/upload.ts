@@ -11,6 +11,7 @@ export interface TrackInitInfo {
   // ISO8601 — the originator's local clock at the moment recording started.
   // Shared across all tracks triggered by the same broadcast.
   sessionStartedAt?: string;
+  participantIdentity?: string;
 }
 
 export interface PresignedUploadTarget {
@@ -41,6 +42,7 @@ export async function getPresignedUploadTarget(
       participantName,
       ...(trackInit?.deviceInfo ?? {}),
       sessionStartedAt: trackInit?.sessionStartedAt,
+      participantIdentity: trackInit?.participantIdentity,
     }),
   });
 

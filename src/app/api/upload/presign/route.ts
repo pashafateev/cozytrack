@@ -25,7 +25,17 @@ function getUploadErrorMessage(error: unknown): string {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { sessionId, trackId, partNumber, participantName, deviceLabel, deviceId, isBuiltInMic, sessionStartedAt } = body;
+    const {
+      sessionId,
+      trackId,
+      partNumber,
+      participantName,
+      participantIdentity,
+      deviceLabel,
+      deviceId,
+      isBuiltInMic,
+      sessionStartedAt,
+    } = body;
 
     if (!sessionId || !trackId || partNumber === undefined) {
       return NextResponse.json(
@@ -83,12 +93,27 @@ export async function POST(req: NextRequest) {
           typeof sessionStartedAt === "string" && !Number.isNaN(Date.parse(sessionStartedAt))
             ? new Date(sessionStartedAt)
             : null;
+        const safeParticipantIdentity =
+          typeof participantIdentity === "string" && participantIdentity.length > 0
+            ? participantIdentity
+            : null;
+        const segmentCount = safeParticipantIdentity
+          ? await db.track.count({
+              where: {
+                sessionId,
+                participantIdentity: safeParticipantIdentity,
+                sessionStartedAt: safeSessionStartedAt,
+              },
+            })
+          : 0;
 
         await db.track.create({
           data: {
             id: trackId,
             sessionId,
             participantName,
+            participantIdentity: safeParticipantIdentity,
+            segmentIndex: segmentCount,
             s3Key: trackRecordingKey(sessionId, trackId),
             deviceLabel: safeDeviceLabel,
             deviceId: safeDeviceId,
