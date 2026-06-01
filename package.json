@@ -12,18 +12,18 @@
     "reset:local": "bash ./scripts/reset-local.sh",
     "purge:ready": "node scripts/purge-ready-sessions.mjs",
     "purge:orphans": "node scripts/purge-orphan-s3-sessions.mjs",
-    "build": "next build",
-    "vercel-build": "if [ \"$VERCEL_ENV\" = \"production\" ]; then prisma migrate deploy; fi && next build",
+    "build": "prisma generate && next build",
+    "vercel-build": "prisma generate && if [ \"$VERCEL_ENV\" = \"production\" ]; then prisma migrate deploy; fi && next build",
     "start": "next start",
     "postinstall": "prisma generate",
     "lint": "next lint",
-    "typecheck": "tsc --noEmit --incremental false",
-    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "typecheck": "prisma generate && tsc --noEmit --incremental false",
+    "test:integration": "prisma generate && vitest run --config vitest.integration.config.ts",
     "test:browser": "bash ./scripts/test-browser-smoke.sh",
     "db:migrate": "prisma migrate dev",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
-    "test": "vitest run"
+    "test": "prisma generate && vitest run"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",

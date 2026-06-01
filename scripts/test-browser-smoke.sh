@@ -104,4 +104,5 @@ wait_for_tcp 127.0.0.1 7880 LiveKit
 docker compose --profile local-storage --profile tools run --rm minio-mc /scripts/minio-bucket.sh provision
 
 npx prisma db push
+npx prisma generate
 npx playwright test --config playwright.config.ts "$@"
