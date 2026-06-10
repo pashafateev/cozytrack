@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   isHostSender,
+  parseParticipantMetadata,
   parseParticipantRole,
 } from "../src/lib/transport/participant-role";
 
@@ -39,6 +40,36 @@ describe("parseParticipantRole", () => {
     expect(
       parseParticipantRole(JSON.stringify({ role: "host", extra: "x" })),
     ).toBe("host");
+  });
+});
+
+describe("parseParticipantMetadata", () => {
+  it("returns role plus optional identity and display fields", () => {
+    expect(
+      parseParticipantMetadata(
+        JSON.stringify({
+          role: "guest",
+          participantId: "guest_abc",
+          displayName: "Alice",
+        }),
+      ),
+    ).toEqual({
+      role: "guest",
+      participantId: "guest_abc",
+      displayName: "Alice",
+    });
+  });
+
+  it("requires a valid role even when other fields are present", () => {
+    expect(
+      parseParticipantMetadata(
+        JSON.stringify({
+          role: "admin",
+          participantId: "guest_abc",
+          displayName: "Alice",
+        }),
+      ),
+    ).toBeNull();
   });
 });
 

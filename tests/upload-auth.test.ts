@@ -4,6 +4,7 @@ type Track = {
   id: string;
   sessionId: string;
   participantName: string;
+  participantId?: string | null;
   s3Key: string;
   status: string;
   durationMs: number | null;
@@ -133,6 +134,34 @@ describe("recording upload auth", () => {
     expect(body.url).toBe("https://s3.example/sessions/s1/tracks/t1/0.webm");
     expect(body.recordingToken).toEqual(expect.any(String));
     expect(mocks.tracks.get("t1")?.participantName).toBe("Alice");
+  });
+
+  it("stores the guest participant id from the authenticated principal", async () => {
+    mocks.resolvePrincipal.mockResolvedValue({
+      kind: "guest",
+      sessionId: "s1",
+      name: "Cookie Alice",
+      participantId: "guest_alice",
+    });
+
+    const res = await presignUpload(
+      postJson(
+        "/api/upload/presign",
+        {
+          sessionId: "s1",
+          trackId: "t1",
+          partNumber: 0,
+          participantName: "Renamed Alice",
+          participantId: "spoofed-browser-id",
+        },
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    expect(mocks.tracks.get("t1")).toMatchObject({
+      participantName: "Renamed Alice",
+      participantId: "guest_alice",
+    });
   });
 
   it("keeps presigning chunks with the recording token after cookies expire", async () => {
