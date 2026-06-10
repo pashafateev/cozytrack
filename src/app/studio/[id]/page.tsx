@@ -44,6 +44,7 @@ import { getToken, LIVEKIT_URL } from "@/lib/livekit";
 import {
   useTransport,
   isHostSender,
+  parseParticipantMetadata,
   type RecordingStatusState,
 } from "@/lib/transport";
 import { isSelectedMicBuiltIn } from "@/lib/devices";
@@ -119,6 +120,10 @@ function formatElapsed(totalMs: number): string {
 function formatParticipantList(names: string[]): string {
   if (names.length <= 2) return names.join(" and ");
   return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+}
+
+function displayNameFromMetadata(metadata: string | undefined): string | undefined {
+  return parseParticipantMetadata(metadata)?.displayName;
 }
 
 function formatBytes(bytes: number): string {
@@ -684,6 +689,22 @@ function RoomContent({
   const remoteParticipants = useRemoteParticipants();
   const { localParticipant } = useLocalParticipant();
   const transport = useTransport();
+  const remoteParticipantNames = useMemo(() => {
+    const next = new Map<string, string>();
+    for (const participant of remoteParticipants) {
+      next.set(
+        participant.identity,
+        participant.name ||
+          displayNameFromMetadata(participant.metadata) ||
+          participant.identity,
+      );
+    }
+    return next;
+  }, [remoteParticipants]);
+  const remoteParticipantName = useCallback(
+    (identity: string) => remoteParticipantNames.get(identity) ?? identity,
+    [remoteParticipantNames],
+  );
   const recorderRef = useRef<CozyRecorder | null>(null);
   const trackIdRef = useRef<string>("");
   const recordingUploadTokenRef = useRef<string | undefined>(undefined);
@@ -888,11 +909,18 @@ function RoomContent({
 
         setUnconfirmedRecordingParticipants(new Set(unconfirmed));
         showNotification(
-          `Recording not confirmed by ${formatParticipantList(unconfirmed)}`,
+          `Recording not confirmed by ${formatParticipantList(
+            unconfirmed.map(remoteParticipantName),
+          )}`,
         );
       }, RECORDING_CONFIRMATION_TIMEOUT_MS);
     },
-    [clearRecordingConfirmationTimer, remoteParticipants, showNotification],
+    [
+      clearRecordingConfirmationTimer,
+      remoteParticipantName,
+      remoteParticipants,
+      showNotification,
+    ],
   );
 
   const broadcastRecordingStatus = useCallback(
@@ -1736,6 +1764,10 @@ function RoomContent({
   // for the trust model documented in issue #74.
   useEffect(() => {
     const unsub = transport.onControlMessage((msg, sender) => {
+      const senderName =
+        displayNameFromMetadata(sender.metadata) ||
+        remoteParticipantName(sender.identity) ||
+        "another participant";
       if (msg.type === "recording_start" || msg.type === "recording_stop") {
         if (!isHostSender(sender.metadata)) {
           console.warn(
@@ -1746,7 +1778,7 @@ function RoomContent({
       }
       if (msg.type === "recording_start") {
         showNotification(
-          `Recording started by ${sender.identity || "another participant"}`,
+          `Recording started by ${senderName}`,
         );
         void startRecordingLocal(msg.sessionStartedAt).then((started) => {
           if (!started) {
@@ -1755,7 +1787,7 @@ function RoomContent({
         });
       } else if (msg.type === "recording_stop") {
         showNotification(
-          `Recording stopped by ${sender.identity || "another participant"}`,
+          `Recording stopped by ${senderName}`,
         );
         void stopRecordingLocal();
       } else if (msg.type === "recording_status") {
@@ -1779,7 +1811,7 @@ function RoomContent({
 
         if (msg.state === "failed") {
           showNotification(
-            `${fromParticipant} could not start recording${
+            `${remoteParticipantName(fromParticipant)} could not start recording${
               msg.reason ? `: ${msg.reason}` : ""
             }`,
           );
@@ -1792,6 +1824,7 @@ function RoomContent({
     startRecordingLocal,
     stopRecordingLocal,
     showNotification,
+    remoteParticipantName,
     updateRemoteRecordingStatus,
   ]);
 
@@ -1985,7 +2018,7 @@ function RoomContent({
           {remoteParticipants.map((p) => (
             <ParticipantStrip
               key={p.identity}
-              name={p.identity}
+              name={remoteParticipantName(p.identity)}
               role="guest"
               micLabel={undefined /* Remote mic label — needs #28 (LiveKit metadata propagation). */}
               isBuiltIn={false /* Remote built-in detection — needs #28. */}

@@ -27,6 +27,9 @@ model Track {
   sessionId       String
   session         Session  @relation(fields: [sessionId], references: [id])
   participantName String
+  // Server-derived stable identity for the participant who created this track.
+  // Display names are mutable and not used for reconnect grouping.
+  participantId   String?
   s3Key           String
   durationMs      Int?
   format          String   @default("webm")
@@ -45,4 +48,6 @@ model Track {
   partial         Boolean  @default(false)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+
+  @@index([sessionId, participantId])
 }
