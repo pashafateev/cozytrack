@@ -4,6 +4,7 @@ type Track = {
   id: string;
   sessionId: string;
   participantName: string;
+  participantId: string | null;
   s3Key: string;
   status: string;
   durationMs: number | null;
@@ -109,7 +110,7 @@ afterEach(() => {
 
 describe("recording upload auth", () => {
   it("returns a track-scoped recording token when an authenticated recording starts", async () => {
-    mocks.resolvePrincipal.mockResolvedValue({ kind: "host" });
+    mocks.resolvePrincipal.mockResolvedValue({ kind: "host", participantId: "host" });
 
     const res = await presignUpload(
       postJson(
@@ -133,10 +134,39 @@ describe("recording upload auth", () => {
     expect(body.url).toBe("https://s3.example/sessions/s1/tracks/t1/0.webm");
     expect(body.recordingToken).toEqual(expect.any(String));
     expect(mocks.tracks.get("t1")?.participantName).toBe("Alice");
+    expect(mocks.tracks.get("t1")?.participantId).toBe("host");
+  });
+
+  it("stores the guest participant id from the authenticated principal", async () => {
+    mocks.resolvePrincipal.mockResolvedValue({
+      kind: "guest",
+      sessionId: "s1",
+      name: "Cookie Alice",
+      participantId: "guest_alice",
+    });
+
+    const res = await presignUpload(
+      postJson(
+        "/api/upload/presign",
+        {
+          sessionId: "s1",
+          trackId: "t1",
+          partNumber: 0,
+          participantName: "Renamed Alice",
+          participantId: "spoofed-browser-id",
+        },
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    expect(mocks.tracks.get("t1")).toMatchObject({
+      participantName: "Renamed Alice",
+      participantId: "guest_alice",
+    });
   });
 
   it("keeps presigning chunks with the recording token after cookies expire", async () => {
-    mocks.resolvePrincipal.mockResolvedValueOnce({ kind: "host" });
+    mocks.resolvePrincipal.mockResolvedValueOnce({ kind: "host", participantId: "host" });
 
     const start = await presignUpload(
       postJson(
@@ -167,7 +197,7 @@ describe("recording upload auth", () => {
   });
 
   it("keeps presigning the first recorded chunk with the recording token after cookies expire", async () => {
-    mocks.resolvePrincipal.mockResolvedValueOnce({ kind: "host" });
+    mocks.resolvePrincipal.mockResolvedValueOnce({ kind: "host", participantId: "host" });
 
     const start = await presignUpload(
       postJson(
@@ -203,7 +233,7 @@ describe("recording upload auth", () => {
   });
 
   it("keeps presigning the final recording upload with the recording token after cookies expire", async () => {
-    mocks.resolvePrincipal.mockResolvedValueOnce({ kind: "host" });
+    mocks.resolvePrincipal.mockResolvedValueOnce({ kind: "host", participantId: "host" });
 
     const start = await presignUpload(
       postJson(
@@ -252,6 +282,7 @@ describe("recording upload auth", () => {
       id: "t1",
       sessionId: "s1",
       participantName: "Alice",
+      participantId: "host",
       s3Key: "sessions/s1/tracks/t1/recording.webm",
       status: "recording",
       durationMs: null,
@@ -279,6 +310,7 @@ describe("recording upload auth", () => {
       id: "t1",
       sessionId: "other-session",
       participantName: "Alice",
+      participantId: "host",
       s3Key: "sessions/other-session/tracks/t1/recording.webm",
       status: "recording",
       durationMs: null,

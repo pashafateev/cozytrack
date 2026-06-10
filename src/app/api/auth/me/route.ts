@@ -12,11 +12,12 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ role: null }, { status: 200 });
   }
   if (principal.kind === "host") {
-    return NextResponse.json({ role: "host" });
+    return NextResponse.json({ role: "host", participantId: principal.participantId });
   }
   return NextResponse.json({
     role: "guest",
     sessionId: principal.sessionId,
     name: principal.name,
+    participantId: principal.participantId,
   });
 }

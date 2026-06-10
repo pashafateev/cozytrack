@@ -23,6 +23,7 @@ import type {
   Transport,
   TransportEvents,
 } from "./types";
+import { parseParticipantMetadata } from "./participant-role";
 
 const CONTROL_TOPIC = "control";
 const RECORDING_STATUS_STATES = new Set<RecordingStatusState>([
@@ -33,7 +34,10 @@ const RECORDING_STATUS_STATES = new Set<RecordingStatusState>([
 ]);
 
 function toRemoteParticipant(p: LKRemoteParticipant): RemoteParticipant {
-  return { identity: p.identity, name: p.name };
+  return {
+    identity: p.identity,
+    name: p.name ?? parseParticipantMetadata(p.metadata)?.displayName,
+  };
 }
 
 function isRecordingStatusState(value: unknown): value is RecordingStatusState {

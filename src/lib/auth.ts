@@ -17,9 +17,15 @@ const HOST_SESSION_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
 const GUEST_SESSION_TTL_SECONDS = 60 * 60 * 12; // 12 hours
 const INVITE_TOKEN_TTL_SECONDS = 60 * 60 * 48; // 48 hours
 const RECORDING_UPLOAD_TTL_SECONDS = 60 * 60 * 12; // 12 hours
+const HOST_PARTICIPANT_ID = "host";
 
-export type HostPrincipal = { kind: "host" };
-export type GuestPrincipal = { kind: "guest"; sessionId: string; name: string };
+export type HostPrincipal = { kind: "host"; participantId: typeof HOST_PARTICIPANT_ID };
+export type GuestPrincipal = {
+  kind: "guest";
+  sessionId: string;
+  name: string;
+  participantId: string;
+};
 export type Principal = HostPrincipal | GuestPrincipal;
 export type RecordingUploadPrincipal = {
   kind: "recording_upload";
@@ -57,7 +63,7 @@ export async function verifyHostCookie(token: string | undefined): Promise<HostP
       issuer: "cozytrack",
       audience: "cozytrack:host",
     });
-    return { kind: "host" };
+    return { kind: "host", participantId: HOST_PARTICIPANT_ID };
   } catch {
     return null;
   }
@@ -93,8 +99,9 @@ export async function verifyInviteToken(token: string): Promise<{ sessionId: str
 export async function issueGuestSessionCookie(
   sessionId: string,
   name: string,
-): Promise<{ cookieName: string; value: string; ttl: number }> {
-  const value = await new SignJWT({ sessionId, name })
+): Promise<{ cookieName: string; value: string; ttl: number; participantId: string }> {
+  const participantId = `guest_${globalThis.crypto.randomUUID()}`;
+  const value = await new SignJWT({ sessionId, name, participantId })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuer("cozytrack")
     .setAudience("cozytrack:guest")
@@ -102,7 +109,12 @@ export async function issueGuestSessionCookie(
     .setIssuedAt()
     .setExpirationTime(`${GUEST_SESSION_TTL_SECONDS}s`)
     .sign(getSecret());
-  return { cookieName: guestCookieName(sessionId), value, ttl: GUEST_SESSION_TTL_SECONDS };
+  return {
+    cookieName: guestCookieName(sessionId),
+    value,
+    ttl: GUEST_SESSION_TTL_SECONDS,
+    participantId,
+  };
 }
 
 export async function verifyGuestCookie(
@@ -117,10 +129,17 @@ export async function verifyGuestCookie(
     });
     if (payload.sessionId !== sessionId) return null;
     const name = typeof payload.name === "string" ? payload.name : "Guest";
-    return { kind: "guest", sessionId, name };
+    if (typeof payload.participantId !== "string" || payload.participantId.length === 0) {
+      return null;
+    }
+    return { kind: "guest", sessionId, name, participantId: payload.participantId };
   } catch {
     return null;
   }
+}
+
+export function principalParticipantId(principal: Principal): string {
+  return principal.participantId;
 }
 
 // ---------- Recording upload tokens ----------
