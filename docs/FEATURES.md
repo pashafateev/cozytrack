@@ -1,189 +1,58 @@
 # Cozytrack Roadmap
 
-This roadmap reconciles the open Cozytrack issue backlog against the current product plan.
+This roadmap was reconciled against every GitHub issue that was open on June 11, 2026.
 
-- Source of truth: GitHub open issues plus this file.
-- Audit note: `gh issue list` to `api.github.com` was unavailable in this environment, so this pass used the GitHub connector plus the previously audited open-issue set and then rewrote the roadmap for explicit issue coverage.
-- Status note: PR #118 is already implementing stack 2 from #111, so the roadmap below focuses on the remaining issue work rather than restating shipped items as future work.
+- Every currently open issue appears exactly once as a primary roadmap entry below.
+- No open issues are explicitly excluded right now.
+- Items with unresolved product or architecture choices are grouped under `Needs Clarification`.
 
 ## Ready To Run In Parallel
 
-### Recording hardening and test coverage
+### Recording quality and recording-risk UX
 
-#### #108 Audit repository for missing integration coverage
+- #5 Soundcheck mode: add a preflight recording flow that records a short clip, runs it through the production-style pipeline, and lets the user compare raw vs processed audio before the real take.
+- #6 Chunk-upload failure observability: surface a lightweight failure count or warning signal from the client into upload completion so chunk-loss events become debuggable without changing final-artifact authority.
+- #15 Direct-monitor recommendation: detect likely audio interfaces, default software monitoring off for those users, and steer them toward hardware direct monitoring.
+- #20 Mobile recording investigation: gather real iOS and Android samples, inspect container/codec behavior, and decide whether mobile should be gated, downgraded, or given a separate path.
+- #84 Output-device visibility: show the selected playback device alongside the microphone wherever browser support makes that trustworthy, and fall back cleanly when it does not.
+- #106 Host-visible recording-risk alerts: elevate participant or storage failures into obvious in-studio alerts so the host can react before the take ends.
 
-- Keep this as the umbrella audit until the concrete follow-up coverage gaps below are either shipped or explicitly deferred.
-- The audit itself is no longer a generic TODO; it now routes work into focused follow-ups.
+### Session detail, dashboard, and studio polish
 
-#### #114 Add route-level tests for auth, invite, and LiveKit token flows
+- #22 Session notes persistence: store the session-detail notes textarea on `Session` and autosave it with a visible saved state.
+- #24 Real waveform extraction and per-track playback: replace decorative waveform placeholders with real audio-derived peaks and track-level playback controls.
+- #25 Track peak and size metadata: persist `bytes` and `peakDbFS`, capture them during recording/finalization, and expose them in the session UI and dashboard rollups.
+- #26 Bulk session download: stream a zip of complete session tracks with stable filenames and a small manifest.
+- #28 Remote mic metadata propagation: send `micLabel` and `isBuiltInMic` over LiveKit so remote participant strips and host warnings reflect real device state.
+- #30 Remote meter responsiveness: replace smoothed speaking-state visuals with more direct audio-level data for remote participants.
+- #34 Button pending states: add visible in-flight feedback for the slowest primary actions, starting with home create-session and studio record.
+- #81 Recovery-state badges in the dashboard: surface partial and failed recovery outcomes clearly enough that hosts can see which tracks need attention.
 
-- Fast route-level confidence for auth and invite boundaries.
-- Can run independently of the service-backed integration work.
+### Delivery and repo operations
 
-#### #115 Add targeted input-contract and property tests for upload and recovery boundaries
-
-- Tighten request-body, identifier, and S3-key invariants around upload and recovery.
-- Can run independently of #114 and in parallel with the service-backed suites.
-
-#### #116 Add service integration coverage for ingest download and purge lifecycle
-
-- Add real Postgres + S3-compatible coverage for the Podline-facing ingest contract.
-- Independent of #114 and #115.
-
-#### #117 Add real-service race tests for finalize, recovery, and upload completion
-
-- Add small, high-value race coverage around finalize, recovery, and upload completion ordering.
-- Independent of #114 and complementary to #116.
-
-#### #97 Require baseline and service integration checks before merge
-
-- Once the test coverage above is where we want it, lock the existing GitHub checks behind branch protection.
-- This is mostly repo-settings work and can proceed separately from application code changes.
-
-### Product polish and UI backlog
-
-#### #22 Persist session notes (textarea on session detail page)
-
-- Add persistent session notes with a small save indicator.
-- Independent of the recording architecture work.
-
-#### #24 Real waveform extraction + per-track audio playback
-
-- Replace decorative waveforms with real extracted peaks and track playback.
-- Independent of the recording safety stack, but likely large enough to stay scoped to session detail UX.
-
-#### #25 Capture and display per-track peak dBFS and file size
-
-- Add `Track.bytes` and `Track.peakDbFS`, then surface them in the session detail UI.
-- Unblocks the dashboard metadata follow-up in #29.
-
-#### #26 Bulk download - zip all tracks in a session
-
-- Add a session-level zip download endpoint and manifest.
-- Independent of waveform and notes work.
-
-#### #28 Propagate per-participant mic metadata (label + built-in flag) over LiveKit
-
-- Surface remote participant mic labels and built-in-mic warnings in the studio.
-- Independent of the reconnect-safe track model work.
-
-#### #30 Remote participant audio meters feel underresponsive
-
-- Replace the smoothed speaking-indicator path with rawer remote audio level data.
-- Best treated as a self-contained studio UX fix.
-
-#### #34 Buttons need clearer in-flight feedback (loading/pending states)
-
-- Tighten pending/loading affordances across the UI.
-- Independent polish work with no clear upstream dependency.
-
-#### #15 Recommend hardware direct-monitor when audio interface is detected
-
-- Detect likely interfaces and steer users toward direct monitoring instead of browser sidetone.
-- Independent of the larger recording lifecycle and recovery work.
-
-#### #68 Future: transcript-driven in-browser audio editor
-
-- Keep this explicitly future-facing.
-- It does not block onboarding or recording reliability and can stay separate from current recording-safety priorities.
-
-### Observability and cleanup
-
-#### #6 Add observability for chunk upload failures
-
-- Persist lightweight upload-failure signals without changing the canonical completion model.
-- Parallel to the larger recovery and test-coverage work.
+- #87 Dependency and Actions update automation: add Dependabot coverage for npm and GitHub Actions with a cadence and PR volume that stays reviewable.
+- #97 Required merge checks: configure branch protection or rulesets so baseline validation and service integration checks must pass before merging to `main`.
 
 ## Sequenced Work
 
-### Reconnect-safe recording architecture
+### Follow the explicit dependency chain
 
-#### #111 Plan reconnect-safe recording architecture
-
-- This remains the umbrella for the stacked recording architecture.
-- Stack 1 is already landed.
-- Stack 2 is currently represented by open PR #118.
-- The remaining planned sequence is:
-  1. Logical track and internal segment model.
-  2. Media-aware stitching/materialization before downstream consumers see the track.
-  3. Reconnect auto-resume after the abstractions above exist.
-- This sequencing is explicit in the issue itself and should remain the roadmap anchor for reconnect-safe recording work.
-
-#### #75 Resume or recover participant recordings safely across reconnects
-
-- Sequence this behind the remaining #111 stack work rather than treating it as a standalone patch.
-- The roadmap intent is one logical downstream-facing track per participant/take, not user-facing segment rows.
-
-#### #7 Investigate and design for cross-track conversation latency
-
-- This becomes more durable after the reconnect-safe track/take model settles.
-- Recording alignment work should target the logical-track model from #111 rather than the superseded segment experiment.
-
-### Recording-risk awareness and operational readiness
-
-#### #106 Surface recording-risk alerts to the host
-
-- Surface host-visible alerts when uploads, recovery, or recording state become risky.
-- This should follow enough backend/client status clarity that alerts can distinguish recoverable vs high-risk cases.
-
-#### #20 Investigate mobile recording quality (iOS/Android)
-
-- Keep this as a dedicated investigation and decision thread.
-- It likely informs whether mobile stays warned-only, becomes explicitly unsupported, or needs a different recording/export path.
-
-#### #5 Soundcheck mode: test record + process + preview before committing
-
-- Keep the soundcheck flow separate from core recording-safety fixes.
-- The likely sequence is:
-  1. Basic test-record and preview path.
-  2. Optional processing pipeline and quality metrics later.
-
-### Deliberately later or after-current-batch work
-
-#### #63 [Deferred] e2e test harness with Playwright (multi-participant, real LiveKit, real S3)
-
-- Leave this deferred until the issue's trigger conditions fire.
-- The issue already states the promotion conditions clearly; do not pull it forward without one of those triggers.
-
-#### #109 Audit recording and recovery code for simplification after recent safety work
-
-- This should happen after the current recording hardening batch settles.
-- The purpose is cleanup after recent safety work, not active redesign during the architecture transition.
-
-#### #29 Dashboard session metadata - total size and accurate duration
-
-- Depends on #25 for `Track.bytes`.
-- Keep the dashboard duration accuracy pass behind the per-track metadata foundation.
+- #29 Dashboard session totals and accurate duration: land this after `#25`, because total size depends on persisted `Track.bytes` and duration should move off the current per-track max heuristic.
+- #36 Podflow JWT auth replacement: replace interim host-password auth with podflow-signed JWT verification, JIT user provisioning, and owner-scoped route authorization.
+- #37 Service-token flow for podline: start this after `#36`, because the service principal path should extend the same auth boundary rather than reintroducing a parallel interim model.
+- #108 Integration-coverage audit: keep this as the umbrella audit for remaining high-risk coverage gaps, and use it to drive narrow follow-up issues instead of broad test churn.
+- #114 Route-level auth and invite tests: prioritize this as a direct `#108` follow-up for the auth-, invite-, and LiveKit-token routes.
+- #115 Upload and recovery boundary tests: add targeted input-contract and property-style checks as another `#108` follow-up for storage-path and recovery invariants.
+- #116 Ingest download and purge integration tests: add service-backed coverage for Podline-facing ingest lifecycle behavior as another `#108` follow-up.
+- #117 Finalize/recovery/completion race integration tests: add a small real-service race suite as another `#108` follow-up for the highest-risk lifecycle ordering cases.
+- #109 Simplify recording and recovery code after the recent safety work: do this after the current safety path and its coverage work stabilize so cleanup is guided by proven invariants instead of guesswork.
+- #120 Logical track and segment model: continue the reconnect-safe recording stack after the participant-identity and take-lifecycle foundations, introducing internal segments without exposing them as the product abstraction.
+- #75 Participant reconnect and resume: pursue this after `#120`, so reconnect behavior builds on a real logical-track/segment model instead of leaking physical browser blobs into downstream flows.
 
 ## Needs Clarification
 
-#### #72
+### Resolve the ambiguity before implementation scope hardens
 
-- This issue was present in the previously audited open-issue set, but the current environment could not recover its full body through the live fetch path.
-- Clarify whether its scope is still distinct from the current recording-safety, onboarding, or reconnect architecture threads before assigning it a stronger roadmap slot.
-
-#### #81
-
-- This issue was present in the previously audited open-issue set, but the current environment could not recover its full body through the live fetch path.
-- Clarify whether it is still an active standalone workstream or has effectively been superseded by newer recording-safety and test-hardening issues.
-
-#### #84
-
-- This issue was present in the previously audited open-issue set, but the current environment could not recover its full body through the live fetch path.
-- Clarify whether it belongs under current onboarding/reliability priorities or should stay explicitly deferred.
-
-#### #87
-
-- This issue was present in the previously audited open-issue set, but the current environment could not recover its full body through the live fetch path.
-- Clarify whether it remains an independent roadmap item after the newer CI, service integration, and browser smoke work.
-
-## Coverage Checklist
-
-The following open issues are explicitly accounted for in this roadmap pass:
-
-- Represented in roadmap sections: #5, #6, #7, #15, #20, #22, #24, #25, #26, #28, #29, #30, #34, #63, #68, #75, #97, #106, #108, #109, #111, #114, #115, #116, #117
-- Accounted for in `Needs Clarification`: #72, #81, #84, #87
-
-Excluded with reason:
-
-- None in this pass.
+- #7 Cross-track conversation latency design: clarify which timing metadata is authoritative, where alignment logic should live, and what sync quality threshold is acceptable for MVP versus later export polish.
+- #72 Role-aware guest and cohost studio view: decide whether cohosts ever get dashboard access from inside an active session, or whether non-host participants should always stay inside a simplified studio shell.
+- #111 Reconnect-safe recording architecture plan: settle the remaining architecture choices around participant identity semantics, materialization timing, and how reconnect gaps should be represented before extending the stack further.
