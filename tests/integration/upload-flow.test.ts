@@ -288,6 +288,7 @@ describe("recording upload service integration", () => {
     expect(track).toMatchObject({
       sessionId,
       participantName: "Integration Host",
+      participantId: "host",
       s3Key: modules.s3.trackRecordingKey(sessionId, trackId),
       status: "complete",
       durationMs: 12_345,

@@ -4,14 +4,16 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { AccessToken } from "livekit-server-sdk";
-import { resolvePrincipal } from "@/lib/auth";
+import { principalParticipantId, resolvePrincipal } from "@/lib/auth";
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { roomName, participantName } = body;
+    const displayName =
+      typeof participantName === "string" ? participantName.trim().slice(0, 80) : "";
 
-    if (!roomName || !participantName) {
+    if (!roomName || !displayName) {
       return NextResponse.json(
         { error: "roomName and participantName are required" },
         { status: 400 }
@@ -37,15 +39,21 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Stamp the principal's role into the LiveKit token metadata. Receivers
-    // read `participant.metadata` off the LiveKit room to verify that
+    // Stamp server-derived identity and role into LiveKit token metadata.
+    // Receivers read `participant.metadata` off the LiveKit room to verify
     // host-only control messages (e.g. recording_start/stop) actually came
     // from a host. Forging this requires forging a LiveKit token, which
     // requires the server-held LIVEKIT_API_SECRET, so the role is trustworthy
     // at the room edge.
-    const metadata = JSON.stringify({ role: principal.kind });
+    const participantId = principalParticipantId(principal);
+    const metadata = JSON.stringify({
+      role: principal.kind,
+      participantId,
+      displayName,
+    });
     const at = new AccessToken(apiKey, apiSecret, {
-      identity: participantName,
+      identity: participantId,
+      name: displayName,
       metadata,
     });
     at.addGrant({ roomJoin: true, room: roomName });

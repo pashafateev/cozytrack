@@ -75,7 +75,8 @@ export interface Transport {
    * sender — idempotency should still be enforced by state) and verify
    * sender role for host-only messages. Metadata is whatever string the
    * server stamped onto the participant's token; in cozytrack that's a JSON
-   * blob like `{"role":"host"}`. See src/lib/transport/participant-role.ts.
+   * blob like `{"role":"host","participantId":"host","displayName":"Pasha"}`.
+   * See src/lib/transport/participant-role.ts.
    */
   onControlMessage(
     handler: (

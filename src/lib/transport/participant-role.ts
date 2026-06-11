@@ -8,6 +8,39 @@
 // `participant.metadata` parses to `{ role: "host" }` we trust it.
 
 export type ParticipantRole = "host" | "guest";
+export type ParticipantMetadata = {
+  role: ParticipantRole;
+  participantId?: string;
+  displayName?: string;
+};
+
+export function parseParticipantMetadata(
+  metadata: string | undefined,
+): ParticipantMetadata | null {
+  if (!metadata) return null;
+  try {
+    const obj = JSON.parse(metadata) as unknown;
+    if (obj === null || typeof obj !== "object") return null;
+    const record = obj as Record<string, unknown>;
+    const role = record.role;
+    if (role !== "host" && role !== "guest") return null;
+    const participantId =
+      typeof record.participantId === "string" && record.participantId.length > 0
+        ? record.participantId
+        : undefined;
+    const displayName =
+      typeof record.displayName === "string" && record.displayName.length > 0
+        ? record.displayName
+        : undefined;
+    return {
+      role,
+      ...(participantId !== undefined ? { participantId } : {}),
+      ...(displayName !== undefined ? { displayName } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Parse the participant role from a LiveKit metadata string.
@@ -17,16 +50,7 @@ export type ParticipantRole = "host" | "guest";
 export function parseParticipantRole(
   metadata: string | undefined,
 ): ParticipantRole | null {
-  if (!metadata) return null;
-  try {
-    const obj = JSON.parse(metadata) as unknown;
-    if (obj === null || typeof obj !== "object") return null;
-    const role = (obj as Record<string, unknown>).role;
-    if (role === "host" || role === "guest") return role;
-    return null;
-  } catch {
-    return null;
-  }
+  return parseParticipantMetadata(metadata)?.role ?? null;
 }
 
 /**

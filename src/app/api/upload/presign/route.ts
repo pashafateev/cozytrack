@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { trackPartKey, trackRecordingKey, getPresignedPutUrl } from "@/lib/s3";
 import {
   issueRecordingUploadToken,
+  principalParticipantId,
   resolvePrincipal,
   verifyRecordingUploadToken,
 } from "@/lib/auth";
@@ -89,6 +90,7 @@ export async function POST(req: NextRequest) {
             id: trackId,
             sessionId,
             participantName,
+            participantId: principalParticipantId(principal),
             s3Key: trackRecordingKey(sessionId, trackId),
             deviceLabel: safeDeviceLabel,
             deviceId: safeDeviceId,
