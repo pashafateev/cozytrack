@@ -94,6 +94,7 @@ jobs:
         run: |
           mkdir -p codex-review-output
           : > codex-review-output/final-message.md
+          printf '%s\n' '${{ steps.pr_context.outputs.number }}' > codex-review-output/pr-number.txt
 
       - name: Run Codex review
         id: run_codex
@@ -134,48 +135,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: codex-review-feedback
-          path: codex-review-output/final-message.md
+          path: codex-review-output
           if-no-files-found: error
           retention-days: 1
-
-  post_feedback:
-    runs-on: ubuntu-latest
-    needs: codex
-    if: needs.codex.result == 'success' && needs.codex.outputs.pr_number != ''
-    permissions:
-      actions: read
-      issues: write
-      pull-requests: write
-    steps:
-      - name: Download Codex feedback artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: codex-review-feedback
-          path: codex-review-output
-
-      - name: Report Codex feedback
-        uses: actions/github-script@v7
-        env:
-          CODEX_FINAL_MESSAGE_FILE: codex-review-output/final-message.md
-        with:
-          github-token: ${{ github.token }}
-          script: |
-            const fs = require("node:fs");
-            const message = fs.readFileSync(process.env.CODEX_FINAL_MESSAGE_FILE, "utf8").trim();
-            if (!message) {
-              core.notice("No Codex feedback to post.");
-              return;
-            }
-
-            const body = [
-              "## Codex review",
-              "",
-              message,
-            ].join("\n");
-
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: Number("${{ needs.codex.outputs.pr_number }}"),
-              body,
-            });
