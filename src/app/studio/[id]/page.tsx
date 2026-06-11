@@ -35,6 +35,11 @@ import {
   completeUpload,
 } from "@/lib/upload";
 import {
+  reportRecordingTakeParticipantStatus,
+  startRecordingTake,
+  stopRecordingTake,
+} from "@/lib/recording-state";
+import {
   browserRecordingBackupStore,
   recordingBackupId,
   type RecordingBackupManifest,
@@ -88,6 +93,7 @@ type StudioState = "prejoin" | "connected" | "recording" | "finalizing";
 type AudioQualityMode = "full" | "bandwidth-saving";
 type RemoteRecordingStatus = {
   state: RecordingStatusState;
+  takeId?: string;
   sessionStartedAt?: string;
   reason?: string;
   updatedAt: number;
@@ -791,6 +797,7 @@ function RoomContent({
   const [recordingSessionStartedAt, setRecordingSessionStartedAt] =
     useState<string | null>(null);
   const recordingSessionStartedAtRef = useRef<string | null>(null);
+  const recordingTakeIdRef = useRef<string | null>(null);
   const setRecordingSessionStartedAtSync = useCallback((next: string | null) => {
     recordingSessionStartedAtRef.current = next;
     setRecordingSessionStartedAt(next);
@@ -928,19 +935,34 @@ function RoomContent({
       state: RecordingStatusState,
       sessionStartedAt?: string,
       reason?: string,
+      takeId?: string | null,
     ) => {
+      const effectiveTakeId = takeId ?? recordingTakeIdRef.current;
       try {
         await transport.sendControlMessage({
           type: "recording_status",
           state,
+          ...(effectiveTakeId ? { takeId: effectiveTakeId } : {}),
           ...(sessionStartedAt !== undefined ? { sessionStartedAt } : {}),
           ...(reason !== undefined ? { reason } : {}),
         });
       } catch (err) {
         console.error("Failed to broadcast recording_status:", err);
       }
+
+      if (!effectiveTakeId) return;
+      try {
+        await reportRecordingTakeParticipantStatus(sessionId, {
+          takeId: effectiveTakeId,
+          participantName,
+          recordingStatus: state,
+          ...(reason !== undefined ? { reason } : {}),
+        });
+      } catch (err) {
+        console.error("Failed to report recording participant status:", err);
+      }
     },
-    [transport],
+    [participantName, sessionId, transport],
   );
 
   const switchAudioQuality = useCallback(
@@ -1223,7 +1245,9 @@ function RoomContent({
   // already recording (our own click echoed via a later remote message, or the
   // button pressed twice), this is a no-op.
   const startRecordingLocal = useCallback(
-    async (sessionStartedAtIso: string) => {
+    async (sessionStartedAtIso: string, takeId?: string | null) => {
+      const effectiveTakeId = takeId ?? recordingTakeIdRef.current;
+      if (effectiveTakeId) recordingTakeIdRef.current = effectiveTakeId;
       // Hard invariant from issue #61: cannot start a new recording while a
       // previous one is finalizing. Enforced here so both local and remote
       // (control-message) start paths honor the invariant.
@@ -1233,6 +1257,7 @@ function RoomContent({
           "failed",
           sessionStartedAtIso,
           "still finalizing previous recording",
+          effectiveTakeId,
         );
         return false;
       }
@@ -1240,6 +1265,8 @@ function RoomContent({
         void broadcastRecordingStatus(
           "recording",
           recordingSessionStartedAtRef.current ?? sessionStartedAtIso,
+          undefined,
+          effectiveTakeId,
         );
         return true;
       }
@@ -1251,6 +1278,7 @@ function RoomContent({
           "failed",
           sessionStartedAtIso,
           "microphone stream unavailable",
+          effectiveTakeId,
         );
         return false;
       }
@@ -1297,6 +1325,7 @@ function RoomContent({
           "failed",
           sessionStartedAtIso,
           "upload initialization failed",
+          effectiveTakeId,
         );
         return false;
       }
@@ -1416,6 +1445,7 @@ function RoomContent({
           "failed",
           sessionStartedAtIso,
           "recorder failed to start",
+          effectiveTakeId,
         );
         return false;
       }
@@ -1423,7 +1453,12 @@ function RoomContent({
       setRecordingSessionStartedAtSync(sessionStartedAtIso);
       scheduleRecordingConfirmationCheck(sessionStartedAtIso);
       setStudioStateSync("recording");
-      void broadcastRecordingStatus("recording", sessionStartedAtIso);
+      void broadcastRecordingStatus(
+        "recording",
+        sessionStartedAtIso,
+        undefined,
+        effectiveTakeId,
+      );
 
       // Auto-switch to bandwidth-saving mode for the LiveKit preview
       const switched = await switchAudioQuality("bandwidth-saving");
@@ -1460,12 +1495,19 @@ function RoomContent({
   const stopRecordingLocal = useCallback(async () => {
     const sessionStartedAtForStatus =
       recordingSessionStartedAtRef.current ?? undefined;
+    const takeIdForStatus = recordingTakeIdRef.current;
     if (studioStateRef.current === "finalizing") return;
     clearRecordingConfirmationState(false);
 
     if (!recorderRef.current) {
       setRecordingSessionStartedAtSync(null);
-      void broadcastRecordingStatus("connected", sessionStartedAtForStatus);
+      recordingTakeIdRef.current = null;
+      void broadcastRecordingStatus(
+        "connected",
+        sessionStartedAtForStatus,
+        undefined,
+        takeIdForStatus,
+      );
       return;
     }
 
@@ -1480,7 +1522,12 @@ function RoomContent({
     const recordingUploadToken = recordingUploadTokenRef.current;
     const startedAt = recordingStartRef.current;
     setStudioStateSync("finalizing");
-    void broadcastRecordingStatus("finalizing", sessionStartedAtForStatus);
+    void broadcastRecordingStatus(
+      "finalizing",
+      sessionStartedAtForStatus,
+      undefined,
+      takeIdForStatus,
+    );
 
     try {
       const blob = await recorder.stop();
@@ -1580,7 +1627,13 @@ function RoomContent({
       }
       setStudioStateSync("connected");
       setRecordingSessionStartedAtSync(null);
-      void broadcastRecordingStatus("connected", sessionStartedAtForStatus);
+      recordingTakeIdRef.current = null;
+      void broadcastRecordingStatus(
+        "connected",
+        sessionStartedAtForStatus,
+        undefined,
+        takeIdForStatus,
+      );
       // Best-effort restoration of full-quality preview. Fire-and-forget —
       // a failure here must not keep us stuck in `finalizing`.
       void switchAudioQuality("full").catch((err) => {
@@ -1713,16 +1766,43 @@ function RoomContent({
 
     startingRef.current = true;
     try {
-      const sessionStartedAt = new Date().toISOString();
+      const requestedSessionStartedAt = new Date().toISOString();
+      let sessionStartedAt = requestedSessionStartedAt;
+      let takeId: string | null = null;
       try {
-        await transport.sendControlMessage({ type: "recording_start", sessionStartedAt });
+        const takeState = await startRecordingTake(
+          sessionId,
+          requestedSessionStartedAt,
+        );
+        sessionStartedAt =
+          takeState.sessionStartedAt ?? requestedSessionStartedAt;
+        takeId = takeState.take?.id ?? null;
+        recordingTakeIdRef.current = takeId;
       } catch (err) {
-        console.error("Failed to broadcast recording_start:", err);
-        showNotification("Couldn't tell the room to start recording");
+        console.error("Failed to activate recording take:", err);
+        showNotification("Couldn't update recording state");
         return;
       }
 
-      const started = await startRecordingLocal(sessionStartedAt);
+      try {
+        await transport.sendControlMessage({
+          type: "recording_start",
+          sessionStartedAt,
+          ...(takeId ? { takeId } : {}),
+        });
+      } catch (err) {
+        console.error("Failed to broadcast recording_start:", err);
+        showNotification("Couldn't tell the room to start recording");
+        try {
+          await stopRecordingTake(sessionId);
+        } catch (stopErr) {
+          console.error("Failed to close recording take after broadcast failure:", stopErr);
+        }
+        recordingTakeIdRef.current = null;
+        return;
+      }
+
+      const started = await startRecordingLocal(sessionStartedAt, takeId);
       if (!started) {
         showNotification("Couldn't start your recorder — stopping the room");
         try {
@@ -1730,17 +1810,29 @@ function RoomContent({
         } catch (err) {
           console.error("Failed to broadcast recording_stop after start failure:", err);
         }
+        try {
+          await stopRecordingTake(sessionId);
+        } catch (stopErr) {
+          console.error("Failed to close recording take after local start failure:", stopErr);
+        }
+        recordingTakeIdRef.current = null;
       }
     } finally {
       startingRef.current = false;
     }
-  }, [isHost, transport, startRecordingLocal, showNotification]);
+  }, [isHost, sessionId, transport, startRecordingLocal, showNotification]);
 
   const handleStopRecording = useCallback(async () => {
     if (!isHost) return;
     if (stoppingRef.current) return;
     stoppingRef.current = true;
     try {
+      try {
+        await stopRecordingTake(sessionId);
+      } catch (err) {
+        console.error("Failed to close recording take:", err);
+        showNotification("Couldn't update recording state");
+      }
       try {
         await transport.sendControlMessage({ type: "recording_stop" });
       } catch (err) {
@@ -1751,7 +1843,7 @@ function RoomContent({
     } finally {
       stoppingRef.current = false;
     }
-  }, [isHost, transport, stopRecordingLocal, showNotification]);
+  }, [isHost, sessionId, transport, stopRecordingLocal, showNotification]);
 
   // Subscribe to remote control messages. LiveKit does not echo the sender's
   // own messages back, but startRecordingLocal/stopRecordingLocal are
@@ -1780,7 +1872,7 @@ function RoomContent({
         showNotification(
           `Recording started by ${senderName}`,
         );
-        void startRecordingLocal(msg.sessionStartedAt).then((started) => {
+        void startRecordingLocal(msg.sessionStartedAt, msg.takeId).then((started) => {
           if (!started) {
             showNotification("Couldn't start your recorder — check your mic");
           }
@@ -1795,6 +1887,7 @@ function RoomContent({
         if (!fromParticipant) return;
         updateRemoteRecordingStatus(fromParticipant, {
           state: msg.state,
+          takeId: msg.takeId,
           sessionStartedAt: msg.sessionStartedAt,
           reason: msg.reason,
           updatedAt: Date.now(),

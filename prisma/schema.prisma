@@ -13,13 +13,43 @@ generator client {
 }
 
 model Session {
-  id          String    @id @default(uuid())
-  name        String
-  status      String    @default("recording") // recording | ready
-  finalizedAt DateTime?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  tracks      Track[]
+  id             String          @id @default(uuid())
+  name           String
+  status         String          @default("recording") // recording | ready
+  finalizedAt    DateTime?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  tracks         Track[]
+  recordingTakes RecordingTake[]
+}
+
+model RecordingTake {
+  id                  String                         @id @default(uuid())
+  sessionId           String
+  session             Session                        @relation(fields: [sessionId], references: [id])
+  startedAt           DateTime
+  stoppedAt           DateTime?
+  createdAt           DateTime                       @default(now())
+  updatedAt           DateTime                       @updatedAt
+  participantStatuses RecordingTakeParticipantStatus[]
+
+  @@index([sessionId, stoppedAt])
+}
+
+model RecordingTakeParticipantStatus {
+  id              String        @id @default(uuid())
+  takeId          String
+  take            RecordingTake @relation(fields: [takeId], references: [id])
+  participantId   String
+  participantName String?
+  readinessStatus String?
+  recordingStatus String?
+  statusReason    String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@unique([takeId, participantId])
+  @@index([participantId])
 }
 
 model Track {

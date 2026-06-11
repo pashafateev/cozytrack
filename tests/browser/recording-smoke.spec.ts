@@ -87,6 +87,14 @@ test.afterEach(async () => {
   const bucket = requiredEnv("S3_BUCKET_NAME");
 
   for (const sessionId of cleanupSessions) {
+    const takes = await db.recordingTake.findMany({
+      where: { sessionId },
+      select: { id: true },
+    });
+    await db.recordingTakeParticipantStatus.deleteMany({
+      where: { takeId: { in: takes.map((take) => take.id) } },
+    });
+    await db.recordingTake.deleteMany({ where: { sessionId } });
     await db.track.deleteMany({ where: { sessionId } });
     await db.session.deleteMany({ where: { id: sessionId } });
     await deletePrefix(s3, bucket, `sessions/${sessionId}/`);
