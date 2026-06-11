@@ -25,11 +25,16 @@ export type RecordingStatusState =
   | "failed";
 
 export type ControlMessage =
-  | { type: "recording_start"; sessionStartedAt: string /* ISO8601 */ }
+  | {
+      type: "recording_start";
+      sessionStartedAt: string /* ISO8601 */;
+      takeId?: string;
+    }
   | { type: "recording_stop" }
   | {
       type: "recording_status";
       state: RecordingStatusState;
+      takeId?: string;
       sessionStartedAt?: string /* ISO8601 */;
       reason?: string;
     };

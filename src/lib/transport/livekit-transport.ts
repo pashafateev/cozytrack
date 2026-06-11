@@ -56,7 +56,12 @@ function parseControlMessage(raw: unknown): ControlMessage | null {
   const obj = raw as Record<string, unknown>;
   if (obj.type === "recording_start") {
     if (typeof obj.sessionStartedAt !== "string") return null;
-    return { type: "recording_start", sessionStartedAt: obj.sessionStartedAt };
+    if (obj.takeId !== undefined && typeof obj.takeId !== "string") return null;
+    return {
+      type: "recording_start",
+      sessionStartedAt: obj.sessionStartedAt,
+      ...(obj.takeId !== undefined ? { takeId: obj.takeId } : {}),
+    };
   }
   if (obj.type === "recording_stop") {
     return { type: "recording_stop" };
@@ -68,10 +73,12 @@ function parseControlMessage(raw: unknown): ControlMessage | null {
       typeof obj.sessionStartedAt !== "string"
     )
       return null;
+    if (obj.takeId !== undefined && typeof obj.takeId !== "string") return null;
     if (obj.reason !== undefined && typeof obj.reason !== "string") return null;
     return {
       type: "recording_status",
       state: obj.state,
+      ...(obj.takeId !== undefined ? { takeId: obj.takeId } : {}),
       ...(obj.sessionStartedAt !== undefined
         ? { sessionStartedAt: obj.sessionStartedAt }
         : {}),
