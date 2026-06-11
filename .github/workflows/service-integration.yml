@@ -2,9 +2,39 @@ name: Service integration
 
 on:
   pull_request:
+    paths:
+      - ".github/workflows/service-integration.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "prisma/**"
+      - "src/app/api/**"
+      - "src/lib/api-auth.ts"
+      - "src/lib/auth.ts"
+      - "src/lib/db.ts"
+      - "src/lib/recovery.ts"
+      - "src/lib/s3.ts"
+      - "src/lib/sessions.ts"
+      - "src/lib/upload*.ts"
+      - "tests/integration/**"
+      - "vitest.integration.config.ts"
   push:
     branches:
       - main
+    paths:
+      - ".github/workflows/service-integration.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "prisma/**"
+      - "src/app/api/**"
+      - "src/lib/api-auth.ts"
+      - "src/lib/auth.ts"
+      - "src/lib/db.ts"
+      - "src/lib/recovery.ts"
+      - "src/lib/s3.ts"
+      - "src/lib/sessions.ts"
+      - "src/lib/upload*.ts"
+      - "tests/integration/**"
+      - "vitest.integration.config.ts"
 
 permissions:
   contents: read
