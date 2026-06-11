@@ -1,173 +1,189 @@
-# Cozytrack — Feature Spec & Roadmap
+# Cozytrack Roadmap
 
-## Origin Story
+This roadmap reconciles the open Cozytrack issue backlog against the current product plan.
 
-These features are driven by a real pain point with Riverside.fm: during level-setting, Riverside plays degraded/compressed audio to save bandwidth. This made it impossible to tell that the final local recording quality was poor (e.g., recording from a laptop mic instead of an external mic). The problem was only discovered after processing — too late to fix.
+- Source of truth: GitHub open issues plus this file.
+- Audit note: `gh issue list` to `api.github.com` was unavailable in this environment, so this pass used the GitHub connector plus the previously audited open-issue set and then rewrote the roadmap for explicit issue coverage.
+- Status note: PR #118 is already implementing stack 2 from #111, so the roadmap below focuses on the remaining issue work rather than restating shipped items as future work.
 
-Cozytrack's philosophy: **never let someone record without knowing exactly what they're going to get.**
+## Ready To Run In Parallel
 
----
+### Recording hardening and test coverage
 
-## Feature 1: Built-In Microphone Warning
+#### #108 Audit repository for missing integration coverage
 
-### Problem
-If a participant is using their laptop's built-in mic (MacBook Pro, etc.) instead of a proper external mic/interface, the recording quality will be noticeably worse. Most people don't realize which mic is active.
+- Keep this as the umbrella audit until the concrete follow-up coverage gaps below are either shipped or explicitly deferred.
+- The audit itself is no longer a generic TODO; it now routes work into focused follow-ups.
 
-### Spec
-- On the pre-join screen, after the user selects their mic, detect whether it's a built-in device
-- Detection heuristic: check `MediaDeviceInfo.label` for keywords like "Built-in", "Internal", "MacBook", "Default" — and cross-reference with known built-in device patterns
-- If built-in mic is detected, show a **prominent warning banner** (not a dismissable toast — a blocking modal or persistent banner):
-  
-  > ⚠️ You're using your built-in microphone
-  > 
-  > Built-in laptop mics produce significantly lower audio quality. For best results, connect an external microphone or audio interface.
-  >
-  > [ ] I understand — continue with built-in mic
-  > [Switch Microphone]
+#### #114 Add route-level tests for auth, invite, and LiveKit token flows
 
-- Require the user to explicitly acknowledge before proceeding (checkbox + confirm)
-- Log which mic was used per track in the database (device label + deviceId) so you can trace quality issues later
-- In the session detail view, show a small indicator if a track was recorded on a built-in mic
+- Fast route-level confidence for auth and invite boundaries.
+- Can run independently of the service-backed integration work.
 
-### Database Change
-Add to `Track` model:
-```prisma
-deviceLabel   String?
-deviceId      String?
-isBuiltInMic  Boolean @default(false)
-```
+#### #115 Add targeted input-contract and property tests for upload and recovery boundaries
 
----
+- Tighten request-body, identifier, and S3-key invariants around upload and recovery.
+- Can run independently of #114 and in parallel with the service-backed suites.
 
-## Feature 2: Full-Quality Audio During Level-Setting
+#### #116 Add service integration coverage for ingest download and purge lifecycle
 
-### Problem
-Riverside (and similar tools) degrade WebRTC audio to save bandwidth during the entire session. This means when participants are checking levels before recording, they're hearing a compressed version — not what the local recording will actually capture. You can't make meaningful level or quality judgments on degraded audio.
+- Add real Postgres + S3-compatible coverage for the Podline-facing ingest contract.
+- Independent of #114 and #115.
 
-### Spec
-- **Pre-record phase** (level-setting): Stream full-quality audio between participants via LiveKit
-  - Set LiveKit audio publish options to max quality: `audioBitrate: 128_000` (128kbps Opus), `dtx: false` (no discontinuous transmission — always send audio), `audioPreset: AudioPresets.musicHighQualityStereo` if available
-  - This phase is short (1-3 minutes typically) so the bandwidth cost is acceptable
-- **Recording phase**: After hitting Record, optionally downgrade the WebRTC preview stream to save bandwidth since the local recording is what matters now
-  - Drop to `audioBitrate: 32_000` or `48_000` for the preview
-  - The local RecordRTC recording remains full quality regardless
-- Expose a toggle in the studio UI: "Full quality preview" (on by default during level-setting, can be toggled during recording if someone has good bandwidth)
+#### #117 Add real-service race tests for finalize, recovery, and upload completion
 
-### LiveKit Configuration
-```typescript
-// Pre-record: full quality preview
-room.localParticipant.setMicrophoneEnabled(true, {
-  audioBitrate: 128_000,
-  dtx: false,
-});
+- Add small, high-value race coverage around finalize, recovery, and upload completion ordering.
+- Independent of #114 and complementary to #116.
 
-// Recording phase: drop preview quality (local recording unaffected)
-room.localParticipant.setMicrophoneEnabled(true, {
-  audioBitrate: 48_000,
-  dtx: true,
-});
-```
+#### #97 Require baseline and service integration checks before merge
 
-### UI Indicator
-- Show a small badge in the studio: "🎧 Full Quality Preview" or "🎧 Bandwidth-Saving Mode"
-- Auto-switch happens when Record is pressed, with a brief notification: "Preview quality reduced — local recording is unaffected"
+- Once the test coverage above is where we want it, lock the existing GitHub checks behind branch protection.
+- This is mostly repo-settings work and can proceed separately from application code changes.
 
----
+### Product polish and UI backlog
 
-## Feature 3: Pre-Record Preview / Soundcheck Mode
+#### #22 Persist session notes (textarea on session detail page)
 
-### Problem
-Even with full-quality preview audio, you still can't hear exactly what the *final processed output* will sound like until after the full recording session is done and you've run it through your production pipeline. If something is wrong (wrong mic, bad gain, room echo), you don't find out until it's too late.
+- Add persistent session notes with a small save indicator.
+- Independent of the recording architecture work.
 
-### Spec
-A "Soundcheck" mode that lets you do a quick test recording, run it through the full production pipeline, and preview the result — all before committing to the real session.
+#### #24 Real waveform extraction + per-track audio playback
 
-#### Flow
-1. In the pre-join / level-setting screen, add a **"Run Soundcheck"** button
-2. Clicking it starts a **10-15 second test recording** (local RecordRTC, same settings as real recording)
-3. After the test recording stops:
-   - Upload the clip to S3 (same chunked upload flow)
-   - Kick off the production pipeline (see below) on the test clip
-   - Show a loading state: "Processing your soundcheck..."
-4. When processing completes:
-   - Show a **side-by-side player**: "Raw" vs "Processed" audio
-   - Show a **quality summary**: detected mic type, estimated noise floor, clipping detection, loudness (LUFS)
-   - If issues detected, show specific warnings: "High background noise detected", "Audio is clipping", "Low input level"
-5. User can then:
-   - **Re-do soundcheck** (switch mic, adjust levels, try again)
-   - **Approve and start recording** (transitions to the real recording session)
+- Replace decorative waveforms with real extracted peaks and track playback.
+- Independent of the recording safety stack, but likely large enough to stay scoped to session detail UX.
 
-#### Production Pipeline Integration
-- The soundcheck should run the exact same processing chain as the final production
-- Initially this could be a simple pipeline: normalize loudness (target -16 LUFS for podcasts), noise gate, basic EQ
-- The pipeline should be pluggable — define an interface so you can swap in different processors later (e.g., Auphonic API, custom ffmpeg chain, AI denoising)
+#### #25 Capture and display per-track peak dBFS and file size
 
-```typescript
-interface AudioProcessor {
-  name: string;
-  process(input: Buffer, options?: Record<string, unknown>): Promise<ProcessedResult>;
-}
+- Add `Track.bytes` and `Track.peakDbFS`, then surface them in the session detail UI.
+- Unblocks the dashboard metadata follow-up in #29.
 
-interface ProcessedResult {
-  audio: Buffer;
-  format: string;
-  metrics: {
-    loudnessLUFS: number;
-    peakDbFS: number;
-    noiseFloorDb: number;
-    clippingDetected: boolean;
-    duration: number;
-  };
-}
-```
+#### #26 Bulk download - zip all tracks in a session
 
-#### Quality Metrics to Surface
-| Metric | What it tells you | Warning threshold |
-|--------|------------------|-------------------|
-| Loudness (LUFS) | Overall level | Below -24 LUFS or above -12 LUFS |
-| Peak (dBFS) | Clipping risk | Above -1 dBFS |
-| Noise floor (dB) | Background noise | Above -40 dB |
-| Mic type | Built-in vs external | Built-in = warning |
+- Add a session-level zip download endpoint and manifest.
+- Independent of waveform and notes work.
 
-#### API Endpoints Needed
-- `POST /api/soundcheck/start` — Creates a temporary soundcheck session
-- `POST /api/soundcheck/process` — Triggers the processing pipeline on the uploaded clip
-- `GET /api/soundcheck/[id]/status` — Poll for processing completion
-- `GET /api/soundcheck/[id]/result` — Get processed audio URL + quality metrics
+#### #28 Propagate per-participant mic metadata (label + built-in flag) over LiveKit
 
-#### Database
-Add a `Soundcheck` model:
-```prisma
-model Soundcheck {
-  id            String   @id @default(uuid())
-  sessionId     String
-  session       Session  @relation(fields: [sessionId], references: [id])
-  rawS3Key      String
-  processedS3Key String?
-  metrics       Json?    // { loudnessLUFS, peakDbFS, noiseFloorDb, clippingDetected }
-  deviceLabel   String?
-  isBuiltInMic  Boolean  @default(false)
-  status        String   @default("recording") // recording | processing | complete | failed
-  createdAt     DateTime @default(now())
-}
-```
+- Surface remote participant mic labels and built-in-mic warnings in the studio.
+- Independent of the reconnect-safe track model work.
 
----
+#### #30 Remote participant audio meters feel underresponsive
 
-## Implementation Priority
+- Replace the smoothed speaking-indicator path with rawer remote audio level data.
+- Best treated as a self-contained studio UX fix.
 
-| Priority | Feature | Effort | Impact |
-|----------|---------|--------|--------|
-| **P0** | Mic warning (built-in detection) | Small (1-2 days) | Prevents the most common quality mistake |
-| **P0** | Full-quality audio during level-setting | Small (1 day) | Config change + UI toggle |
-| **P1** | Soundcheck mode (basic — record + playback) | Medium (3-5 days) | Lets you hear yourself before committing |
-| **P2** | Soundcheck with full pipeline processing | Large (1-2 weeks) | Requires building the processing pipeline |
-| **P2** | Quality metrics dashboard | Medium (3-5 days) | Nice-to-have, makes soundcheck more actionable |
+#### #34 Buttons need clearer in-flight feedback (loading/pending states)
 
----
+- Tighten pending/loading affordances across the UI.
+- Independent polish work with no clear upstream dependency.
 
-## Notes
+#### #15 Recommend hardware direct-monitor when audio interface is detected
 
-- The soundcheck clips should auto-delete after 24 hours (S3 lifecycle rule) to avoid storage bloat
-- Consider making the soundcheck available as a standalone tool (no session needed) — useful for guests to test their setup before the scheduled recording time
-- The production pipeline is its own major subsystem — start with a simple ffmpeg normalization pass and iterate
+- Detect likely interfaces and steer users toward direct monitoring instead of browser sidetone.
+- Independent of the larger recording lifecycle and recovery work.
+
+#### #68 Future: transcript-driven in-browser audio editor
+
+- Keep this explicitly future-facing.
+- It does not block onboarding or recording reliability and can stay separate from current recording-safety priorities.
+
+### Observability and cleanup
+
+#### #6 Add observability for chunk upload failures
+
+- Persist lightweight upload-failure signals without changing the canonical completion model.
+- Parallel to the larger recovery and test-coverage work.
+
+## Sequenced Work
+
+### Reconnect-safe recording architecture
+
+#### #111 Plan reconnect-safe recording architecture
+
+- This remains the umbrella for the stacked recording architecture.
+- Stack 1 is already landed.
+- Stack 2 is currently represented by open PR #118.
+- The remaining planned sequence is:
+  1. Logical track and internal segment model.
+  2. Media-aware stitching/materialization before downstream consumers see the track.
+  3. Reconnect auto-resume after the abstractions above exist.
+- This sequencing is explicit in the issue itself and should remain the roadmap anchor for reconnect-safe recording work.
+
+#### #75 Resume or recover participant recordings safely across reconnects
+
+- Sequence this behind the remaining #111 stack work rather than treating it as a standalone patch.
+- The roadmap intent is one logical downstream-facing track per participant/take, not user-facing segment rows.
+
+#### #7 Investigate and design for cross-track conversation latency
+
+- This becomes more durable after the reconnect-safe track/take model settles.
+- Recording alignment work should target the logical-track model from #111 rather than the superseded segment experiment.
+
+### Recording-risk awareness and operational readiness
+
+#### #106 Surface recording-risk alerts to the host
+
+- Surface host-visible alerts when uploads, recovery, or recording state become risky.
+- This should follow enough backend/client status clarity that alerts can distinguish recoverable vs high-risk cases.
+
+#### #20 Investigate mobile recording quality (iOS/Android)
+
+- Keep this as a dedicated investigation and decision thread.
+- It likely informs whether mobile stays warned-only, becomes explicitly unsupported, or needs a different recording/export path.
+
+#### #5 Soundcheck mode: test record + process + preview before committing
+
+- Keep the soundcheck flow separate from core recording-safety fixes.
+- The likely sequence is:
+  1. Basic test-record and preview path.
+  2. Optional processing pipeline and quality metrics later.
+
+### Deliberately later or after-current-batch work
+
+#### #63 [Deferred] e2e test harness with Playwright (multi-participant, real LiveKit, real S3)
+
+- Leave this deferred until the issue's trigger conditions fire.
+- The issue already states the promotion conditions clearly; do not pull it forward without one of those triggers.
+
+#### #109 Audit recording and recovery code for simplification after recent safety work
+
+- This should happen after the current recording hardening batch settles.
+- The purpose is cleanup after recent safety work, not active redesign during the architecture transition.
+
+#### #29 Dashboard session metadata - total size and accurate duration
+
+- Depends on #25 for `Track.bytes`.
+- Keep the dashboard duration accuracy pass behind the per-track metadata foundation.
+
+## Needs Clarification
+
+#### #72
+
+- This issue was present in the previously audited open-issue set, but the current environment could not recover its full body through the live fetch path.
+- Clarify whether its scope is still distinct from the current recording-safety, onboarding, or reconnect architecture threads before assigning it a stronger roadmap slot.
+
+#### #81
+
+- This issue was present in the previously audited open-issue set, but the current environment could not recover its full body through the live fetch path.
+- Clarify whether it is still an active standalone workstream or has effectively been superseded by newer recording-safety and test-hardening issues.
+
+#### #84
+
+- This issue was present in the previously audited open-issue set, but the current environment could not recover its full body through the live fetch path.
+- Clarify whether it belongs under current onboarding/reliability priorities or should stay explicitly deferred.
+
+#### #87
+
+- This issue was present in the previously audited open-issue set, but the current environment could not recover its full body through the live fetch path.
+- Clarify whether it remains an independent roadmap item after the newer CI, service integration, and browser smoke work.
+
+## Coverage Checklist
+
+The following open issues are explicitly accounted for in this roadmap pass:
+
+- Represented in roadmap sections: #5, #6, #7, #15, #20, #22, #24, #25, #26, #28, #29, #30, #34, #63, #68, #75, #97, #106, #108, #109, #111, #114, #115, #116, #117
+- Accounted for in `Needs Clarification`: #72, #81, #84, #87
+
+Excluded with reason:
+
+- None in this pass.
