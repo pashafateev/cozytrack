@@ -361,9 +361,9 @@ function InviteButton({ sessionId }: { sessionId: string }) {
         size="md"
         onClick={onClick}
         disabled={state.kind === "pending"}
-        title="Generate an invite link for a cohost. The link works until it expires; anyone with it can join until then."
+        title="Generate an invite link for a participant. The link works until it expires; anyone with it can join until then."
       >
-        {state.kind === "pending" ? "Generating…" : "Invite cohost"}
+        {state.kind === "pending" ? "Generating…" : "Invite participant"}
       </Button>
       {state.kind === "ready" && (
         <div className="text-[11px] font-mono text-text-3 break-all max-w-[520px]">
@@ -379,4 +379,3 @@ function InviteButton({ sessionId }: { sessionId: string }) {
     </div>
   );
 }
-

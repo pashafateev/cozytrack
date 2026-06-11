@@ -5,7 +5,7 @@
 //
 // This is the Option A fix from issue #47: audio levels here are POST-network
 // (decoded receiver side, after the jitter buffer and any browser gain), not
-// the co-host's true pre-network signal. It's the pragmatic version that
+// the remote participant's true pre-network signal. It's the pragmatic version that
 // works on existing clients without any data-channel coordination. Option B
 // (each client publishes its own pre-network level) is tracked separately.
 

@@ -179,7 +179,11 @@ POST /api/ingest/sessions/:id/purge-files
 X-API-Key: <COZYTRACK_API_KEY>
 ```
 
-Purge deletes S3 objects under `sessions/<id>/` and stamps `s3PurgedAt` on the session's tracks. Repeated calls are safe. Browser and ingest download endpoints return `410 Gone` for purged tracks.
+`npm run test:browser` starts the local Docker services, provisions a local
+MinIO bucket, pushes the Prisma schema, starts Next.js on port 3101, signs in
+as the host with test-only credentials, records with Chromium's fake
+microphone, and verifies a complete track row plus a non-empty
+`recording.webm` object in MinIO.
 
 Use dry-run cleanup scripts before deleting anything:
 
