@@ -24,14 +24,15 @@ model Session {
 }
 
 model RecordingTake {
-  id                  String                         @id @default(uuid())
+  id                  String                           @id @default(uuid())
   sessionId           String
-  session             Session                        @relation(fields: [sessionId], references: [id])
+  session             Session                          @relation(fields: [sessionId], references: [id])
   startedAt           DateTime
   stoppedAt           DateTime?
-  createdAt           DateTime                       @default(now())
-  updatedAt           DateTime                       @updatedAt
+  createdAt           DateTime                         @default(now())
+  updatedAt           DateTime                         @updatedAt
   participantStatuses RecordingTakeParticipantStatus[]
+  tracks              Track[]
 
   @@index([sessionId, stoppedAt])
 }
@@ -53,21 +54,23 @@ model RecordingTakeParticipantStatus {
 }
 
 model Track {
-  id              String   @id @default(uuid())
-  sessionId       String
-  session         Session  @relation(fields: [sessionId], references: [id])
-  participantName String
+  id               String         @id @default(uuid())
+  sessionId        String
+  session          Session        @relation(fields: [sessionId], references: [id])
+  takeId           String?
+  take             RecordingTake? @relation(fields: [takeId], references: [id], onDelete: SetNull)
+  participantName  String
   // Server-derived stable identity for the participant who created this track.
   // Display names are mutable and not used for reconnect grouping.
-  participantId   String?
-  s3Key           String
-  durationMs      Int?
-  format          String   @default("webm")
-  status          String   @default("recording") // recording | uploading | complete | failed
-  s3PurgedAt      DateTime?
-  deviceLabel     String?
-  deviceId        String?
-  isBuiltInMic    Boolean  @default(false)
+  participantId    String?
+  s3Key            String
+  durationMs       Int?
+  format           String         @default("webm")
+  status           String         @default("recording") // recording | uploading | complete | failed
+  s3PurgedAt       DateTime?
+  deviceLabel      String?
+  deviceId         String?
+  isBuiltInMic     Boolean        @default(false)
   // Broadcast-aligned session start timestamp. Shared across all tracks of a
   // recording triggered from the same click (originator's local clock). Plumbed
   // now for future multi-track alignment; not yet used to align audio.
@@ -75,9 +78,28 @@ model Track {
   // True when this track was recovered server-side from orphaned chunks and
   // at least one chunk was missing from the partNumber sequence. Audio plays
   // but has a gap. See issue #56 (server-side recovery).
-  partial         Boolean  @default(false)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  partial          Boolean        @default(false)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  segments         TrackSegment[]
 
+  @@unique([takeId, participantId])
   @@index([sessionId, participantId])
+}
+
+model TrackSegment {
+  id           String    @id @default(uuid())
+  trackId      String
+  track        Track     @relation(fields: [trackId], references: [id], onDelete: Cascade)
+  segmentIndex Int
+  s3Prefix     String
+  status       String    @default("recording") // recording | uploading | complete | failed
+  durationMs   Int?
+  startedAt    DateTime  @default(now())
+  completedAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([trackId, segmentIndex])
+  @@index([trackId, status])
 }

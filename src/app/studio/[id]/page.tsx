@@ -713,6 +713,7 @@ function RoomContent({
   );
   const recorderRef = useRef<CozyRecorder | null>(null);
   const trackIdRef = useRef<string>("");
+  const segmentIdRef = useRef<string>("");
   const recordingUploadTokenRef = useRef<string | undefined>(undefined);
   // Raw stream straight from getUserMedia — retained so we can stop the
   // underlying device tracks on teardown.
@@ -1283,14 +1284,17 @@ function RoomContent({
         return false;
       }
 
-      trackIdRef.current = uuidv4();
-      const trackId = trackIdRef.current;
+      const requestedTrackId = uuidv4();
+      trackIdRef.current = requestedTrackId;
+      segmentIdRef.current = requestedTrackId;
+      let trackId = requestedTrackId;
+      let segmentId = requestedTrackId;
       recordingUploadTokenRef.current = undefined;
 
       try {
         const initialUpload = await getPresignedUploadTarget(
           sessionId,
-          trackId,
+          requestedTrackId,
           0,
           participantName,
           {
@@ -1302,6 +1306,10 @@ function RoomContent({
             sessionStartedAt: sessionStartedAtIso,
           },
         );
+        trackId = initialUpload.trackId ?? requestedTrackId;
+        segmentId = initialUpload.segmentId ?? requestedTrackId;
+        trackIdRef.current = trackId;
+        segmentIdRef.current = segmentId;
         recordingUploadTokenRef.current = initialUpload.recordingToken;
         try {
           const backup = await browserRecordingBackupStore.startBackup({
@@ -1380,7 +1388,7 @@ function RoomContent({
               trackId,
               index,
               undefined,
-              undefined,
+              { segmentId },
               recordingUploadTokenRef.current,
             );
             await uploadChunk(url, chunk);
@@ -1518,6 +1526,7 @@ function RoomContent({
     // tears down immediately — even if the upload pipeline below hangs.
     const recorder = recorderRef.current;
     const trackId = trackIdRef.current;
+    const segmentId = segmentIdRef.current || trackId;
     const backupId = trackId ? recordingBackupId(sessionId, trackId) : null;
     const recordingUploadToken = recordingUploadTokenRef.current;
     const startedAt = recordingStartRef.current;
@@ -1575,7 +1584,7 @@ function RoomContent({
           trackId,
           9999,
           undefined,
-          undefined,
+          { segmentId },
           recordingUploadToken,
         );
         await uploadChunk(url, blob);
@@ -1584,7 +1593,13 @@ function RoomContent({
 
       // Wait for any background chunk uploads still settling.
       await trackerWaitForUploads();
-      await completeUpload(sessionId, trackId, durationMs, recordingUploadToken);
+      await completeUpload(
+        sessionId,
+        trackId,
+        durationMs,
+        recordingUploadToken,
+        segmentId,
+      );
 
       setHasRecorded(true);
       if (backupId) {
@@ -1616,6 +1631,7 @@ function RoomContent({
       }
     } finally {
       recorderRef.current = null;
+      segmentIdRef.current = "";
       recordingUploadTokenRef.current = undefined;
       // Hard invariant from issue #61: do not leave `finalizing` until the
       // chunk-upload promise set is drained, regardless of error path. If the

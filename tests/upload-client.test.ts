@@ -29,6 +29,8 @@ describe("upload client auth", () => {
       jsonResponse({
         url: "https://s3.example/chunk-0",
         recordingToken: "recording-token",
+        trackId: "logical-track",
+        segmentId: "segment-1",
       }),
     );
 
@@ -42,6 +44,8 @@ describe("upload client auth", () => {
     expect(target).toEqual({
       url: "https://s3.example/chunk-0",
       recordingToken: "recording-token",
+      trackId: "logical-track",
+      segmentId: "segment-1",
     });
   });
 
