@@ -171,9 +171,7 @@ npm run test:browser
 MinIO bucket, pushes the Prisma schema, starts Next.js on port 3101, signs in
 as the host with test-only credentials, records with Chromium's fake
 microphone, and verifies a complete track row plus a non-empty
-`recording.webm` object in MinIO. It also includes a three-participant
-host-plus-two-guests lifecycle smoke test. The broader production-like
-multi-participant E2E harness remains separate.
+`recording.webm` object in MinIO.
 
 ## Project Structure
 
