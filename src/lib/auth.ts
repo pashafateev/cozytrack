@@ -129,14 +129,6 @@ export async function verifyGuestCookie(
     });
     if (payload.sessionId !== sessionId) return null;
     const name = typeof payload.name === "string" ? payload.name : "Guest";
-    if (payload.participantId === undefined) {
-      return {
-        kind: "guest",
-        sessionId,
-        name,
-        participantId: await legacyGuestParticipantId(token),
-      };
-    }
     if (typeof payload.participantId !== "string" || payload.participantId.length === 0) {
       return null;
     }
@@ -148,18 +140,6 @@ export async function verifyGuestCookie(
 
 export function principalParticipantId(principal: Principal): string {
   return principal.participantId;
-}
-
-async function legacyGuestParticipantId(token: string): Promise<string> {
-  const digest = await globalThis.crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(token),
-  );
-  const hex = Array.from(new Uint8Array(digest), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
-
-  return `guest_legacy_${hex.slice(0, 32)}`;
 }
 
 // ---------- Recording upload tokens ----------

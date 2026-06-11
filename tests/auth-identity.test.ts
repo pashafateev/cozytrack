@@ -1,5 +1,4 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { SignJWT } from "jose";
 import {
   issueGuestSessionCookie,
   issueHostSessionCookie,
@@ -45,33 +44,4 @@ describe("principal participant identity", () => {
 
     await expect(verifyGuestCookie(issued.value, "s2")).resolves.toBeNull();
   });
-
-  it("keeps legacy guest cookies authenticated with a stable fallback participant id", async () => {
-    const token = await issueLegacyGuestSessionCookie("s1", "Alice");
-
-    const first = await verifyGuestCookie(token, "s1");
-    const second = await verifyGuestCookie(token, "s1");
-
-    expect(first).toMatchObject({
-      kind: "guest",
-      sessionId: "s1",
-      name: "Alice",
-    });
-    expect(first?.participantId).toMatch(/^guest_legacy_[0-9a-f]{32}$/);
-    expect(second?.participantId).toBe(first?.participantId);
-  });
 });
-
-async function issueLegacyGuestSessionCookie(
-  sessionId: string,
-  name: string,
-): Promise<string> {
-  return await new SignJWT({ sessionId, name })
-    .setProtectedHeader({ alg: "HS256" })
-    .setIssuer("cozytrack")
-    .setAudience("cozytrack:guest")
-    .setSubject(`guest:${sessionId}`)
-    .setIssuedAt()
-    .setExpirationTime("12h")
-    .sign(new TextEncoder().encode(process.env.AUTH_SECRET));
-}
