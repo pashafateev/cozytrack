@@ -1,6 +1,6 @@
 import React, { type ReactNode } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, vi } from "vitest";
+import { afterEach, beforeEach, expect, vi } from "vitest";
 import StudioPage from "@/app/studio/[id]/page";
 
 type AuthMeResponse =
@@ -17,6 +17,7 @@ const studioPageHarness = vi.hoisted(() => ({
   getUserMedia: vi.fn(),
   enumerateDevices: vi.fn(),
   listBackups: vi.fn(async () => []),
+  audioContexts: [] as unknown[],
 }));
 
 vi.mock("next/navigation", () => ({
@@ -109,6 +110,28 @@ function mediaStream(): MediaStream {
   } as unknown as MediaStream;
 }
 
+// happy-dom has no Web Audio API, but the studio page's local level monitor
+// constructs an AudioContext once the recording stream resolves after join.
+// getByteTimeDomainData fills with 128 (silence) so the meter reads 0.
+class FakeAudioContext {
+  constructor() {
+    studioPageHarness.audioContexts.push(this);
+  }
+  createMediaStreamSource() {
+    return { connect: vi.fn(), disconnect: vi.fn() };
+  }
+  createAnalyser() {
+    return {
+      fftSize: 2048,
+      smoothingTimeConstant: 0,
+      getByteTimeDomainData(data: Uint8Array) {
+        data.fill(128);
+      },
+    };
+  }
+  async close() {}
+}
+
 function audioInput(deviceId: string, label: string): MediaDeviceInfo {
   return {
     deviceId,
@@ -131,7 +154,9 @@ beforeEach(() => {
     .mockReset()
     .mockResolvedValue([audioInput("usb-mic", "Shure MV7")]);
   studioPageHarness.listBackups.mockClear();
+  studioPageHarness.audioContexts.length = 0;
 
+  vi.stubGlobal("AudioContext", FakeAudioContext);
   vi.stubGlobal(
     "fetch",
     vi.fn(async () => Response.json(studioPageHarness.authMeResponse)),
@@ -177,6 +202,13 @@ export function renderGuestStudioPage({
 
       fireEvent.click(screen.getByRole("button", { name: "Join Studio" }));
       await screen.findByTestId("livekit-room");
+
+      // The recording stream resolves asynchronously after the room mounts and
+      // spins up the local level monitor. Wait for it so assertions see the
+      // settled UI instead of racing the effect against test teardown.
+      await waitFor(() => {
+        expect(studioPageHarness.audioContexts.length).toBeGreaterThan(0);
+      });
     },
     screen,
   };
