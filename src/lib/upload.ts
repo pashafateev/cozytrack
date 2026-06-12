@@ -12,6 +12,9 @@ export interface TrackInitInfo {
   // Shared across all tracks triggered by the same broadcast.
   sessionStartedAt?: string;
   segmentId?: string;
+  // The take this recording was broadcast for. Binds a delayed start to its
+  // original take instead of whatever take is active when presign arrives.
+  takeId?: string;
 }
 
 export interface PresignedUploadTarget {
@@ -46,6 +49,7 @@ export async function getPresignedUploadTarget(
       ...(trackInit?.deviceInfo ?? {}),
       sessionStartedAt: trackInit?.sessionStartedAt,
       segmentId: trackInit?.segmentId,
+      takeId: trackInit?.takeId,
     }),
   });
 

@@ -55,6 +55,7 @@ async function ensureLogicalTrackAndSegment(input: {
   sessionId: string;
   requestedTrackId: string;
   requestedSegmentId: string;
+  requestedTakeId?: string;
   principal: Principal;
   participantName: unknown;
   deviceLabel: unknown;
@@ -66,6 +67,7 @@ async function ensureLogicalTrackAndSegment(input: {
     sessionId,
     requestedTrackId,
     requestedSegmentId,
+    requestedTakeId,
     principal,
     participantName,
     deviceLabel,
@@ -74,7 +76,25 @@ async function ensureLogicalTrackAndSegment(input: {
     sessionStartedAt,
   } = input;
   const participantId = principalParticipantId(principal);
-  const activeTake = await findActiveTake(sessionId);
+  // Prefer the take the client was actually recording for. A delayed start
+  // must not attach its audio to whichever take happens to be active by the
+  // time presign arrives (the host may have moved on to a newer take).
+  let activeTake: { id: string } | null = null;
+  if (requestedTakeId) {
+    const requestedTake = await db.recordingTake.findUnique({
+      where: { id: requestedTakeId },
+      select: { id: true, sessionId: true },
+    });
+    if (!requestedTake) {
+      throw new Error("TAKE_NOT_FOUND");
+    }
+    if (requestedTake.sessionId !== sessionId) {
+      throw new Error("TAKE_SESSION_MISMATCH");
+    }
+    activeTake = { id: requestedTake.id };
+  } else {
+    activeTake = await findActiveTake(sessionId);
+  }
 
   let track = activeTake
     ? await db.track.findFirst({
@@ -226,6 +246,7 @@ export async function POST(req: NextRequest) {
       isBuiltInMic,
       sessionStartedAt,
     } = body;
+    const requestedTakeId = cleanNonEmptyString(body?.takeId) ?? undefined;
 
     if (!sessionId || !trackId || partNumber === undefined) {
       return NextResponse.json(
@@ -270,6 +291,7 @@ export async function POST(req: NextRequest) {
           sessionId,
           requestedTrackId: trackId,
           requestedSegmentId: segmentId,
+          requestedTakeId,
           principal,
           participantName,
           deviceLabel,
@@ -292,9 +314,16 @@ export async function POST(req: NextRequest) {
         if (
           error instanceof Error &&
           (error.message === "TRACK_SESSION_MISMATCH" ||
-            error.message === "SEGMENT_TRACK_MISMATCH")
+            error.message === "SEGMENT_TRACK_MISMATCH" ||
+            error.message === "TAKE_SESSION_MISMATCH")
         ) {
           return NextResponse.json({ error: "forbidden" }, { status: 403 });
+        }
+        if (error instanceof Error && error.message === "TAKE_NOT_FOUND") {
+          return NextResponse.json(
+            { error: "Recording take not found" },
+            { status: 404 }
+          );
         }
         throw error;
       }

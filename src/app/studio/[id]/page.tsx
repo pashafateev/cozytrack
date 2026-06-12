@@ -1304,6 +1304,7 @@ function RoomContent({
               isBuiltInMic: selectedMicIsBuiltIn,
             },
             sessionStartedAt: sessionStartedAtIso,
+            takeId: effectiveTakeId ?? undefined,
           },
         );
         trackId = initialUpload.trackId ?? requestedTrackId;
