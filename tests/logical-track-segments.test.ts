@@ -502,7 +502,7 @@ describe("logical track segments", () => {
     );
   });
 
-  it("keeps the logical track pending until every segment completes", async () => {
+  it("keeps the logical track pending while a newer segment is still recording", async () => {
     mocks.tracks.set("logical-track", {
       id: "logical-track",
       sessionId: "s1",
@@ -530,22 +530,8 @@ describe("logical track segments", () => {
     });
     const recordingToken = await issueRecordingUploadToken("s1", "logical-track");
 
-    const secondSegmentRes = await completeUpload(
-      postJson(
-        "/api/upload/complete",
-        {
-          sessionId: "s1",
-          trackId: "logical-track",
-          segmentId: "browser-seg-2",
-          durationMs: 5000,
-        },
-        { "x-cozytrack-recording-token": recordingToken },
-      ),
-    );
-
-    expect(secondSegmentRes.status).toBe(200);
-    expect(mocks.tracks.get("logical-track")?.status).toBe("uploading");
-
+    // The default segment's late completion lands while the newer re-record
+    // attempt is still in flight — the track must not look finished yet.
     const defaultSegmentRes = await completeUpload(
       postJson(
         "/api/upload/complete",
@@ -560,8 +546,76 @@ describe("logical track segments", () => {
     );
 
     expect(defaultSegmentRes.status).toBe(200);
-    // Out-of-order completion: the default segment finished last, but the
-    // track must still surface the latest segment's recording.
+    expect(mocks.tracks.get("logical-track")?.status).toBe("uploading");
+
+    const secondSegmentRes = await completeUpload(
+      postJson(
+        "/api/upload/complete",
+        {
+          sessionId: "s1",
+          trackId: "logical-track",
+          segmentId: "browser-seg-2",
+          durationMs: 5000,
+        },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(secondSegmentRes.status).toBe(200);
+    expect(mocks.tracks.get("logical-track")).toMatchObject({
+      status: "complete",
+      s3Key:
+        "sessions/s1/tracks/logical-track/segments/browser-seg-2/recording.webm",
+      durationMs: 5000,
+    });
+  });
+
+  it("completes the track from the newest segment even when an older segment was abandoned", async () => {
+    mocks.tracks.set("logical-track", {
+      id: "logical-track",
+      sessionId: "s1",
+      participantName: "Alice",
+      participantId: "guest_alice",
+      s3Key: "sessions/s1/tracks/logical-track/recording.webm",
+      status: "recording",
+      durationMs: null,
+    });
+    // The first attempt died without ever completing — its row stays
+    // "recording" forever. The re-record supersedes it.
+    mocks.segments.set("logical-track", {
+      id: "logical-track",
+      trackId: "logical-track",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/logical-track/",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("browser-seg-2", {
+      id: "browser-seg-2",
+      trackId: "logical-track",
+      segmentIndex: 1,
+      s3Prefix: "sessions/s1/tracks/logical-track/segments/browser-seg-2/",
+      status: "recording",
+      durationMs: null,
+    });
+    const recordingToken = await issueRecordingUploadToken("s1", "logical-track");
+
+    const res = await completeUpload(
+      postJson(
+        "/api/upload/complete",
+        {
+          sessionId: "s1",
+          trackId: "logical-track",
+          segmentId: "browser-seg-2",
+          durationMs: 5000,
+        },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    // The newest attempt is done; the dead older segment must not hold the
+    // track in uploading and block finalize.
     expect(mocks.tracks.get("logical-track")).toMatchObject({
       status: "complete",
       s3Key:
