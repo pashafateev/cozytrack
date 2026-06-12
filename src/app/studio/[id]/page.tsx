@@ -2100,7 +2100,7 @@ function RoomContent({
         <div className="flex-1 p-5 flex flex-col gap-2.5 overflow-y-auto">
           <ParticipantStrip
             name={participantName}
-            role="host"
+            role={isHost ? "host" : "guest"}
             micLabel={selectedMicLabel ?? "Unknown mic"}
             isBuiltIn={selectedMicIsBuiltIn}
             level={audioLevels.get(participantName) ?? 0}
