@@ -594,6 +594,167 @@ describe("logical track segments", () => {
     });
   });
 
+  it("rejects a segment-scoped token presigning a different segment of the track", async () => {
+    mocks.tracks.set("logical-track", {
+      id: "logical-track",
+      sessionId: "s1",
+      participantName: "Alice",
+      participantId: "guest_alice",
+      s3Key: "sessions/s1/tracks/logical-track/recording.webm",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("logical-track", {
+      id: "logical-track",
+      trackId: "logical-track",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/logical-track/",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("seg-b", {
+      id: "seg-b",
+      trackId: "logical-track",
+      segmentIndex: 1,
+      s3Prefix: "sessions/s1/tracks/logical-track/segments/seg-b/",
+      status: "recording",
+      durationMs: null,
+    });
+    // Token from the first attempt: scoped to the default segment.
+    const recordingToken = await issueRecordingUploadToken(
+      "s1",
+      "logical-track",
+      "logical-track",
+    );
+
+    // A stale tab must not be able to write into the newer attempt's objects.
+    const res = await presignUpload(
+      postJson(
+        "/api/upload/presign",
+        {
+          sessionId: "s1",
+          trackId: "logical-track",
+          partNumber: 5,
+          segmentId: "seg-b",
+        },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects a segment-scoped token completing a different segment of the track", async () => {
+    mocks.tracks.set("logical-track", {
+      id: "logical-track",
+      sessionId: "s1",
+      participantName: "Alice",
+      participantId: "guest_alice",
+      s3Key: "sessions/s1/tracks/logical-track/recording.webm",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("logical-track", {
+      id: "logical-track",
+      trackId: "logical-track",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/logical-track/",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("seg-b", {
+      id: "seg-b",
+      trackId: "logical-track",
+      segmentIndex: 1,
+      s3Prefix: "sessions/s1/tracks/logical-track/segments/seg-b/",
+      status: "recording",
+      durationMs: null,
+    });
+    const recordingToken = await issueRecordingUploadToken(
+      "s1",
+      "logical-track",
+      "logical-track",
+    );
+
+    const res = await completeUpload(
+      postJson(
+        "/api/upload/complete",
+        { sessionId: "s1", trackId: "logical-track", segmentId: "seg-b" },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(res.status).toBe(401);
+    expect(mocks.segments.get("seg-b")?.status).toBe("recording");
+  });
+
+  it("does not promote the track when a newer segment appears mid-completion", async () => {
+    mocks.tracks.set("logical-track", {
+      id: "logical-track",
+      sessionId: "s1",
+      participantName: "Alice",
+      participantId: "guest_alice",
+      s3Key: "sessions/s1/tracks/logical-track/recording.webm",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("logical-track", {
+      id: "logical-track",
+      trackId: "logical-track",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/logical-track/",
+      status: "complete",
+      durationMs: 1000,
+    });
+    mocks.segments.set("browser-seg-2", {
+      id: "browser-seg-2",
+      trackId: "logical-track",
+      segmentIndex: 1,
+      s3Prefix: "sessions/s1/tracks/logical-track/segments/browser-seg-2/",
+      status: "recording",
+      durationMs: null,
+    });
+    // seg-3 is created concurrently: the completion request's segment read
+    // happens before the insert commits, but its track write happens after.
+    mocks.segments.set("browser-seg-3", {
+      id: "browser-seg-3",
+      trackId: "logical-track",
+      segmentIndex: 2,
+      s3Prefix: "sessions/s1/tracks/logical-track/segments/browser-seg-3/",
+      status: "recording",
+      durationMs: null,
+    });
+    (db.trackSegment.findMany as unknown as Mock).mockImplementationOnce(
+      async () => [
+        { ...mocks.segments.get("logical-track") },
+        { ...mocks.segments.get("browser-seg-2"), status: "complete", durationMs: 5000 },
+      ],
+    );
+    const recordingToken = await issueRecordingUploadToken(
+      "s1",
+      "logical-track",
+      "browser-seg-2",
+    );
+
+    const res = await completeUpload(
+      postJson(
+        "/api/upload/complete",
+        {
+          sessionId: "s1",
+          trackId: "logical-track",
+          segmentId: "browser-seg-2",
+          durationMs: 5000,
+        },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    // Promoting against the stale segment list would make stale audio
+    // downloadable while seg-3 is still recording.
+    expect(mocks.tracks.get("logical-track")?.status).not.toBe("complete");
+  });
+
   it("binds a stale recording start to its broadcast take, not the newer active take", async () => {
     // The participant's start was delayed: by the time presign arrives, the
     // host has stopped take-a and started take-b. The audio belongs to take-a.
