@@ -113,6 +113,23 @@ vi.mock("@/lib/db", () => ({
           return { ...updated };
         },
       ),
+      updateMany: vi.fn(
+        async ({
+          where: { id, status },
+          data,
+        }: {
+          where: { id: string; status?: { not: string } };
+          data: Partial<Track>;
+        }) => {
+          const existing = mocks.tracks.get(id);
+          if (!existing) return { count: 0 };
+          if (status?.not !== undefined && existing.status === status.not) {
+            return { count: 0 };
+          }
+          mocks.tracks.set(id, { ...existing, ...data });
+          return { count: 1 };
+        },
+      ),
     },
     trackSegment: {
       count: vi.fn(
@@ -212,6 +229,7 @@ import { NextRequest } from "next/server";
 import { POST as presignUpload } from "@/app/api/upload/presign/route";
 import { POST as completeUpload } from "@/app/api/upload/complete/route";
 import { issueRecordingUploadToken } from "@/lib/auth";
+import { db } from "@/lib/db";
 
 function postJson(
   path: string,
@@ -567,6 +585,121 @@ describe("logical track segments", () => {
       s3Key:
         "sessions/s1/tracks/logical-track/segments/browser-seg-2/recording.webm",
       durationMs: 5000,
+    });
+  });
+
+  it("retries segment creation when a concurrent start claims the index", async () => {
+    mocks.recordingTakes.set("take-1", {
+      id: "take-1",
+      sessionId: "s1",
+      startedAt: new Date("2026-06-11T00:00:00.000Z"),
+      stoppedAt: null,
+    });
+    mocks.tracks.set("logical-track", {
+      id: "logical-track",
+      sessionId: "s1",
+      takeId: "take-1",
+      participantName: "Alice",
+      participantId: "guest_alice",
+      s3Key: "sessions/s1/tracks/logical-track/recording.webm",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("logical-track", {
+      id: "logical-track",
+      trackId: "logical-track",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/logical-track/",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.resolvePrincipal.mockResolvedValue({
+      kind: "guest",
+      sessionId: "s1",
+      name: "Cookie Alice",
+      participantId: "guest_alice",
+    });
+    // A concurrent start for the same participant/take grabbed the counted
+    // segmentIndex first — the unique [trackId, segmentIndex] constraint
+    // rejects the first create attempt.
+    vi.mocked(db.trackSegment.create).mockImplementationOnce(async () => {
+      const err = new Error(
+        "Unique constraint failed on the fields: (`trackId`,`segmentIndex`)",
+      ) as Error & { code: string };
+      err.code = "P2002";
+      throw err;
+    });
+
+    const res = await presignUpload(
+      postJson("/api/upload/presign", {
+        sessionId: "s1",
+        trackId: "new-browser-segment",
+        partNumber: 0,
+        participantName: "Alice",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { segmentId: string; trackId: string };
+    expect(body.trackId).toBe("logical-track");
+    expect(body.segmentId).toBe("new-browser-segment");
+    expect(mocks.segments.get("new-browser-segment")).toMatchObject({
+      trackId: "logical-track",
+      status: "recording",
+    });
+  });
+
+  it("does not demote a complete track when an older segment completes late", async () => {
+    // Race outcome state: the newest segment's completion already promoted
+    // the track while an older segment's completion was still in flight.
+    mocks.tracks.set("logical-track", {
+      id: "logical-track",
+      sessionId: "s1",
+      participantName: "Alice",
+      participantId: "guest_alice",
+      s3Key:
+        "sessions/s1/tracks/logical-track/segments/browser-seg-2/recording.webm",
+      status: "complete",
+      durationMs: 5000,
+    });
+    mocks.segments.set("logical-track", {
+      id: "logical-track",
+      trackId: "logical-track",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/logical-track/",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("browser-seg-2", {
+      id: "browser-seg-2",
+      trackId: "logical-track",
+      segmentIndex: 1,
+      s3Prefix: "sessions/s1/tracks/logical-track/segments/browser-seg-2/",
+      status: "recording",
+      durationMs: null,
+    });
+    const recordingToken = await issueRecordingUploadToken("s1", "logical-track");
+
+    const res = await completeUpload(
+      postJson(
+        "/api/upload/complete",
+        {
+          sessionId: "s1",
+          trackId: "logical-track",
+          segmentId: "logical-track",
+          durationMs: 1000,
+        },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    // The older completion must not clobber the already-promoted track back
+    // to uploading — that would block finalize with every segment complete.
+    expect(mocks.tracks.get("logical-track")).toMatchObject({
+      status: "complete",
+      s3Key:
+        "sessions/s1/tracks/logical-track/segments/browser-seg-2/recording.webm",
     });
   });
 
