@@ -29,6 +29,12 @@ jobs:
             const isDocsOnlyFile = (name) =>
               name.endsWith(".md") ||
               name.startsWith("docs/");
+            const isAutomaticCodexReviewIgnoredFile = (name) =>
+              isDocsOnlyFile(name) ||
+              [".gitignore", ".gitattributes", ".editorconfig"].includes(name) ||
+              name.startsWith(".github/ISSUE_TEMPLATE/") ||
+              name === ".github/PULL_REQUEST_TEMPLATE.md" ||
+              /\.(png|jpe?g|gif|webp|avif)$/i.test(name);
 
             const touchesServiceIntegration = (name) =>
               name === ".github/workflows/service-integration.yml" ||
@@ -62,6 +68,8 @@ jobs:
 
             const docsOnly = names.length > 0 && names.every(isDocsOnlyFile);
             const baseline = !docsOnly;
+            const automaticCodexReview =
+              names.length > 0 && !names.every(isAutomaticCodexReviewIgnoredFile);
             const serviceIntegration = names.some(touchesServiceIntegration);
             const browserSmoke = names.some(touchesBrowserSmoke);
             const tier = docsOnly
@@ -84,7 +92,7 @@ jobs:
               `| Baseline validation | ${baseline ? "runs" : "skipped for docs-only changes"} |`,
               `| Browser recording smoke | ${browserSmoke ? "runs" : "skipped"} |`,
               `| Prisma and storage integration | ${serviceIntegration ? "runs" : "skipped"} |`,
-              `| Codex review | ${baseline ? "runs automatically; manual via `/codex review`" : "skipped for docs-only changes; manual via `/codex review`"} |`,
+              `| Codex review | ${automaticCodexReview ? "runs automatically; manual via `/codex review`" : "skipped for docs/metadata/assets-only changes; manual via `/codex review`"} |`,
               "",
               "<details>",
               "<summary>Changed files</summary>",
