@@ -543,6 +543,81 @@ describe("recoverTrack", () => {
     });
   });
 
+  it("stitches the newest segment's chunks when its final blob is missing", async () => {
+    seedTrack({ status: "uploading" });
+    seedSegment({ id: "t1", segmentIndex: 0, status: "complete" });
+    // The re-record died after uploading chunks but before the final blob.
+    seedSegment({
+      id: "seg-2",
+      segmentIndex: 1,
+      status: "recording",
+      createdAt: new Date(Date.now() - 600_000),
+    });
+    s3Objects.set(
+      "sessions/s1/tracks/t1/recording.webm",
+      new Uint8Array([1, 2, 3])
+    );
+    putS3(
+      "sessions/s1/tracks/t1/segments/seg-2/0.webm",
+      new Uint8Array([0xaa, 0xaa]),
+      new Date(Date.now() - 600_000)
+    );
+    putS3(
+      "sessions/s1/tracks/t1/segments/seg-2/1.webm",
+      new Uint8Array([0xbb, 0xbb]),
+      new Date(Date.now() - 600_000)
+    );
+
+    const result = await recoverTrack("t1", { chunkStitchMinAgeMs: 30_000 });
+
+    // The chunks are the newest attempt's audio — falling back to the older
+    // segment would discard a recoverable recording.
+    expect(result.outcome).toBe("recovered_from_chunks");
+    expect(result.partial).toBe(false);
+    expect(
+      s3Objects.get("sessions/s1/tracks/t1/segments/seg-2/recording.webm")
+    ).toEqual(new Uint8Array([0xaa, 0xaa, 0xbb, 0xbb]));
+    expect(segmentStore.get("seg-2")?.status).toBe("complete");
+    expect(trackStore.get("t1")).toMatchObject({
+      status: "complete",
+      s3Key: "sessions/s1/tracks/t1/segments/seg-2/recording.webm",
+      partial: false,
+    });
+  });
+
+  it("flags partial when the newest segment stitch has gaps", async () => {
+    seedTrack({ status: "uploading" });
+    seedSegment({ id: "t1", segmentIndex: 0, status: "recording" });
+    seedSegment({
+      id: "seg-2",
+      segmentIndex: 1,
+      status: "recording",
+      createdAt: new Date(Date.now() - 600_000),
+    });
+    putS3(
+      "sessions/s1/tracks/t1/segments/seg-2/0.webm",
+      new Uint8Array([0xaa]),
+      new Date(Date.now() - 600_000)
+    );
+    // Chunk 1 never landed.
+    putS3(
+      "sessions/s1/tracks/t1/segments/seg-2/2.webm",
+      new Uint8Array([0xcc]),
+      new Date(Date.now() - 600_000)
+    );
+
+    const result = await recoverTrack("t1", { chunkStitchMinAgeMs: 30_000 });
+
+    expect(result.outcome).toBe("recovered_partial");
+    expect(result.partial).toBe(true);
+    expect(result.missingPartNumbers).toEqual([1]);
+    expect(trackStore.get("t1")).toMatchObject({
+      status: "complete",
+      s3Key: "sessions/s1/tracks/t1/segments/seg-2/recording.webm",
+      partial: true,
+    });
+  });
+
   it("flags partial when stitching default chunks under a dead newer segment", async () => {
     seedTrack({ status: "uploading" });
     seedSegment({ id: "t1", segmentIndex: 0, status: "recording" });
