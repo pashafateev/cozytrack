@@ -121,18 +121,39 @@ vi.mock("@/lib/db", () => ({
       ),
       updateMany: vi.fn(
         async ({
-          where: { id, status },
+          where,
           data,
         }: {
-          where: { id: string; status?: { not: string } };
+          where: {
+            id: string;
+            status?: { not?: string; in?: string[] };
+            segments?: { none: { segmentIndex: { gt: number } } };
+          };
           data: Partial<Track>;
         }) => {
-          const existing = mocks.tracks.get(id);
+          const existing = mocks.tracks.get(where.id);
           if (!existing) return { count: 0 };
-          if (status?.not !== undefined && existing.status === status.not) {
+          if (
+            where.status?.not !== undefined &&
+            existing.status === where.status.not
+          ) {
             return { count: 0 };
           }
-          mocks.tracks.set(id, { ...existing, ...data });
+          if (
+            where.status?.in !== undefined &&
+            !where.status.in.includes(existing.status)
+          ) {
+            return { count: 0 };
+          }
+          const noneGt = where.segments?.none?.segmentIndex?.gt;
+          if (noneGt !== undefined) {
+            const hasNewer = Array.from(mocks.segments.values()).some(
+              (segment) =>
+                segment.trackId === where.id && segment.segmentIndex > noneGt,
+            );
+            if (hasNewer) return { count: 0 };
+          }
+          mocks.tracks.set(where.id, { ...existing, ...data });
           return { count: 1 };
         },
       ),

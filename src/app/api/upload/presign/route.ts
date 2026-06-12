@@ -221,12 +221,15 @@ async function ensureLogicalTrackAndSegment(input: {
     // A new recording attempt is starting on this logical track. If the track
     // already looked finished (or failed), finalize/downloads would keep
     // serving the previous recording as final while this segment is in
-    // flight — pull it back to recording until completion resolves it.
-    if (track.status === "complete" || track.status === "failed") {
-      track = await db.track.update({
-        where: { id: track.id },
-        data: { status: "recording" },
-      });
+    // flight — pull it back to recording until completion resolves it. The
+    // condition lives in the write so a completion that landed after our
+    // track read still gets demoted.
+    const demoted = await db.track.updateMany({
+      where: { id: track.id, status: { in: ["complete", "failed"] } },
+      data: { status: "recording" },
+    });
+    if (demoted.count > 0) {
+      track = (await db.track.findUnique({ where: { id: track.id } })) ?? track;
     }
   }
 
@@ -328,7 +331,11 @@ export async function POST(req: NextRequest) {
         throw error;
       }
 
-      recordingToken = await issueRecordingUploadToken(sessionId, logicalTrackId);
+      recordingToken = await issueRecordingUploadToken(
+        sessionId,
+        logicalTrackId,
+        segmentId,
+      );
     } else {
       // Subsequent chunks and the final recording.webm upload accept either
       // the original principal cookie or the recording-scoped upload token.
@@ -341,6 +348,7 @@ export async function POST(req: NextRequest) {
           requestRecordingToken,
           sessionId,
           trackId,
+          segmentId,
         );
         if (!uploadPrincipal) {
           return NextResponse.json({ error: "unauthorized" }, { status: 401 });

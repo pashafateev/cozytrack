@@ -32,6 +32,7 @@ export async function POST(req: NextRequest) {
         token,
         sessionId,
         trackId,
+        segmentId,
       );
       if (!uploadPrincipal) {
         return NextResponse.json({ error: "unauthorized" }, { status: 401 });
@@ -72,7 +73,7 @@ export async function POST(req: NextRequest) {
     const segments = await db.trackSegment.findMany({
       where: { trackId },
       orderBy: { segmentIndex: "asc" },
-      select: { id: true, status: true, durationMs: true },
+      select: { id: true, status: true, durationMs: true, segmentIndex: true },
     });
     // Interim semantics until media stitching lands (#111 stack 4): the latest
     // segment's recording is the track's authoritative artifact. Earlier
@@ -85,8 +86,17 @@ export async function POST(req: NextRequest) {
 
     let track;
     if (latestSegmentComplete) {
-      track = await db.track.update({
-        where: { id: trackId },
+      // Conditional write: a newer segment may have been created between the
+      // segment read above and this update. Promoting then would mark
+      // superseded audio complete and downloadable while the new attempt
+      // records, so the write proves no newer segment exists.
+      await db.track.updateMany({
+        where: {
+          id: trackId,
+          segments: {
+            none: { segmentIndex: { gt: latestSegment.segmentIndex } },
+          },
+        },
         data: {
           status: "complete",
           s3Key: trackSegmentRecordingKey(
@@ -100,6 +110,7 @@ export async function POST(req: NextRequest) {
           partial: false,
         },
       });
+      track = await db.track.findUnique({ where: { id: trackId } });
     } else {
       // Conditional write: an older segment's completion can read the
       // segment list before a concurrent newest-segment completion commits.
