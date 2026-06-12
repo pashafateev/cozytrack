@@ -84,7 +84,7 @@ jobs:
               `| Baseline validation | ${baseline ? "runs" : "skipped for docs-only changes"} |`,
               `| Browser recording smoke | ${browserSmoke ? "runs" : "skipped"} |`,
               `| Prisma and storage integration | ${serviceIntegration ? "runs" : "skipped"} |`,
-              "| Codex review | manual via `/codex review` |",
+              `| Codex review | ${baseline ? "runs automatically; manual via `/codex review`" : "skipped for docs-only changes; manual via `/codex review`"} |`,
               "",
               "<details>",
               "<summary>Changed files</summary>",
