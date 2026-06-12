@@ -186,17 +186,9 @@ export async function listTrackChunkParts(
   return parts;
 }
 
-export async function trackRecordingExists(
-  sessionId: string,
-  trackId: string
-): Promise<boolean> {
+async function objectExists(key: string): Promise<boolean> {
   try {
-    await s3.send(
-      new HeadObjectCommand({
-        Bucket: bucket,
-        Key: trackRecordingKey(sessionId, trackId),
-      })
-    );
+    await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
     return true;
   } catch (error) {
     if (error instanceof NotFound || error instanceof NoSuchKey) {
@@ -211,6 +203,21 @@ export async function trackRecordingExists(
     }
     throw error;
   }
+}
+
+export async function trackRecordingExists(
+  sessionId: string,
+  trackId: string
+): Promise<boolean> {
+  return objectExists(trackRecordingKey(sessionId, trackId));
+}
+
+export async function trackSegmentRecordingExists(
+  sessionId: string,
+  trackId: string,
+  segmentId: string
+): Promise<boolean> {
+  return objectExists(trackSegmentRecordingKey(sessionId, trackId, segmentId));
 }
 
 export async function getObjectBytes(key: string): Promise<Uint8Array> {

@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import {
   deleteTrackSegmentChunks,
-  trackRecordingKey,
   trackSegmentRecordingKey,
 } from "@/lib/s3";
 import { resolvePrincipal, verifyRecordingUploadToken } from "@/lib/auth";
@@ -61,7 +60,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
 
-    const s3Key = trackRecordingKey(sessionId, trackId);
     await db.trackSegment.update({
       where: { id: segmentId },
       data: {
@@ -71,27 +69,36 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    const segmentRecordingKey = trackSegmentRecordingKey(
-      sessionId,
-      trackId,
-      segmentId,
+    const segments = await db.trackSegment.findMany({
+      where: { trackId },
+      orderBy: { segmentIndex: "asc" },
+      select: { id: true, status: true, durationMs: true },
+    });
+    const allSegmentsComplete = segments.every(
+      (segment) => segment.status === "complete",
     );
-    const isDefaultSegment = segmentRecordingKey === s3Key;
+    // Interim semantics until media stitching lands (#111 stack 4): the latest
+    // segment's recording is the track's authoritative artifact. Earlier
+    // segments stay in S3 and in TrackSegment rows for the future stitcher.
+    const latestSegment = segments[segments.length - 1];
 
     const track = await db.track.update({
       where: { id: trackId },
-      data: isDefaultSegment
+      data: allSegmentsComplete
         ? {
             status: "complete",
-            s3Key: s3Key,
-            durationMs: durationMs ?? null,
+            s3Key: trackSegmentRecordingKey(
+              sessionId,
+              trackId,
+              latestSegment.id,
+            ),
+            durationMs: latestSegment.durationMs ?? null,
             // Reset any premature partial flag from racing recovery — the client
             // successfully produced and uploaded its merged blob.
             partial: false,
           }
         : {
             status: "uploading",
-            s3Key: s3Key,
           },
     });
 

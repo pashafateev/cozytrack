@@ -29,6 +29,10 @@ export async function retryLocalRecordingBackupUpload(
 
   await backupStore.markBackupUploading(manifest.id);
 
+  // Manifests persisted before segments existed lack segmentId; their
+  // recordings belong to the default segment, which shares the track id.
+  const segmentId = manifest.segmentId ?? manifest.trackId;
+
   try {
     const recording = await backupStore.buildRecordingBlob(manifest.id);
     const url = await getUploadUrl(
@@ -36,7 +40,7 @@ export async function retryLocalRecordingBackupUpload(
       manifest.trackId,
       9999,
       undefined,
-      undefined,
+      { segmentId },
       manifest.recordingToken,
     );
     await putChunk(url, recording);
@@ -45,6 +49,7 @@ export async function retryLocalRecordingBackupUpload(
       manifest.trackId,
       manifest.durationMs,
       manifest.recordingToken,
+      segmentId,
     );
   } catch (error) {
     await backupStore.markBackupFailed(manifest.id, error);

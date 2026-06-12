@@ -1315,6 +1315,7 @@ function RoomContent({
           const backup = await browserRecordingBackupStore.startBackup({
             sessionId,
             trackId,
+            segmentId,
             participantName,
             recordingToken: initialUpload.recordingToken,
           });
@@ -1365,6 +1366,7 @@ function RoomContent({
           .saveChunk({
             sessionId,
             trackId,
+            segmentId,
             chunkIndex: index,
             chunk,
             capturedAt,
@@ -1400,6 +1402,7 @@ function RoomContent({
                   trackId,
                   index,
                   uploadErr,
+                  segmentId,
                 );
                 setRecoveryBackupSync(backup);
               } catch (backupErr) {
@@ -1414,6 +1417,7 @@ function RoomContent({
                 sessionId,
                 trackId,
                 index,
+                segmentId,
               );
               setRecoveryBackupSync(backup);
             } catch (backupErr) {
@@ -1527,7 +1531,7 @@ function RoomContent({
     const recorder = recorderRef.current;
     const trackId = trackIdRef.current;
     const segmentId = segmentIdRef.current || trackId;
-    const backupId = trackId ? recordingBackupId(sessionId, trackId) : null;
+    const backupId = segmentId ? recordingBackupId(sessionId, segmentId) : null;
     const recordingUploadToken = recordingUploadTokenRef.current;
     const startedAt = recordingStartRef.current;
     setStudioStateSync("finalizing");

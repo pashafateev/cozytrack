@@ -101,6 +101,22 @@ vi.mock("@/lib/db", () => ({
           return segment ? { ...segment } : null;
         },
       ),
+      findMany: vi.fn(
+        async ({
+          where: { trackId },
+          orderBy,
+        }: {
+          where: { trackId: string };
+          orderBy?: { segmentIndex: "asc" | "desc" };
+        }) => {
+          const list = Array.from(mocks.segments.values())
+            .filter((segment) => segment.trackId === trackId)
+            .sort((a, b) => a.segmentIndex - b.segmentIndex)
+            .map((segment) => ({ ...segment }));
+          if (orderBy?.segmentIndex === "desc") list.reverse();
+          return list;
+        },
+      ),
       create: vi.fn(async ({ data }: { data: TrackSegment }) => {
         const segment = { ...data, status: "recording", durationMs: null };
         mocks.segments.set(segment.id, segment);

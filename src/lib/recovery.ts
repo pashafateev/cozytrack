@@ -5,6 +5,8 @@ import {
   putObjectBytes,
   trackRecordingExists,
   trackRecordingKey,
+  trackSegmentRecordingExists,
+  trackSegmentRecordingKey,
 } from "@/lib/s3";
 
 export type RecoveryOutcome =
@@ -67,8 +69,47 @@ export async function recoverTrack(
 
   const { sessionId } = track;
 
+  // Segment-aware pass, newest first. Until media stitching lands (#111
+  // stack 4) the newest segment whose final recording exists is the track's
+  // authoritative artifact; older segments are preserved for the stitcher.
+  // Incomplete non-default segments that only have chunk files are not
+  // stitched here — their chunks stay in S3 for manual ffmpeg recovery.
+  const segments = await db.trackSegment.findMany({
+    where: { trackId },
+    orderBy: { segmentIndex: "desc" },
+    select: { id: true, status: true },
+  });
+  for (const segment of segments) {
+    const recovered =
+      segment.status === "complete" ||
+      (await trackSegmentRecordingExists(sessionId, trackId, segment.id));
+    if (!recovered) continue;
+    if (segment.status !== "complete") {
+      await db.trackSegment.updateMany({
+        where: { id: segment.id },
+        data: { status: "complete", completedAt: new Date() },
+      });
+    }
+    await db.track.update({
+      where: { id: trackId },
+      data: {
+        status: "complete",
+        s3Key: trackSegmentRecordingKey(sessionId, trackId, segment.id),
+      },
+    });
+    return {
+      trackId,
+      outcome: "recovered_from_recording",
+      partial: false,
+      status: "complete",
+      chunkCount: 0,
+      missingPartNumbers: [],
+    };
+  }
+
   // Cheap, race-free signal: if the client uploaded the final blob before
   // its tab died, we can mark the row complete without touching chunks.
+  // Covers legacy tracks that predate TrackSegment rows.
   if (await trackRecordingExists(sessionId, trackId)) {
     await db.track.update({
       where: { id: trackId },
@@ -172,6 +213,14 @@ export async function recoverTrack(
 
   const recordingKey = trackRecordingKey(sessionId, trackId);
   await putObjectBytes(recordingKey, merged);
+
+  // The stitched chunks belong to the default segment (same id as the track).
+  // Keep its row in sync so later segment completions don't see it as
+  // forever-pending; updateMany tolerates legacy tracks without segment rows.
+  await db.trackSegment.updateMany({
+    where: { id: trackId, trackId },
+    data: { status: "complete", completedAt: new Date() },
+  });
 
   await db.track.update({
     where: { id: trackId },
