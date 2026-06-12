@@ -317,6 +317,34 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ error: "unauthorized" }, { status: 401 });
         }
       }
+
+      // The S3 key below is built from caller-supplied ids, and the PUT
+      // happens before /api/upload/complete validates anything — so the
+      // segment must be proven to exist under the authenticated track before
+      // any writable URL is issued.
+      const existingTrack = await db.track.findUnique({
+        where: { id: trackId },
+        select: { sessionId: true },
+      });
+      if (!existingTrack) {
+        return NextResponse.json({ error: "Track not found" }, { status: 404 });
+      }
+      if (existingTrack.sessionId !== sessionId) {
+        return NextResponse.json({ error: "forbidden" }, { status: 403 });
+      }
+      const existingSegment = await db.trackSegment.findUnique({
+        where: { id: segmentId },
+        select: { trackId: true },
+      });
+      if (!existingSegment) {
+        return NextResponse.json(
+          { error: "Track segment not found" },
+          { status: 404 }
+        );
+      }
+      if (existingSegment.trackId !== trackId) {
+        return NextResponse.json({ error: "forbidden" }, { status: 403 });
+      }
     }
 
     const key =
