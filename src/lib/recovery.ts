@@ -41,6 +41,103 @@ export interface RecoverTrackOptions {
 
 const DEFAULT_MAX_STITCH_BYTES = 512 * 1024 * 1024;
 
+type ChunkPart = {
+  partNumber: number;
+  key: string;
+  size: number;
+  lastModified?: Date;
+};
+
+// Byte-concats a segment's chunk objects into its recording key and marks the
+// segment and track complete. Chunks are preserved in S3 for manual ffmpeg
+// re-stitching. `forcePartial` flags the track partial even without chunk
+// gaps, for when a newer attempt's audio is known to be unrecoverable.
+async function stitchSegmentChunks(input: {
+  sessionId: string;
+  trackId: string;
+  segmentId: string;
+  parts: ChunkPart[];
+  maxStitchBytes?: number;
+  forcePartial: boolean;
+}): Promise<RecoveryResult> {
+  const { sessionId, trackId, segmentId, parts, forcePartial } = input;
+
+  const totalSize = parts.reduce((sum, p) => sum + p.size, 0);
+  const cap = input.maxStitchBytes ?? DEFAULT_MAX_STITCH_BYTES;
+  if (totalSize > cap) {
+    console.warn(
+      `[recovery] track=${trackId} chunks total ${totalSize} bytes exceeds cap ${cap}; marking failed (chunks preserved)`
+    );
+    await db.track.update({
+      where: { id: trackId },
+      data: { status: "failed" },
+    });
+    return {
+      trackId,
+      outcome: "failed_too_large",
+      partial: false,
+      status: "failed",
+      chunkCount: parts.length,
+      missingPartNumbers: [],
+    };
+  }
+
+  const missing: number[] = [];
+  const maxPart = parts[parts.length - 1].partNumber;
+  const present = new Set(parts.map((p) => p.partNumber));
+  for (let i = 0; i <= maxPart; i++) {
+    if (!present.has(i)) missing.push(i);
+  }
+  const partial = missing.length > 0 || forcePartial;
+
+  const chunkBytes: Uint8Array[] = [];
+  for (const part of parts) {
+    chunkBytes.push(await getObjectBytes(part.key));
+  }
+
+  const totalBytes = chunkBytes.reduce((sum, b) => sum + b.byteLength, 0);
+  const merged = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const bytes of chunkBytes) {
+    merged.set(bytes, offset);
+    offset += bytes.byteLength;
+  }
+
+  const recordingKey = trackSegmentRecordingKey(sessionId, trackId, segmentId);
+  await putObjectBytes(recordingKey, merged);
+
+  // Keep the segment row in sync so later segment completions don't see it
+  // as forever-pending; updateMany tolerates legacy tracks without rows.
+  await db.trackSegment.updateMany({
+    where: { id: segmentId, trackId },
+    data: { status: "complete", completedAt: new Date() },
+  });
+
+  await db.track.update({
+    where: { id: trackId },
+    data: {
+      status: "complete",
+      s3Key: recordingKey,
+      partial,
+    },
+  });
+
+  if (partial) {
+    console.warn(
+      `[recovery] track=${trackId} stitched with gaps; missing partNumbers=${missing.join(",")}`
+    );
+  }
+
+  return {
+    trackId,
+    outcome: partial ? "recovered_partial" : "recovered_from_chunks",
+    partial,
+    status: "complete",
+    chunkCount: parts.length,
+    missingPartNumbers: missing,
+  };
+}
+
 // Recovery preserves chunk objects in S3 even after producing recording.webm.
 // The byte-concat stitch is a best-effort fallback; keeping the chunks gives
 // an operator the option to re-stitch manually with ffmpeg if needed.
@@ -71,10 +168,8 @@ export async function recoverTrack(
   const { sessionId } = track;
 
   // Segment-aware pass. Until media stitching lands (#111 stack 4) the newest
-  // segment whose final recording exists is the track's authoritative
-  // artifact; older segments are preserved for the stitcher. Incomplete
-  // non-default segments that only have chunk files are not stitched here —
-  // their chunks stay in S3 for manual ffmpeg recovery.
+  // segment with recoverable audio is the track's authoritative artifact;
+  // older segments are preserved for the stitcher.
   const segments = await db.trackSegment.findMany({
     where: { trackId },
     orderBy: { segmentIndex: "desc" },
@@ -92,18 +187,19 @@ export async function recoverTrack(
       newest.status === "complete" ||
       (await trackSegmentRecordingExists(sessionId, trackId, newest.id));
 
-    if (!newestRecoverable && newest.id !== trackId) {
-      // The newest attempt has no final artifact. Completing the track from
-      // older audio would race a participant who is still recording, so only
-      // fall back once the attempt shows no recent activity (the default
-      // segment is covered by the chunk-stitch gate below).
+    if (!newestRecoverable) {
+      const newestParts = await listTrackSegmentChunkParts(
+        sessionId,
+        trackId,
+        newest.id
+      );
+
+      // The newest attempt has no final artifact. Recovering anything —
+      // stitching its chunks or falling back to older audio — must not race
+      // a participant who is still recording, so check for recent activity
+      // first (segment row age plus chunk upload times).
       const minAgeMs = options.chunkStitchMinAgeMs;
       if (minAgeMs !== undefined && minAgeMs > 0) {
-        const newestParts = await listTrackSegmentChunkParts(
-          sessionId,
-          trackId,
-          newest.id
-        );
         let lastActivityMs = newest.createdAt.getTime();
         for (const part of newestParts) {
           if (part.lastModified) {
@@ -124,7 +220,23 @@ export async function recoverTrack(
           };
         }
       }
-      newerSegmentLost = true;
+
+      if (newestParts.length > 0) {
+        // The tab died after uploading chunks but before the final blob —
+        // those chunks are the newest attempt's authoritative audio.
+        return await stitchSegmentChunks({
+          sessionId,
+          trackId,
+          segmentId: newest.id,
+          parts: newestParts,
+          maxStitchBytes: options.maxStitchBytes,
+          forcePartial: false,
+        });
+      }
+
+      if (newest.id !== trackId) {
+        newerSegmentLost = true;
+      }
     }
 
     const candidates = newestRecoverable ? [newest] : segments.slice(1);
@@ -222,79 +334,13 @@ export async function recoverTrack(
     }
   }
 
-  const totalSize = parts.reduce((sum, p) => sum + p.size, 0);
-  const cap = options.maxStitchBytes ?? DEFAULT_MAX_STITCH_BYTES;
-  if (totalSize > cap) {
-    console.warn(
-      `[recovery] track=${trackId} chunks total ${totalSize} bytes exceeds cap ${cap}; marking failed (chunks preserved)`
-    );
-    await db.track.update({
-      where: { id: trackId },
-      data: { status: "failed" },
-    });
-    return {
-      trackId,
-      outcome: "failed_too_large",
-      partial: false,
-      status: "failed",
-      chunkCount: parts.length,
-      missingPartNumbers: [],
-    };
-  }
-
-  const missing: number[] = [];
-  const maxPart = parts[parts.length - 1].partNumber;
-  const present = new Set(parts.map((p) => p.partNumber));
-  for (let i = 0; i <= maxPart; i++) {
-    if (!present.has(i)) missing.push(i);
-  }
-  const partial = missing.length > 0 || newerSegmentLost;
-
-  const chunkBytes: Uint8Array[] = [];
-  for (const part of parts) {
-    chunkBytes.push(await getObjectBytes(part.key));
-  }
-
-  const totalBytes = chunkBytes.reduce((sum, b) => sum + b.byteLength, 0);
-  const merged = new Uint8Array(totalBytes);
-  let offset = 0;
-  for (const bytes of chunkBytes) {
-    merged.set(bytes, offset);
-    offset += bytes.byteLength;
-  }
-
-  const recordingKey = trackRecordingKey(sessionId, trackId);
-  await putObjectBytes(recordingKey, merged);
-
   // The stitched chunks belong to the default segment (same id as the track).
-  // Keep its row in sync so later segment completions don't see it as
-  // forever-pending; updateMany tolerates legacy tracks without segment rows.
-  await db.trackSegment.updateMany({
-    where: { id: trackId, trackId },
-    data: { status: "complete", completedAt: new Date() },
-  });
-
-  await db.track.update({
-    where: { id: trackId },
-    data: {
-      status: "complete",
-      s3Key: recordingKey,
-      partial,
-    },
-  });
-
-  if (partial) {
-    console.warn(
-      `[recovery] track=${trackId} stitched with gaps; missing partNumbers=${missing.join(",")}`
-    );
-  }
-
-  return {
+  return await stitchSegmentChunks({
+    sessionId,
     trackId,
-    outcome: partial ? "recovered_partial" : "recovered_from_chunks",
-    partial,
-    status: "complete",
-    chunkCount: parts.length,
-    missingPartNumbers: missing,
-  };
+    segmentId: trackId,
+    parts,
+    maxStitchBytes: options.maxStitchBytes,
+    forcePartial: newerSegmentLost,
+  });
 }
