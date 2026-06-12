@@ -350,6 +350,53 @@ describe("logical track segments", () => {
     });
   });
 
+  it("returns a complete track to recording when a new segment starts", async () => {
+    mocks.recordingTakes.set("take-1", {
+      id: "take-1",
+      sessionId: "s1",
+      startedAt: new Date("2026-06-11T00:00:00.000Z"),
+      stoppedAt: null,
+    });
+    mocks.tracks.set("logical-track", {
+      id: "logical-track",
+      sessionId: "s1",
+      takeId: "take-1",
+      participantName: "Alice",
+      participantId: "guest_alice",
+      s3Key: "sessions/s1/tracks/logical-track/recording.webm",
+      status: "complete",
+      durationMs: 1000,
+    });
+    mocks.segments.set("logical-track", {
+      id: "logical-track",
+      trackId: "logical-track",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/logical-track/",
+      status: "complete",
+      durationMs: 1000,
+    });
+    mocks.resolvePrincipal.mockResolvedValue({
+      kind: "guest",
+      sessionId: "s1",
+      name: "Cookie Alice",
+      participantId: "guest_alice",
+    });
+
+    const res = await presignUpload(
+      postJson("/api/upload/presign", {
+        sessionId: "s1",
+        trackId: "new-browser-segment",
+        partNumber: 0,
+        participantName: "Alice",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    // While the re-record is in flight the track must not look finished —
+    // otherwise finalize/downloads serve the previous recording as if final.
+    expect(mocks.tracks.get("logical-track")?.status).toBe("recording");
+  });
+
   it("marks the addressed segment complete when the upload completes", async () => {
     mocks.tracks.set("track-1", {
       id: "track-1",

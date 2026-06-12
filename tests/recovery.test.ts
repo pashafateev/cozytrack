@@ -15,6 +15,7 @@ type TrackSegment = {
   status: string;
   durationMs: number | null;
   completedAt?: Date | null;
+  createdAt: Date;
 };
 
 const trackStore = new Map<string, Track>();
@@ -126,6 +127,36 @@ vi.mock("@/lib/s3", () => ({
           : `sessions/${sessionId}/tracks/${trackId}/segments/${segmentId}/recording.webm`
       )
   ),
+  listTrackSegmentChunkParts: vi.fn(
+    async (sessionId: string, trackId: string, segmentId: string) => {
+      const prefix =
+        segmentId === trackId
+          ? `sessions/${sessionId}/tracks/${trackId}/`
+          : `sessions/${sessionId}/tracks/${trackId}/segments/${segmentId}/`;
+      const pattern = /^(\d+)\.webm$/;
+      const parts: {
+        partNumber: number;
+        key: string;
+        size: number;
+        lastModified?: Date;
+      }[] = [];
+      for (const key of s3Objects.keys()) {
+        if (!key.startsWith(prefix)) continue;
+        const m = pattern.exec(key.slice(prefix.length));
+        if (!m) continue;
+        const partNumber = Number(m[1]);
+        if (partNumber === 9999) continue;
+        parts.push({
+          partNumber,
+          key,
+          size: s3Objects.get(key)?.byteLength ?? 0,
+          lastModified: s3Timestamps.get(key),
+        });
+      }
+      parts.sort((a, b) => a.partNumber - b.partNumber);
+      return parts;
+    }
+  ),
   listTrackChunkParts: vi.fn(async (sessionId: string, trackId: string) => {
     const prefix = `sessions/${sessionId}/tracks/${trackId}/`;
     const pattern = /^(\d+)\.webm$/;
@@ -194,6 +225,7 @@ function seedSegment(overrides: Partial<TrackSegment> = {}): TrackSegment {
     segmentIndex: 0,
     status: "recording",
     durationMs: null,
+    createdAt: new Date(0),
     ...overrides,
   };
   segmentStore.set(s.id, s);
@@ -437,6 +469,100 @@ describe("recoverTrack", () => {
     // The segment row must agree with the track, otherwise a later segment
     // completion would see this one as forever-pending.
     expect(segmentStore.get("t1")?.status).toBe("complete");
+  });
+
+  it("stays pending while the newest segment is a fresh in-flight attempt", async () => {
+    seedTrack({ status: "uploading" });
+    seedSegment({ id: "t1", segmentIndex: 0, status: "complete" });
+    // A re-record just started: row created moments ago, no final blob yet.
+    seedSegment({
+      id: "seg-2",
+      segmentIndex: 1,
+      status: "recording",
+      createdAt: new Date(),
+    });
+    s3Objects.set(
+      "sessions/s1/tracks/t1/recording.webm",
+      new Uint8Array([1, 2, 3])
+    );
+
+    const result = await recoverTrack("t1", { chunkStitchMinAgeMs: 30_000 });
+
+    // Completing from the older segment here would finalize the session with
+    // stale audio while the participant is still recording.
+    expect(result.outcome).toBe("skipped_active");
+    expect(trackStore.get("t1")?.status).toBe("uploading");
+    expect(putCalls).toHaveLength(0);
+  });
+
+  it("stays pending while the newest segment has fresh chunk uploads", async () => {
+    seedTrack({ status: "uploading" });
+    seedSegment({ id: "t1", segmentIndex: 0, status: "complete" });
+    seedSegment({ id: "seg-2", segmentIndex: 1, status: "recording" });
+    s3Objects.set(
+      "sessions/s1/tracks/t1/recording.webm",
+      new Uint8Array([1, 2, 3])
+    );
+    putS3(
+      "sessions/s1/tracks/t1/segments/seg-2/0.webm",
+      new Uint8Array([0xaa]),
+      new Date(Date.now() - 5_000)
+    );
+
+    const result = await recoverTrack("t1", { chunkStitchMinAgeMs: 30_000 });
+
+    expect(result.outcome).toBe("skipped_active");
+    expect(trackStore.get("t1")?.status).toBe("uploading");
+  });
+
+  it("falls back to an older complete segment only once the newest is stale, flagging partial", async () => {
+    seedTrack({ status: "uploading" });
+    seedSegment({ id: "t1", segmentIndex: 0, status: "complete" });
+    // The re-record died long ago without producing a final blob.
+    seedSegment({
+      id: "seg-2",
+      segmentIndex: 1,
+      status: "recording",
+      createdAt: new Date(Date.now() - 600_000),
+    });
+    s3Objects.set(
+      "sessions/s1/tracks/t1/recording.webm",
+      new Uint8Array([1, 2, 3])
+    );
+
+    const result = await recoverTrack("t1", { chunkStitchMinAgeMs: 30_000 });
+
+    expect(result.outcome).toBe("recovered_from_recording");
+    expect(result.partial).toBe(true);
+    // The newest attempt's audio is missing, so the recovered track must be
+    // flagged partial rather than silently passing off the older recording.
+    expect(trackStore.get("t1")).toMatchObject({
+      status: "complete",
+      s3Key: "sessions/s1/tracks/t1/recording.webm",
+      partial: true,
+    });
+  });
+
+  it("flags partial when stitching default chunks under a dead newer segment", async () => {
+    seedTrack({ status: "uploading" });
+    seedSegment({ id: "t1", segmentIndex: 0, status: "recording" });
+    seedSegment({
+      id: "seg-2",
+      segmentIndex: 1,
+      status: "recording",
+      createdAt: new Date(Date.now() - 600_000),
+    });
+    putS3("sessions/s1/tracks/t1/0.webm", new Uint8Array([0xaa]), new Date(0));
+    putS3("sessions/s1/tracks/t1/1.webm", new Uint8Array([0xbb]), new Date(0));
+
+    const result = await recoverTrack("t1", { chunkStitchMinAgeMs: 30_000 });
+
+    expect(result.outcome).toBe("recovered_partial");
+    expect(result.partial).toBe(true);
+    expect(trackStore.get("t1")).toMatchObject({
+      status: "complete",
+      partial: true,
+    });
   });
 
   it("marks failed_too_large when chunk bytes exceed the configured cap", async () => {
