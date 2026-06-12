@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from "vitest";
 
 type Principal =
   | { kind: "host"; participantId?: string }
@@ -622,13 +622,15 @@ describe("logical track segments", () => {
     // A concurrent start for the same participant/take grabbed the counted
     // segmentIndex first — the unique [trackId, segmentIndex] constraint
     // rejects the first create attempt.
-    vi.mocked(db.trackSegment.create).mockImplementationOnce(async () => {
-      const err = new Error(
-        "Unique constraint failed on the fields: (`trackId`,`segmentIndex`)",
-      ) as Error & { code: string };
-      err.code = "P2002";
-      throw err;
-    });
+    (db.trackSegment.create as unknown as Mock).mockImplementationOnce(
+      async () => {
+        const err = new Error(
+          "Unique constraint failed on the fields: (`trackId`,`segmentIndex`)",
+        ) as Error & { code: string };
+        err.code = "P2002";
+        throw err;
+      },
+    );
 
     const res = await presignUpload(
       postJson("/api/upload/presign", {

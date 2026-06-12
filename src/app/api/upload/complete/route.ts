@@ -83,25 +83,34 @@ export async function POST(req: NextRequest) {
     const latestSegment = segments[segments.length - 1];
     const latestSegmentComplete = latestSegment.status === "complete";
 
-    const track = await db.track.update({
-      where: { id: trackId },
-      data: latestSegmentComplete
-        ? {
-            status: "complete",
-            s3Key: trackSegmentRecordingKey(
-              sessionId,
-              trackId,
-              latestSegment.id,
-            ),
-            durationMs: latestSegment.durationMs ?? null,
-            // Reset any premature partial flag from racing recovery — the client
-            // successfully produced and uploaded its merged blob.
-            partial: false,
-          }
-        : {
-            status: "uploading",
-          },
-    });
+    let track;
+    if (latestSegmentComplete) {
+      track = await db.track.update({
+        where: { id: trackId },
+        data: {
+          status: "complete",
+          s3Key: trackSegmentRecordingKey(
+            sessionId,
+            trackId,
+            latestSegment.id,
+          ),
+          durationMs: latestSegment.durationMs ?? null,
+          // Reset any premature partial flag from racing recovery — the client
+          // successfully produced and uploaded its merged blob.
+          partial: false,
+        },
+      });
+    } else {
+      // Conditional write: an older segment's completion can read the
+      // segment list before a concurrent newest-segment completion commits.
+      // It must not demote the track that completion already promoted —
+      // that would strand a fully-complete track in uploading.
+      await db.track.updateMany({
+        where: { id: trackId, status: { not: "complete" } },
+        data: { status: "uploading" },
+      });
+      track = await db.track.findUnique({ where: { id: trackId } });
+    }
 
     // After segment completion, recording.webm is the authoritative artifact
     // for that segment. Chunk files are temporary crash-safety uploads and can

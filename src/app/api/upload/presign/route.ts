@@ -159,17 +159,44 @@ async function ensureLogicalTrackAndSegment(input: {
   }
 
   if (!segment) {
-    const segmentIndex = await db.trackSegment.count({
-      where: { trackId: track.id },
-    });
-    segment = await db.trackSegment.create({
-      data: {
-        id: requestedSegmentId,
-        trackId: track.id,
-        segmentIndex,
-        s3Prefix: trackSegmentPrefix(sessionId, track.id, requestedSegmentId),
-      },
-    });
+    // segmentIndex is allocated by counting under a [trackId, segmentIndex]
+    // unique constraint, so concurrent starts for the same participant/take
+    // can collide; the loser recounts and retries.
+    const maxAttempts = 3;
+    for (let attempt = 1; !segment; attempt++) {
+      const segmentIndex = await db.trackSegment.count({
+        where: { trackId: track.id },
+      });
+      try {
+        segment = await db.trackSegment.create({
+          data: {
+            id: requestedSegmentId,
+            trackId: track.id,
+            segmentIndex,
+            s3Prefix: trackSegmentPrefix(
+              sessionId,
+              track.id,
+              requestedSegmentId,
+            ),
+          },
+        });
+      } catch (error) {
+        if (!isUniqueConstraintError(error) || attempt >= maxAttempts) {
+          throw error;
+        }
+        // A duplicate request may have created this exact segment id rather
+        // than just claiming the index — reuse it instead of retrying.
+        const existing = await db.trackSegment.findUnique({
+          where: { id: requestedSegmentId },
+        });
+        if (existing) {
+          if (existing.trackId !== track.id) {
+            throw new Error("SEGMENT_TRACK_MISMATCH");
+          }
+          segment = existing;
+        }
+      }
+    }
 
     // A new recording attempt is starting on this logical track. If the track
     // already looked finished (or failed), finalize/downloads would keep
