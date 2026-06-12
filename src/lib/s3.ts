@@ -143,7 +143,17 @@ export async function listTrackChunkParts(
 ): Promise<
   { partNumber: number; key: string; size: number; lastModified?: Date }[]
 > {
-  const prefix = trackPrefix(sessionId, trackId);
+  return listTrackSegmentChunkParts(sessionId, trackId, trackId);
+}
+
+export async function listTrackSegmentChunkParts(
+  sessionId: string,
+  trackId: string,
+  segmentId: string
+): Promise<
+  { partNumber: number; key: string; size: number; lastModified?: Date }[]
+> {
+  const prefix = trackSegmentPrefix(sessionId, trackId, segmentId);
   const chunkKeyPattern = /^(\d+)\.webm$/;
   const parts: {
     partNumber: number;

@@ -170,6 +170,17 @@ async function ensureLogicalTrackAndSegment(input: {
         s3Prefix: trackSegmentPrefix(sessionId, track.id, requestedSegmentId),
       },
     });
+
+    // A new recording attempt is starting on this logical track. If the track
+    // already looked finished (or failed), finalize/downloads would keep
+    // serving the previous recording as final while this segment is in
+    // flight — pull it back to recording until completion resolves it.
+    if (track.status === "complete" || track.status === "failed") {
+      track = await db.track.update({
+        where: { id: track.id },
+        data: { status: "recording" },
+      });
+    }
   }
 
   return { track, segment };

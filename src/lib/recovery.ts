@@ -2,6 +2,7 @@ import { db } from "@/lib/db";
 import {
   getObjectBytes,
   listTrackChunkParts,
+  listTrackSegmentChunkParts,
   putObjectBytes,
   trackRecordingExists,
   trackRecordingKey,
@@ -69,42 +70,93 @@ export async function recoverTrack(
 
   const { sessionId } = track;
 
-  // Segment-aware pass, newest first. Until media stitching lands (#111
-  // stack 4) the newest segment whose final recording exists is the track's
-  // authoritative artifact; older segments are preserved for the stitcher.
-  // Incomplete non-default segments that only have chunk files are not
-  // stitched here — their chunks stay in S3 for manual ffmpeg recovery.
+  // Segment-aware pass. Until media stitching lands (#111 stack 4) the newest
+  // segment whose final recording exists is the track's authoritative
+  // artifact; older segments are preserved for the stitcher. Incomplete
+  // non-default segments that only have chunk files are not stitched here —
+  // their chunks stay in S3 for manual ffmpeg recovery.
   const segments = await db.trackSegment.findMany({
     where: { trackId },
     orderBy: { segmentIndex: "desc" },
-    select: { id: true, status: true },
+    select: { id: true, status: true, createdAt: true },
   });
-  for (const segment of segments) {
-    const recovered =
-      segment.status === "complete" ||
-      (await trackSegmentRecordingExists(sessionId, trackId, segment.id));
-    if (!recovered) continue;
-    if (segment.status !== "complete") {
-      await db.trackSegment.updateMany({
-        where: { id: segment.id },
-        data: { status: "complete", completedAt: new Date() },
-      });
+
+  // Set when the newest attempt left no recoverable audio: any recovery from
+  // older sources must be flagged partial instead of passing the older
+  // recording off as the whole take.
+  let newerSegmentLost = false;
+
+  if (segments.length > 0) {
+    const newest = segments[0];
+    const newestRecoverable =
+      newest.status === "complete" ||
+      (await trackSegmentRecordingExists(sessionId, trackId, newest.id));
+
+    if (!newestRecoverable && newest.id !== trackId) {
+      // The newest attempt has no final artifact. Completing the track from
+      // older audio would race a participant who is still recording, so only
+      // fall back once the attempt shows no recent activity (the default
+      // segment is covered by the chunk-stitch gate below).
+      const minAgeMs = options.chunkStitchMinAgeMs;
+      if (minAgeMs !== undefined && minAgeMs > 0) {
+        const newestParts = await listTrackSegmentChunkParts(
+          sessionId,
+          trackId,
+          newest.id
+        );
+        let lastActivityMs = newest.createdAt.getTime();
+        for (const part of newestParts) {
+          if (part.lastModified) {
+            lastActivityMs = Math.max(
+              lastActivityMs,
+              part.lastModified.getTime()
+            );
+          }
+        }
+        if (Date.now() - lastActivityMs < minAgeMs) {
+          return {
+            trackId,
+            outcome: "skipped_active",
+            partial: track.partial,
+            status: track.status,
+            chunkCount: newestParts.length,
+            missingPartNumbers: [],
+          };
+        }
+      }
+      newerSegmentLost = true;
     }
-    await db.track.update({
-      where: { id: trackId },
-      data: {
+
+    const candidates = newestRecoverable ? [newest] : segments.slice(1);
+    for (const segment of candidates) {
+      const recovered =
+        segment === newest ||
+        segment.status === "complete" ||
+        (await trackSegmentRecordingExists(sessionId, trackId, segment.id));
+      if (!recovered) continue;
+      if (segment.status !== "complete") {
+        await db.trackSegment.updateMany({
+          where: { id: segment.id },
+          data: { status: "complete", completedAt: new Date() },
+        });
+      }
+      await db.track.update({
+        where: { id: trackId },
+        data: {
+          status: "complete",
+          s3Key: trackSegmentRecordingKey(sessionId, trackId, segment.id),
+          partial: newerSegmentLost,
+        },
+      });
+      return {
+        trackId,
+        outcome: "recovered_from_recording",
+        partial: newerSegmentLost,
         status: "complete",
-        s3Key: trackSegmentRecordingKey(sessionId, trackId, segment.id),
-      },
-    });
-    return {
-      trackId,
-      outcome: "recovered_from_recording",
-      partial: false,
-      status: "complete",
-      chunkCount: 0,
-      missingPartNumbers: [],
-    };
+        chunkCount: 0,
+        missingPartNumbers: [],
+      };
+    }
   }
 
   // Cheap, race-free signal: if the client uploaded the final blob before
@@ -196,7 +248,7 @@ export async function recoverTrack(
   for (let i = 0; i <= maxPart; i++) {
     if (!present.has(i)) missing.push(i);
   }
-  const partial = missing.length > 0;
+  const partial = missing.length > 0 || newerSegmentLost;
 
   const chunkBytes: Uint8Array[] = [];
   for (const part of parts) {
