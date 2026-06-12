@@ -41,6 +41,16 @@ export async function GET(
       );
     }
 
+    // s3Key is only authoritative for complete tracks. During a re-record it
+    // still points at the previous segment's blob; serving that would pass
+    // the superseded take off as the current artifact.
+    if (track.status !== "complete") {
+      return NextResponse.json(
+        { error: "Track recording is not complete" },
+        { status: 409 }
+      );
+    }
+
     const url = await getPresignedGetUrl(track.s3Key);
 
     return NextResponse.json({ url });

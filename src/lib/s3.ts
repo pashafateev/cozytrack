@@ -85,6 +85,37 @@ export function trackPrefix(sessionId: string, trackId: string): string {
   return `sessions/${sessionId}/tracks/${trackId}/`;
 }
 
+export function trackSegmentPrefix(
+  sessionId: string,
+  trackId: string,
+  segmentId: string
+): string {
+  if (segmentId === trackId) {
+    return trackPrefix(sessionId, trackId);
+  }
+  return `sessions/${sessionId}/tracks/${trackId}/segments/${segmentId}/`;
+}
+
+export function trackSegmentPartKey(
+  sessionId: string,
+  trackId: string,
+  segmentId: string,
+  partNumber: number
+): string {
+  return `${trackSegmentPrefix(sessionId, trackId, segmentId)}${partNumber}.webm`;
+}
+
+export function trackSegmentRecordingKey(
+  sessionId: string,
+  trackId: string,
+  segmentId: string
+): string {
+  if (segmentId === trackId) {
+    return trackRecordingKey(sessionId, trackId);
+  }
+  return `${trackSegmentPrefix(sessionId, trackId, segmentId)}recording.webm`;
+}
+
 export function sessionPrefix(sessionId: string): string {
   return `sessions/${sessionId}/`;
 }
@@ -112,7 +143,17 @@ export async function listTrackChunkParts(
 ): Promise<
   { partNumber: number; key: string; size: number; lastModified?: Date }[]
 > {
-  const prefix = trackPrefix(sessionId, trackId);
+  return listTrackSegmentChunkParts(sessionId, trackId, trackId);
+}
+
+export async function listTrackSegmentChunkParts(
+  sessionId: string,
+  trackId: string,
+  segmentId: string
+): Promise<
+  { partNumber: number; key: string; size: number; lastModified?: Date }[]
+> {
+  const prefix = trackSegmentPrefix(sessionId, trackId, segmentId);
   const chunkKeyPattern = /^(\d+)\.webm$/;
   const parts: {
     partNumber: number;
@@ -155,17 +196,9 @@ export async function listTrackChunkParts(
   return parts;
 }
 
-export async function trackRecordingExists(
-  sessionId: string,
-  trackId: string
-): Promise<boolean> {
+async function objectExists(key: string): Promise<boolean> {
   try {
-    await s3.send(
-      new HeadObjectCommand({
-        Bucket: bucket,
-        Key: trackRecordingKey(sessionId, trackId),
-      })
-    );
+    await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
     return true;
   } catch (error) {
     if (error instanceof NotFound || error instanceof NoSuchKey) {
@@ -180,6 +213,21 @@ export async function trackRecordingExists(
     }
     throw error;
   }
+}
+
+export async function trackRecordingExists(
+  sessionId: string,
+  trackId: string
+): Promise<boolean> {
+  return objectExists(trackRecordingKey(sessionId, trackId));
+}
+
+export async function trackSegmentRecordingExists(
+  sessionId: string,
+  trackId: string,
+  segmentId: string
+): Promise<boolean> {
+  return objectExists(trackSegmentRecordingKey(sessionId, trackId, segmentId));
 }
 
 export async function getObjectBytes(key: string): Promise<Uint8Array> {
@@ -263,9 +311,36 @@ export async function deleteTrackChunks(
   sessionId: string,
   trackId: string
 ): Promise<void> {
+  await deleteTrackSegmentChunksWithLabel(
+    sessionId,
+    trackId,
+    trackId,
+    "Failed to delete track chunks:"
+  );
+}
+
+export async function deleteTrackSegmentChunks(
+  sessionId: string,
+  trackId: string,
+  segmentId: string
+): Promise<void> {
+  await deleteTrackSegmentChunksWithLabel(
+    sessionId,
+    trackId,
+    segmentId,
+    "Failed to delete track segment chunks:"
+  );
+}
+
+async function deleteTrackSegmentChunksWithLabel(
+  sessionId: string,
+  trackId: string,
+  segmentId: string,
+  errorLabel: string
+): Promise<void> {
   try {
-    const prefix = trackPrefix(sessionId, trackId);
-    const finalKey = trackRecordingKey(sessionId, trackId);
+    const prefix = trackSegmentPrefix(sessionId, trackId, segmentId);
+    const finalKey = trackSegmentRecordingKey(sessionId, trackId, segmentId);
     const chunkKeyPattern = /^\d+\.webm$/;
     let continuationToken: string | undefined;
 
@@ -293,6 +368,6 @@ export async function deleteTrackChunks(
         : undefined;
     } while (continuationToken);
   } catch (error) {
-    console.error("Failed to delete track chunks:", error);
+    console.error(errorLabel, error);
   }
 }

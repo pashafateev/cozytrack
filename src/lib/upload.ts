@@ -11,11 +11,18 @@ export interface TrackInitInfo {
   // ISO8601 — the originator's local clock at the moment recording started.
   // Shared across all tracks triggered by the same broadcast.
   sessionStartedAt?: string;
+  segmentId?: string;
+  // The take this recording was broadcast for. Binds a delayed start to its
+  // original take instead of whatever take is active when presign arrives.
+  takeId?: string;
 }
 
 export interface PresignedUploadTarget {
   url: string;
+  key?: string;
   recordingToken?: string;
+  trackId?: string;
+  segmentId?: string;
 }
 
 export async function getPresignedUploadTarget(
@@ -41,6 +48,8 @@ export async function getPresignedUploadTarget(
       participantName,
       ...(trackInit?.deviceInfo ?? {}),
       sessionStartedAt: trackInit?.sessionStartedAt,
+      segmentId: trackInit?.segmentId,
+      takeId: trackInit?.takeId,
     }),
   });
 
@@ -62,8 +71,11 @@ export async function getPresignedUploadTarget(
   const data = await res.json();
   return {
     url: data.url,
+    key: typeof data.key === "string" ? data.key : undefined,
     recordingToken:
       typeof data.recordingToken === "string" ? data.recordingToken : undefined,
+    trackId: typeof data.trackId === "string" ? data.trackId : undefined,
+    segmentId: typeof data.segmentId === "string" ? data.segmentId : undefined,
   };
 }
 
@@ -105,6 +117,7 @@ export async function completeUpload(
   trackId: string,
   durationMs?: number,
   recordingToken?: string,
+  segmentId?: string,
 ): Promise<void> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (recordingToken) {
@@ -114,7 +127,7 @@ export async function completeUpload(
   const res = await fetch("/api/upload/complete", {
     method: "POST",
     headers,
-    body: JSON.stringify({ sessionId, trackId, durationMs }),
+    body: JSON.stringify({ sessionId, trackId, durationMs, segmentId }),
   });
 
   if (!res.ok) {

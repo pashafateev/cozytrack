@@ -25,6 +25,10 @@ export interface RecordingBackupManifest {
   id: string;
   sessionId: string;
   trackId: string;
+  // Physical segment under the logical track. Absent on manifests persisted
+  // before segments existed; those recordings belong to the default segment
+  // (segmentId === trackId).
+  segmentId?: string;
   participantName: string;
   createdAt: string;
   updatedAt: string;
@@ -39,6 +43,7 @@ export interface RecordingBackupManifest {
 export interface StartRecordingBackupInput {
   sessionId: string;
   trackId: string;
+  segmentId?: string;
   participantName: string;
   recordingToken?: string;
 }
@@ -46,6 +51,7 @@ export interface StartRecordingBackupInput {
 export interface RecordingBackupChunkRef {
   sessionId: string;
   trackId: string;
+  segmentId?: string;
   chunkIndex: number;
 }
 
@@ -112,8 +118,11 @@ type StorageManagerWithDirectory = StorageManager & {
   getDirectory?: () => Promise<DirectoryHandleLike>;
 };
 
-export function recordingBackupId(sessionId: string, trackId: string): string {
-  return `${sessionId}:${trackId}`;
+// Backups are scoped per physical segment (one per recording attempt); the
+// default segment shares the logical track's id, so legacy track-keyed ids
+// stay valid.
+export function recordingBackupId(sessionId: string, segmentId: string): string {
+  return `${sessionId}:${segmentId}`;
 }
 
 function nowIso(): string {
@@ -128,8 +137,12 @@ function normalizeError(error: unknown): string {
   return error instanceof Error ? error.message : "Recording backup failed";
 }
 
+function chunkRecordingId(ref: RecordingBackupChunkRef): string {
+  return ref.segmentId ?? ref.trackId;
+}
+
 function chunkStorageKey(ref: RecordingBackupChunkRef): string {
-  return `${ref.sessionId}:${ref.trackId}:${ref.chunkIndex}`;
+  return `${ref.sessionId}:${chunkRecordingId(ref)}:${ref.chunkIndex}`;
 }
 
 function opfsFilename(chunkIndex: number): string {
@@ -183,7 +196,7 @@ export class BrowserRecordingBackupBackend implements RecordingBackupBackend {
     try {
       const opfsDir = await this.getOpfsTrackDirectory(
         ref.sessionId,
-        ref.trackId,
+        chunkRecordingId(ref),
         true,
       );
       if (opfsDir) {
@@ -196,7 +209,7 @@ export class BrowserRecordingBackupBackend implements RecordingBackupBackend {
         await writable.close();
         return {
           storage: "opfs",
-          storageKey: `${OPFS_ROOT}/${safePathSegment(ref.sessionId)}/${safePathSegment(ref.trackId)}/${filename}`,
+          storageKey: `${OPFS_ROOT}/${safePathSegment(ref.sessionId)}/${safePathSegment(chunkRecordingId(ref))}/${filename}`,
         };
       }
     } catch (error) {
@@ -218,7 +231,7 @@ export class BrowserRecordingBackupBackend implements RecordingBackupBackend {
     if (stored.storage === "opfs") {
       const opfsDir = await this.getOpfsTrackDirectory(
         ref.sessionId,
-        ref.trackId,
+        chunkRecordingId(ref),
         false,
       );
       if (opfsDir) {
@@ -248,7 +261,7 @@ export class BrowserRecordingBackupBackend implements RecordingBackupBackend {
       try {
         const opfsDir = await this.getOpfsTrackDirectory(
           ref.sessionId,
-          ref.trackId,
+          chunkRecordingId(ref),
           false,
         );
         await opfsDir?.removeEntry?.(opfsFilename(ref.chunkIndex));
@@ -418,10 +431,12 @@ export class RecordingBackupStore {
     input: StartRecordingBackupInput,
   ): Promise<RecordingBackupManifest> {
     const now = nowIso();
+    const segmentId = input.segmentId ?? input.trackId;
     const manifest: RecordingBackupManifest = {
-      id: recordingBackupId(input.sessionId, input.trackId),
+      id: recordingBackupId(input.sessionId, segmentId),
       sessionId: input.sessionId,
       trackId: input.trackId,
+      segmentId,
       participantName: input.participantName,
       createdAt: now,
       updatedAt: now,
@@ -456,6 +471,7 @@ export class RecordingBackupStore {
     input: {
       sessionId: string;
       trackId: string;
+      segmentId?: string;
       chunkIndex: number;
       chunk: Blob;
       capturedAt?: Date;
@@ -465,13 +481,14 @@ export class RecordingBackupStore {
       {
         sessionId: input.sessionId,
         trackId: input.trackId,
+        segmentId: input.segmentId,
         chunkIndex: input.chunkIndex,
       },
       input.chunk,
     );
 
     return await this.mutateManifest(
-      recordingBackupId(input.sessionId, input.trackId),
+      recordingBackupId(input.sessionId, input.segmentId ?? input.trackId),
       (manifest) => {
         const chunkManifest: RecordingBackupChunkManifest = {
           chunkIndex: input.chunkIndex,
@@ -500,10 +517,11 @@ export class RecordingBackupStore {
     sessionId: string,
     trackId: string,
     chunkIndex: number,
+    segmentId?: string,
   ): Promise<RecordingBackupManifest> {
     return await this.updateChunkUploadState(
       sessionId,
-      trackId,
+      segmentId ?? trackId,
       chunkIndex,
       "uploaded",
     );
@@ -514,10 +532,11 @@ export class RecordingBackupStore {
     trackId: string,
     chunkIndex: number,
     error: unknown,
+    segmentId?: string,
   ): Promise<RecordingBackupManifest> {
     return await this.updateChunkUploadState(
       sessionId,
-      trackId,
+      segmentId ?? trackId,
       chunkIndex,
       "failed",
       normalizeError(error),
@@ -579,6 +598,7 @@ export class RecordingBackupStore {
           {
             sessionId: manifest.sessionId,
             trackId: manifest.trackId,
+            segmentId: manifest.segmentId,
             chunkIndex: chunk.chunkIndex,
           },
           { storage: chunk.storage, storageKey: chunk.storageKey },
@@ -604,6 +624,7 @@ export class RecordingBackupStore {
         {
           sessionId: manifest.sessionId,
           trackId: manifest.trackId,
+          segmentId: manifest.segmentId,
           chunkIndex: chunk.chunkIndex,
         },
         { storage: chunk.storage, storageKey: chunk.storageKey },
@@ -615,13 +636,13 @@ export class RecordingBackupStore {
 
   private async updateChunkUploadState(
     sessionId: string,
-    trackId: string,
+    recordingId: string,
     chunkIndex: number,
     uploadStatus: RecordingBackupUploadStatus,
     error?: string,
   ): Promise<RecordingBackupManifest> {
     return await this.mutateManifest(
-      recordingBackupId(sessionId, trackId),
+      recordingBackupId(sessionId, recordingId),
       (manifest) => {
         const chunk = manifest.chunks.find(
           (item) => item.chunkIndex === chunkIndex,

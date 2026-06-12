@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 type Track = {
   id: string;
   sessionId: string;
+  takeId?: string | null;
   participantName: string;
   participantId?: string | null;
   s3Key: string;
@@ -10,11 +11,22 @@ type Track = {
   durationMs: number | null;
 };
 
+type TrackSegment = {
+  id: string;
+  trackId: string;
+  segmentIndex: number;
+  s3Prefix: string;
+  status: string;
+  durationMs: number | null;
+  completedAt?: Date | null;
+};
+
 const mocks = vi.hoisted(() => ({
   sessions: new Set<string>(),
   tracks: new Map<string, Track>(),
+  segments: new Map<string, TrackSegment>(),
   getPresignedPutUrl: vi.fn(async (key: string) => `https://s3.example/${key}`),
-  deleteTrackChunks: vi.fn(async () => undefined),
+  deleteTrackSegmentChunks: vi.fn(async () => undefined),
   resolvePrincipal: vi.fn(),
 }));
 
@@ -25,11 +37,34 @@ vi.mock("@/lib/db", () => ({
         mocks.sessions.has(id) ? { id } : null,
       ),
     },
+    recordingTake: {
+      findFirst: vi.fn(async () => null),
+    },
     track: {
       findUnique: vi.fn(
         async ({ where: { id } }: { where: { id: string } }) => {
           const track = mocks.tracks.get(id);
           return track ? { ...track } : null;
+        },
+      ),
+      findFirst: vi.fn(
+        async ({
+          where: { sessionId, takeId, participantId },
+        }: {
+          where: {
+            sessionId: string;
+            takeId?: string | null;
+            participantId?: string | null;
+          };
+        }) => {
+          return (
+            Array.from(mocks.tracks.values()).find(
+              (track) =>
+                track.sessionId === sessionId &&
+                track.takeId === takeId &&
+                track.participantId === participantId,
+            ) ?? null
+          );
         },
       ),
       create: vi.fn(async ({ data }: { data: Track }) => {
@@ -52,17 +87,124 @@ vi.mock("@/lib/db", () => ({
           return { ...updated };
         },
       ),
+      updateMany: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: {
+            id: string;
+            status?: { not?: string; in?: string[] };
+            segments?: { none: { segmentIndex: { gt: number } } };
+          };
+          data: Partial<Track>;
+        }) => {
+          const existing = mocks.tracks.get(where.id);
+          if (!existing) return { count: 0 };
+          if (
+            where.status?.not !== undefined &&
+            existing.status === where.status.not
+          ) {
+            return { count: 0 };
+          }
+          if (
+            where.status?.in !== undefined &&
+            !where.status.in.includes(existing.status)
+          ) {
+            return { count: 0 };
+          }
+          const noneGt = where.segments?.none?.segmentIndex?.gt;
+          if (noneGt !== undefined) {
+            const hasNewer = Array.from(mocks.segments.values()).some(
+              (segment) =>
+                segment.trackId === where.id && segment.segmentIndex > noneGt,
+            );
+            if (hasNewer) return { count: 0 };
+          }
+          mocks.tracks.set(where.id, { ...existing, ...data });
+          return { count: 1 };
+        },
+      ),
+    },
+    trackSegment: {
+      count: vi.fn(
+        async ({ where: { trackId } }: { where: { trackId: string } }) =>
+          Array.from(mocks.segments.values()).filter(
+            (segment) => segment.trackId === trackId,
+          ).length,
+      ),
+      findUnique: vi.fn(
+        async ({ where: { id } }: { where: { id: string } }) => {
+          const segment = mocks.segments.get(id);
+          return segment ? { ...segment } : null;
+        },
+      ),
+      findMany: vi.fn(
+        async ({
+          where: { trackId },
+          orderBy,
+        }: {
+          where: { trackId: string };
+          orderBy?: { segmentIndex: "asc" | "desc" };
+        }) => {
+          const list = Array.from(mocks.segments.values())
+            .filter((segment) => segment.trackId === trackId)
+            .sort((a, b) => a.segmentIndex - b.segmentIndex)
+            .map((segment) => ({ ...segment }));
+          if (orderBy?.segmentIndex === "desc") list.reverse();
+          return list;
+        },
+      ),
+      create: vi.fn(async ({ data }: { data: TrackSegment }) => {
+        const segment = { ...data, status: "recording", durationMs: null };
+        mocks.segments.set(segment.id, segment);
+        return { ...segment };
+      }),
+      update: vi.fn(
+        async ({
+          where: { id },
+          data,
+        }: {
+          where: { id: string };
+          data: Partial<TrackSegment>;
+        }) => {
+          const existing = mocks.segments.get(id);
+          if (!existing) throw new Error("segment not found");
+          const updated = { ...existing, ...data };
+          mocks.segments.set(id, updated);
+          return { ...updated };
+        },
+      ),
     },
   },
 }));
 
 vi.mock("@/lib/s3", () => ({
   getPresignedPutUrl: mocks.getPresignedPutUrl,
-  deleteTrackChunks: mocks.deleteTrackChunks,
-  trackPartKey: (sessionId: string, trackId: string, partNumber: number) =>
-    `sessions/${sessionId}/tracks/${trackId}/${partNumber}.webm`,
+  deleteTrackSegmentChunks: mocks.deleteTrackSegmentChunks,
   trackRecordingKey: (sessionId: string, trackId: string) =>
     `sessions/${sessionId}/tracks/${trackId}/recording.webm`,
+  trackSegmentPrefix: (sessionId: string, trackId: string, segmentId: string) =>
+    segmentId === trackId
+      ? `sessions/${sessionId}/tracks/${trackId}/`
+      : `sessions/${sessionId}/tracks/${trackId}/segments/${segmentId}/`,
+  trackSegmentPartKey: (
+    sessionId: string,
+    trackId: string,
+    segmentId: string,
+    partNumber: number,
+  ) =>
+    segmentId === trackId
+      ? `sessions/${sessionId}/tracks/${trackId}/${partNumber}.webm`
+      : `sessions/${sessionId}/tracks/${trackId}/segments/${segmentId}/${partNumber}.webm`,
+  trackSegmentRecordingKey: (
+    sessionId: string,
+    trackId: string,
+    segmentId: string,
+  ) =>
+    segmentId === trackId
+      ? `sessions/${sessionId}/tracks/${trackId}/recording.webm`
+      : `sessions/${sessionId}/tracks/${trackId}/segments/${segmentId}/recording.webm`,
 }));
 
 vi.mock("@/lib/auth", async () => {
@@ -99,6 +241,7 @@ beforeEach(() => {
   vi.stubEnv("AUTH_SECRET", "test-secret-for-recording-upload-token-123456");
   mocks.sessions.clear();
   mocks.tracks.clear();
+  mocks.segments.clear();
   mocks.sessions.add("s1");
   vi.clearAllMocks();
   mocks.resolvePrincipal.mockResolvedValue(null);
@@ -285,6 +428,14 @@ describe("recording upload auth", () => {
       status: "recording",
       durationMs: null,
     });
+    mocks.segments.set("t1", {
+      id: "t1",
+      trackId: "t1",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/t1/",
+      status: "recording",
+      durationMs: null,
+    });
     const recordingToken = await issueRecordingUploadToken("s1", "t1");
 
     const res = await completeUpload(
@@ -300,7 +451,7 @@ describe("recording upload auth", () => {
       status: "complete",
       durationMs: 12345,
     });
-    expect(mocks.deleteTrackChunks).toHaveBeenCalledWith("s1", "t1");
+    expect(mocks.deleteTrackSegmentChunks).toHaveBeenCalledWith("s1", "t1", "t1");
   });
 
   it("forbids completing a track outside the requested session", async () => {
@@ -309,6 +460,14 @@ describe("recording upload auth", () => {
       sessionId: "other-session",
       participantName: "Alice",
       s3Key: "sessions/other-session/tracks/t1/recording.webm",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("t1", {
+      id: "t1",
+      trackId: "t1",
+      segmentIndex: 0,
+      s3Prefix: "sessions/other-session/tracks/t1/",
       status: "recording",
       durationMs: null,
     });

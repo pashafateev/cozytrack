@@ -147,8 +147,13 @@ export function principalParticipantId(principal: Principal): string {
 export async function issueRecordingUploadToken(
   sessionId: string,
   trackId: string,
+  segmentId?: string,
 ): Promise<string> {
-  return await new SignJWT({ sessionId, trackId })
+  return await new SignJWT({
+    sessionId,
+    trackId,
+    ...(segmentId ? { segmentId } : {}),
+  })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuer("cozytrack")
     .setAudience("cozytrack:recording-upload")
@@ -162,6 +167,7 @@ export async function verifyRecordingUploadToken(
   token: string | undefined,
   sessionId: string,
   trackId: string,
+  segmentId?: string,
 ): Promise<RecordingUploadPrincipal | null> {
   if (!token) return null;
   try {
@@ -170,6 +176,16 @@ export async function verifyRecordingUploadToken(
       audience: "cozytrack:recording-upload",
     });
     if (payload.sessionId !== sessionId || payload.trackId !== trackId) {
+      return null;
+    }
+    // Tokens minted before segments existed carry no segment claim and stay
+    // track-scoped. Segment-scoped tokens only authorize the segment they
+    // were issued for — one attempt's token must not write into another's.
+    if (
+      typeof payload.segmentId === "string" &&
+      segmentId !== undefined &&
+      payload.segmentId !== segmentId
+    ) {
       return null;
     }
     return { kind: "recording_upload", sessionId, trackId };
