@@ -51,6 +51,12 @@ vi.mock("@/lib/db", () => ({
       ),
     },
     recordingTake: {
+      findUnique: vi.fn(
+        async ({ where: { id } }: { where: { id: string } }) => {
+          const take = mocks.recordingTakes.get(id);
+          return take ? { ...take } : null;
+        },
+      ),
       findFirst: vi.fn(
         async ({
           where: { sessionId, stoppedAt },
@@ -586,6 +592,72 @@ describe("logical track segments", () => {
         "sessions/s1/tracks/logical-track/segments/browser-seg-2/recording.webm",
       durationMs: 5000,
     });
+  });
+
+  it("binds a stale recording start to its broadcast take, not the newer active take", async () => {
+    // The participant's start was delayed: by the time presign arrives, the
+    // host has stopped take-a and started take-b. The audio belongs to take-a.
+    mocks.recordingTakes.set("take-a", {
+      id: "take-a",
+      sessionId: "s1",
+      startedAt: new Date("2026-06-11T00:00:00.000Z"),
+      stoppedAt: new Date("2026-06-11T00:05:00.000Z"),
+    });
+    mocks.recordingTakes.set("take-b", {
+      id: "take-b",
+      sessionId: "s1",
+      startedAt: new Date("2026-06-11T00:06:00.000Z"),
+      stoppedAt: null,
+    });
+    mocks.resolvePrincipal.mockResolvedValue({
+      kind: "guest",
+      sessionId: "s1",
+      name: "Cookie Alice",
+      participantId: "guest_alice",
+    });
+
+    const res = await presignUpload(
+      postJson("/api/upload/presign", {
+        sessionId: "s1",
+        trackId: "track-1",
+        partNumber: 0,
+        participantName: "Alice",
+        takeId: "take-a",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(mocks.tracks.get("track-1")).toMatchObject({
+      takeId: "take-a",
+    });
+  });
+
+  it("rejects a recording start for a take from another session", async () => {
+    mocks.recordingTakes.set("other-take", {
+      id: "other-take",
+      sessionId: "s2",
+      startedAt: new Date("2026-06-11T00:00:00.000Z"),
+      stoppedAt: null,
+    });
+    mocks.resolvePrincipal.mockResolvedValue({
+      kind: "guest",
+      sessionId: "s1",
+      name: "Cookie Alice",
+      participantId: "guest_alice",
+    });
+
+    const res = await presignUpload(
+      postJson("/api/upload/presign", {
+        sessionId: "s1",
+        trackId: "track-1",
+        partNumber: 0,
+        participantName: "Alice",
+        takeId: "other-take",
+      }),
+    );
+
+    expect(res.status).toBe(403);
+    expect(mocks.tracks.has("track-1")).toBe(false);
   });
 
   it("rejects a chunk presign for a segment belonging to another track", async () => {
