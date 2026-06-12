@@ -68,8 +68,20 @@ jobs:
 
             const docsOnly = names.length > 0 && names.every(isDocsOnlyFile);
             const baseline = !docsOnly;
-            const automaticCodexReview =
+            const codexReviewPathEligible =
               names.length > 0 && !names.every(isAutomaticCodexReviewIgnoredFile);
+            const codexReviewReady =
+              context.payload.pull_request.draft === false &&
+              context.payload.pull_request.user?.type !== "Bot";
+            const automaticCodexReview =
+              codexReviewPathEligible && codexReviewReady;
+            const codexReviewSummary = automaticCodexReview
+              ? "runs automatically; manual via `/codex review`"
+              : !codexReviewPathEligible
+                ? "skipped for docs/metadata/assets-only changes; manual via `/codex review`"
+                : context.payload.pull_request.draft
+                  ? "skipped for draft PRs; manual via `/codex review`"
+                  : "skipped for bot-authored PRs; manual via `/codex review`";
             const serviceIntegration = names.some(touchesServiceIntegration);
             const browserSmoke = names.some(touchesBrowserSmoke);
             const tier = docsOnly
@@ -92,7 +104,7 @@ jobs:
               `| Baseline validation | ${baseline ? "runs" : "skipped for docs-only changes"} |`,
               `| Browser recording smoke | ${browserSmoke ? "runs" : "skipped"} |`,
               `| Prisma and storage integration | ${serviceIntegration ? "runs" : "skipped"} |`,
-              `| Codex review | ${automaticCodexReview ? "runs automatically; manual via `/codex review`" : "skipped for docs/metadata/assets-only changes; manual via `/codex review`"} |`,
+              `| Codex review | ${codexReviewSummary} |`,
               "",
               "<details>",
               "<summary>Changed files</summary>",
