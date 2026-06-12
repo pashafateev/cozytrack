@@ -588,6 +588,87 @@ describe("logical track segments", () => {
     });
   });
 
+  it("rejects a chunk presign for a segment belonging to another track", async () => {
+    mocks.tracks.set("track-a", {
+      id: "track-a",
+      sessionId: "s1",
+      participantName: "Alice",
+      participantId: "guest_alice",
+      s3Key: "sessions/s1/tracks/track-a/recording.webm",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.tracks.set("track-b", {
+      id: "track-b",
+      sessionId: "s1",
+      participantName: "Bob",
+      participantId: "guest_bob",
+      s3Key: "sessions/s1/tracks/track-b/recording.webm",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("track-a", {
+      id: "track-a",
+      trackId: "track-a",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/track-a/",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("seg-b", {
+      id: "seg-b",
+      trackId: "track-b",
+      segmentIndex: 1,
+      s3Prefix: "sessions/s1/tracks/track-b/segments/seg-b/",
+      status: "recording",
+      durationMs: null,
+    });
+    const recordingToken = await issueRecordingUploadToken("s1", "track-a");
+
+    // A track-scoped token must not mint writable URLs for another track's
+    // segment objects.
+    const res = await presignUpload(
+      postJson(
+        "/api/upload/presign",
+        { sessionId: "s1", trackId: "track-a", partNumber: 5, segmentId: "seg-b" },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(res.status).toBe(403);
+  });
+
+  it("rejects a chunk presign for an unknown segment", async () => {
+    mocks.tracks.set("track-a", {
+      id: "track-a",
+      sessionId: "s1",
+      participantName: "Alice",
+      participantId: "guest_alice",
+      s3Key: "sessions/s1/tracks/track-a/recording.webm",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("track-a", {
+      id: "track-a",
+      trackId: "track-a",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/track-a/",
+      status: "recording",
+      durationMs: null,
+    });
+    const recordingToken = await issueRecordingUploadToken("s1", "track-a");
+
+    const res = await presignUpload(
+      postJson(
+        "/api/upload/presign",
+        { sessionId: "s1", trackId: "track-a", partNumber: 5, segmentId: "ghost" },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(res.status).toBe(404);
+  });
+
   it("retries segment creation when a concurrent start claims the index", async () => {
     mocks.recordingTakes.set("take-1", {
       id: "take-1",
