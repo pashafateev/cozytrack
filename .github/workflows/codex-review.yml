@@ -2,7 +2,28 @@ name: Codex review
 
 on:
   pull_request:
-    types: [opened, ready_for_review, reopened]
+    types: [opened, synchronize, ready_for_review, reopened]
+    paths-ignore:
+      - "*.md"
+      - "**/*.md"
+      - "docs/**"
+      - ".gitignore"
+      - ".gitattributes"
+      - ".editorconfig"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE.md"
+      - "*.png"
+      - "**/*.png"
+      - "*.jpg"
+      - "**/*.jpg"
+      - "*.jpeg"
+      - "**/*.jpeg"
+      - "*.gif"
+      - "**/*.gif"
+      - "*.webp"
+      - "**/*.webp"
+      - "*.avif"
+      - "**/*.avif"
   issue_comment:
     types: [created]
 

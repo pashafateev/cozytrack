@@ -1,0 +1,128 @@
+name: PR gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  classify:
+    name: Required PR gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report CI tier
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+              per_page: 100,
+            });
+
+            const names = files.map((file) => file.filename);
+            const code = (value) => `\`${String(value).replaceAll("`", "\\`")}\``;
+            const isDocsOnlyFile = (name) =>
+              name.endsWith(".md") ||
+              name.startsWith("docs/");
+            const isAutomaticCodexReviewIgnoredFile = (name) =>
+              isDocsOnlyFile(name) ||
+              [".gitignore", ".gitattributes", ".editorconfig"].includes(name) ||
+              name.startsWith(".github/ISSUE_TEMPLATE/") ||
+              name === ".github/PULL_REQUEST_TEMPLATE.md" ||
+              /\.(png|jpe?g|gif|webp|avif)$/i.test(name);
+
+            const touchesServiceIntegration = (name) =>
+              name === ".github/workflows/service-integration.yml" ||
+              name === "package.json" ||
+              name === "package-lock.json" ||
+              name === "vitest.integration.config.ts" ||
+              name.startsWith("prisma/") ||
+              name.startsWith("src/app/api/") ||
+              name === "src/lib/api-auth.ts" ||
+              name === "src/lib/auth.ts" ||
+              name === "src/lib/db.ts" ||
+              name === "src/lib/recovery.ts" ||
+              name === "src/lib/s3.ts" ||
+              name === "src/lib/sessions.ts" ||
+              /^src\/lib\/upload.*\.ts$/.test(name) ||
+              name.startsWith("tests/integration/");
+
+            const touchesBrowserSmoke = (name) =>
+              name === ".github/workflows/browser-smoke.yml" ||
+              name === "package.json" ||
+              name === "package-lock.json" ||
+              name === "playwright.config.ts" ||
+              name === "scripts/test-browser-smoke.sh" ||
+              name.startsWith("src/app/session/") ||
+              name.startsWith("src/app/studio/") ||
+              name.startsWith("src/components/") ||
+              name.startsWith("src/hooks/") ||
+              name === "src/lib/recorder.ts" ||
+              name.startsWith("src/lib/transport/") ||
+              name.startsWith("tests/browser/");
+
+            const docsOnly = names.length > 0 && names.every(isDocsOnlyFile);
+            const baseline = !docsOnly;
+            const codexReviewPathEligible =
+              names.length > 0 && !names.every(isAutomaticCodexReviewIgnoredFile);
+            const codexReviewSameRepo =
+              context.payload.pull_request.head.repo?.full_name ===
+              `${context.repo.owner}/${context.repo.repo}`;
+            const codexReviewReady =
+              context.payload.pull_request.draft === false &&
+              context.payload.pull_request.user?.type !== "Bot";
+            const automaticCodexReview =
+              codexReviewPathEligible && codexReviewSameRepo && codexReviewReady;
+            let codexReviewSummary;
+            if (automaticCodexReview) {
+              codexReviewSummary = "runs automatically; manual via `/codex review`";
+            } else if (!codexReviewSameRepo) {
+              codexReviewSummary = "skipped for fork PRs";
+            } else if (!codexReviewPathEligible) {
+              codexReviewSummary =
+                "skipped for docs/metadata/assets-only changes; manual via `/codex review`";
+            } else if (context.payload.pull_request.draft) {
+              codexReviewSummary = "skipped for draft PRs; manual via `/codex review`";
+            } else {
+              codexReviewSummary =
+                "skipped for bot-authored PRs; manual via `/codex review`";
+            }
+            const serviceIntegration = names.some(touchesServiceIntegration);
+            const browserSmoke = names.some(touchesBrowserSmoke);
+            const tier = docsOnly
+              ? "docs-only"
+              : serviceIntegration && browserSmoke
+                ? "full"
+                : serviceIntegration
+                  ? "service"
+                  : browserSmoke
+                    ? "browser"
+                    : "baseline";
+
+            const summary = [
+              "# PR gate",
+              "",
+              `Detected CI tier: **${tier}**`,
+              "",
+              "| Check | Expected behavior |",
+              "| --- | --- |",
+              `| Baseline validation | ${baseline ? "runs" : "skipped for docs-only changes"} |`,
+              `| Browser recording smoke | ${browserSmoke ? "runs" : "skipped"} |`,
+              `| Prisma and storage integration | ${serviceIntegration ? "runs" : "skipped"} |`,
+              `| Codex review | ${codexReviewSummary} |`,
+              "",
+              "<details>",
+              "<summary>Changed files</summary>",
+              "",
+              ...names.map((name) => `- ${code(name)}`),
+              "",
+              "</details>",
+            ].join("\n");
+
+            await core.summary.addRaw(summary).write();
+            core.notice(`Detected CI tier: ${tier}`);

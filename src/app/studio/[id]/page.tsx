@@ -319,13 +319,13 @@ function ParticipantStrip({
   );
 }
 
-// ---------- Invite Cohost Tile ----------
+// ---------- Invite Participant Tile ----------
 
 // Host-only tile. Clicking mints a fresh invite URL via the session's invite
 // endpoint, copies it to the clipboard, and shows a modal so the host can
 // re-copy or see the expiry. Each click mints a new token — we don't persist
 // the last one; it's cheap and keeps the UI stateless across reloads.
-function InviteCohostTile({ sessionId }: { sessionId: string }) {
+function InviteParticipantTile({ sessionId }: { sessionId: string }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [invite, setInvite] = useState<{
@@ -370,7 +370,7 @@ function InviteCohostTile({ sessionId }: { sessionId: string }) {
         disabled={pending}
         className="rounded-lg px-4 py-3.5 flex items-center gap-3 border border-dashed hover:bg-card/40 focus:outline-none focus:ring-1 focus:ring-[var(--border-hi)] transition-colors disabled:opacity-60 disabled:cursor-wait text-left"
         style={{ borderColor: "var(--border)" }}
-        title="Generate a shareable invite link for a cohost"
+        title="Generate a shareable invite link for a participant"
       >
         <div
           className="w-8 h-8 rounded-full flex items-center justify-center border border-dashed"
@@ -379,7 +379,7 @@ function InviteCohostTile({ sessionId }: { sessionId: string }) {
           <IcoPlus size={14} color="var(--text-3)" />
         </div>
         <span className="text-[13px] text-text-2">
-          {pending ? "Generating invite…" : "Invite a cohost…"}
+          {pending ? "Generating invite…" : "Invite a participant…"}
         </span>
         <div className="ml-auto">
           <IcoLink size={13} color="var(--text-3)" />
@@ -499,7 +499,7 @@ function InviteLinkModal({
             id="invite-link-title"
             className="text-lg font-semibold text-text"
           >
-            Invite a cohost
+            Invite a participant
           </h2>
           <p className="text-sm text-text-2 mt-1.5">
             Share this link. Anyone who opens it can join this session; it
@@ -2120,7 +2120,7 @@ function RoomContent({
         <div className="flex-1 p-5 flex flex-col gap-2.5 overflow-y-auto">
           <ParticipantStrip
             name={participantName}
-            role="host"
+            role={isHost ? "host" : "guest"}
             micLabel={selectedMicLabel ?? "Unknown mic"}
             isBuiltIn={selectedMicIsBuiltIn}
             level={audioLevels.get(participantName) ?? 0}
@@ -2143,7 +2143,7 @@ function RoomContent({
 
           {/* Invite tile — host-only. Guests don't see the affordance; the
               underlying API also rejects non-host callers. */}
-          {isHost && <InviteCohostTile sessionId={sessionId} />}
+          {isHost && <InviteParticipantTile sessionId={sessionId} />}
 
           {/* Monitor toggle kept below the strips so it doesn't crowd the meters */}
           <div className="mt-2">
@@ -2323,7 +2323,7 @@ export default function StudioPage() {
   const [monitorVolume, setMonitorVolume] = useState(70);
   const [isMobile, setIsMobile] = useState(false);
   const [mobileWarningDismissed, setMobileWarningDismissed] = useState(false);
-  // Role drives host-only affordances (e.g. the cohost invite tile). Guests
+  // Role drives host-only affordances (e.g. the participant invite tile). Guests
   // arriving via /join have their display name recorded in the cookie; we
   // use it to prefill the prejoin form.
   const [isHost, setIsHost] = useState(false);
