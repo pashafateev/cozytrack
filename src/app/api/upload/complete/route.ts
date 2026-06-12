@@ -74,17 +74,18 @@ export async function POST(req: NextRequest) {
       orderBy: { segmentIndex: "asc" },
       select: { id: true, status: true, durationMs: true },
     });
-    const allSegmentsComplete = segments.every(
-      (segment) => segment.status === "complete",
-    );
     // Interim semantics until media stitching lands (#111 stack 4): the latest
     // segment's recording is the track's authoritative artifact. Earlier
     // segments stay in S3 and in TrackSegment rows for the future stitcher.
+    // The track is done once its newest segment is — older incomplete
+    // segments are superseded attempts (sequential per participant) and must
+    // not park the track in uploading; only a newer in-flight segment may.
     const latestSegment = segments[segments.length - 1];
+    const latestSegmentComplete = latestSegment.status === "complete";
 
     const track = await db.track.update({
       where: { id: trackId },
-      data: allSegmentsComplete
+      data: latestSegmentComplete
         ? {
             status: "complete",
             s3Key: trackSegmentRecordingKey(
