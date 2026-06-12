@@ -124,7 +124,7 @@ describe("recording backup store", () => {
       "track-1",
       9999,
       undefined,
-      undefined,
+      { segmentId: "track-1" },
       "recording-token",
     );
     expect(uploadChunk).toHaveBeenCalledWith(
@@ -138,11 +138,112 @@ describe("recording backup store", () => {
       "track-1",
       undefined,
       "recording-token",
+      "track-1",
     );
     expect(retried.state).toBe("available");
     await expect(store.buildRecordingBlob(manifest.id)).resolves.toBeInstanceOf(
       Blob,
     );
+  });
+
+  it("retries a non-default segment upload to that segment, not the default key", async () => {
+    const store = new RecordingBackupStore(
+      new MemoryRecordingBackupBackend(true),
+    );
+    const manifest = await store.startBackup({
+      sessionId: "session-1",
+      trackId: "logical-track",
+      segmentId: "seg-2",
+      participantName: "Alice",
+      recordingToken: "recording-token",
+    });
+
+    expect(manifest).toMatchObject({
+      id: "session-1:seg-2",
+      trackId: "logical-track",
+      segmentId: "seg-2",
+    });
+
+    await store.saveChunk({
+      sessionId: "session-1",
+      trackId: "logical-track",
+      segmentId: "seg-2",
+      chunkIndex: 0,
+      chunk: blob("second-take"),
+    });
+    const failed = await store.markBackupFailed(
+      manifest.id,
+      new Error("final upload failed"),
+    );
+
+    const getPresignedUploadUrl = vi
+      .fn()
+      .mockResolvedValue("https://s3.example/final");
+    const uploadChunk = vi.fn().mockResolvedValue(undefined);
+    const completeUpload = vi.fn().mockResolvedValue(undefined);
+
+    await retryLocalRecordingBackupUpload(failed, {
+      backupStore: store,
+      getPresignedUploadUrl,
+      uploadChunk,
+      completeUpload,
+    });
+
+    expect(getPresignedUploadUrl).toHaveBeenCalledWith(
+      "session-1",
+      "logical-track",
+      9999,
+      undefined,
+      { segmentId: "seg-2" },
+      "recording-token",
+    );
+    expect(completeUpload).toHaveBeenCalledWith(
+      "session-1",
+      "logical-track",
+      undefined,
+      "recording-token",
+      "seg-2",
+    );
+  });
+
+  it("keeps per-segment backups separate for the same logical track", async () => {
+    const store = new RecordingBackupStore(
+      new MemoryRecordingBackupBackend(true),
+    );
+
+    const firstTake = await store.startBackup({
+      sessionId: "session-1",
+      trackId: "logical-track",
+      participantName: "Alice",
+    });
+    await store.saveChunk({
+      sessionId: "session-1",
+      trackId: "logical-track",
+      chunkIndex: 0,
+      chunk: blob("take-one"),
+    });
+
+    const secondTake = await store.startBackup({
+      sessionId: "session-1",
+      trackId: "logical-track",
+      segmentId: "seg-2",
+      participantName: "Alice",
+    });
+    await store.saveChunk({
+      sessionId: "session-1",
+      trackId: "logical-track",
+      segmentId: "seg-2",
+      chunkIndex: 0,
+      chunk: blob("take-two"),
+    });
+
+    // Re-recording the same logical track must not clobber the previous
+    // attempt's local backup — it may still be pending a retry.
+    expect(secondTake.id).not.toBe(firstTake.id);
+    const firstBlob = await store.buildRecordingBlob(firstTake.id);
+    expect(await firstBlob.text()).toBe("take-one");
+    const secondBlob = await store.buildRecordingBlob(secondTake.id);
+    expect(await secondBlob.text()).toBe("take-two");
   });
 
   it("clears local chunks only for explicit user or verified-upload cleanup", async () => {

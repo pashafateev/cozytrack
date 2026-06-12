@@ -127,6 +127,22 @@ vi.mock("@/lib/db", () => ({
           return segment ? { ...segment } : null;
         },
       ),
+      findMany: vi.fn(
+        async ({
+          where: { trackId },
+          orderBy,
+        }: {
+          where: { trackId: string };
+          orderBy?: { segmentIndex: "asc" | "desc" };
+        }) => {
+          const list = Array.from(mocks.segments.values())
+            .filter((segment) => segment.trackId === trackId)
+            .sort((a, b) => a.segmentIndex - b.segmentIndex)
+            .map((segment) => ({ ...segment }));
+          if (orderBy?.segmentIndex === "desc") list.reverse();
+          return list;
+        },
+      ),
       create: vi.fn(async ({ data }: { data: TrackSegment }) => {
         const segment = { ...data, status: "recording", durationMs: null };
         mocks.segments.set(segment.id, segment);
@@ -376,5 +392,134 @@ describe("logical track segments", () => {
       "track-1",
       "track-1",
     );
+  });
+
+  it("promotes the logical track to the latest segment once all segments complete", async () => {
+    mocks.tracks.set("logical-track", {
+      id: "logical-track",
+      sessionId: "s1",
+      participantName: "Alice",
+      participantId: "guest_alice",
+      s3Key: "sessions/s1/tracks/logical-track/recording.webm",
+      status: "complete",
+      durationMs: 1000,
+    });
+    mocks.segments.set("logical-track", {
+      id: "logical-track",
+      trackId: "logical-track",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/logical-track/",
+      status: "complete",
+      durationMs: 1000,
+    });
+    mocks.segments.set("browser-seg-2", {
+      id: "browser-seg-2",
+      trackId: "logical-track",
+      segmentIndex: 1,
+      s3Prefix: "sessions/s1/tracks/logical-track/segments/browser-seg-2/",
+      status: "recording",
+      durationMs: null,
+    });
+    const recordingToken = await issueRecordingUploadToken("s1", "logical-track");
+
+    const res = await completeUpload(
+      postJson(
+        "/api/upload/complete",
+        {
+          sessionId: "s1",
+          trackId: "logical-track",
+          segmentId: "browser-seg-2",
+          durationMs: 5000,
+        },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    expect(mocks.segments.get("browser-seg-2")).toMatchObject({
+      status: "complete",
+      durationMs: 5000,
+    });
+    // The logical track must not be demoted back to uploading — with every
+    // segment complete it stays finalizable and serves the newest audio.
+    expect(mocks.tracks.get("logical-track")).toMatchObject({
+      status: "complete",
+      s3Key:
+        "sessions/s1/tracks/logical-track/segments/browser-seg-2/recording.webm",
+      durationMs: 5000,
+    });
+    expect(mocks.deleteTrackSegmentChunks).toHaveBeenCalledWith(
+      "s1",
+      "logical-track",
+      "browser-seg-2",
+    );
+  });
+
+  it("keeps the logical track pending until every segment completes", async () => {
+    mocks.tracks.set("logical-track", {
+      id: "logical-track",
+      sessionId: "s1",
+      participantName: "Alice",
+      participantId: "guest_alice",
+      s3Key: "sessions/s1/tracks/logical-track/recording.webm",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("logical-track", {
+      id: "logical-track",
+      trackId: "logical-track",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/logical-track/",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("browser-seg-2", {
+      id: "browser-seg-2",
+      trackId: "logical-track",
+      segmentIndex: 1,
+      s3Prefix: "sessions/s1/tracks/logical-track/segments/browser-seg-2/",
+      status: "recording",
+      durationMs: null,
+    });
+    const recordingToken = await issueRecordingUploadToken("s1", "logical-track");
+
+    const secondSegmentRes = await completeUpload(
+      postJson(
+        "/api/upload/complete",
+        {
+          sessionId: "s1",
+          trackId: "logical-track",
+          segmentId: "browser-seg-2",
+          durationMs: 5000,
+        },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(secondSegmentRes.status).toBe(200);
+    expect(mocks.tracks.get("logical-track")?.status).toBe("uploading");
+
+    const defaultSegmentRes = await completeUpload(
+      postJson(
+        "/api/upload/complete",
+        {
+          sessionId: "s1",
+          trackId: "logical-track",
+          segmentId: "logical-track",
+          durationMs: 1000,
+        },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(defaultSegmentRes.status).toBe(200);
+    // Out-of-order completion: the default segment finished last, but the
+    // track must still surface the latest segment's recording.
+    expect(mocks.tracks.get("logical-track")).toMatchObject({
+      status: "complete",
+      s3Key:
+        "sessions/s1/tracks/logical-track/segments/browser-seg-2/recording.webm",
+      durationMs: 5000,
+    });
   });
 });

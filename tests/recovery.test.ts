@@ -8,7 +8,17 @@ type Track = {
   partial: boolean;
 };
 
+type TrackSegment = {
+  id: string;
+  trackId: string;
+  segmentIndex: number;
+  status: string;
+  durationMs: number | null;
+  completedAt?: Date | null;
+};
+
 const trackStore = new Map<string, Track>();
+const segmentStore = new Map<string, TrackSegment>();
 const s3Objects = new Map<string, Uint8Array>();
 const s3Timestamps = new Map<string, Date>();
 const putCalls: { key: string; bytes: Uint8Array }[] = [];
@@ -55,6 +65,38 @@ vi.mock("@/lib/db", () => ({
         }
       ),
     },
+    trackSegment: {
+      findMany: vi.fn(
+        async ({
+          where: { trackId },
+          orderBy,
+        }: {
+          where: { trackId: string };
+          orderBy?: { segmentIndex: "asc" | "desc" };
+        }) => {
+          const list = Array.from(segmentStore.values())
+            .filter((segment) => segment.trackId === trackId)
+            .sort((a, b) => a.segmentIndex - b.segmentIndex)
+            .map((segment) => structuredClone(segment));
+          if (orderBy?.segmentIndex === "desc") list.reverse();
+          return list;
+        }
+      ),
+      updateMany: vi.fn(
+        async ({
+          where: { id },
+          data,
+        }: {
+          where: { id: string };
+          data: Partial<TrackSegment>;
+        }) => {
+          const existing = segmentStore.get(id);
+          if (!existing) return { count: 0 };
+          segmentStore.set(id, { ...existing, ...data });
+          return { count: 1 };
+        }
+      ),
+    },
   },
 }));
 
@@ -67,6 +109,22 @@ vi.mock("@/lib/s3", () => ({
     s3Objects.has(
       `sessions/${sessionId}/tracks/${trackId}/recording.webm`
     )
+  ),
+  trackSegmentRecordingKey: (
+    sessionId: string,
+    trackId: string,
+    segmentId: string
+  ) =>
+    segmentId === trackId
+      ? `sessions/${sessionId}/tracks/${trackId}/recording.webm`
+      : `sessions/${sessionId}/tracks/${trackId}/segments/${segmentId}/recording.webm`,
+  trackSegmentRecordingExists: vi.fn(
+    async (sessionId: string, trackId: string, segmentId: string) =>
+      s3Objects.has(
+        segmentId === trackId
+          ? `sessions/${sessionId}/tracks/${trackId}/recording.webm`
+          : `sessions/${sessionId}/tracks/${trackId}/segments/${segmentId}/recording.webm`
+      )
   ),
   listTrackChunkParts: vi.fn(async (sessionId: string, trackId: string) => {
     const prefix = `sessions/${sessionId}/tracks/${trackId}/`;
@@ -109,6 +167,7 @@ import { recoverTrack } from "@/lib/recovery";
 
 beforeEach(() => {
   trackStore.clear();
+  segmentStore.clear();
   s3Objects.clear();
   s3Timestamps.clear();
   putCalls.length = 0;
@@ -126,6 +185,19 @@ function seedTrack(overrides: Partial<Track> = {}): Track {
   };
   trackStore.set(t.id, t);
   return t;
+}
+
+function seedSegment(overrides: Partial<TrackSegment> = {}): TrackSegment {
+  const s: TrackSegment = {
+    id: "t1",
+    trackId: "t1",
+    segmentIndex: 0,
+    status: "recording",
+    durationMs: null,
+    ...overrides,
+  };
+  segmentStore.set(s.id, s);
+  return s;
 }
 
 describe("recoverTrack", () => {
@@ -304,6 +376,67 @@ describe("recoverTrack", () => {
 
     expect(result.outcome).toBe("recovered_from_recording");
     expect(trackStore.get("t1")?.status).toBe("complete");
+  });
+
+  it("recovers a stuck multi-segment track to the latest complete segment", async () => {
+    seedTrack({ status: "uploading" });
+    seedSegment({ id: "t1", segmentIndex: 0, status: "complete" });
+    seedSegment({ id: "seg-2", segmentIndex: 1, status: "complete", durationMs: 5000 });
+    s3Objects.set(
+      "sessions/s1/tracks/t1/recording.webm",
+      new Uint8Array([1, 2, 3])
+    );
+    s3Objects.set(
+      "sessions/s1/tracks/t1/segments/seg-2/recording.webm",
+      new Uint8Array([4, 5, 6])
+    );
+
+    const result = await recoverTrack("t1");
+
+    expect(result.outcome).toBe("recovered_from_recording");
+    // Latest-wins: the newest segment's audio is the authoritative artifact,
+    // not the default segment's older recording.
+    expect(trackStore.get("t1")).toMatchObject({
+      status: "complete",
+      s3Key: "sessions/s1/tracks/t1/segments/seg-2/recording.webm",
+    });
+    expect(putCalls).toHaveLength(0);
+  });
+
+  it("completes from a non-default segment recording when only it exists", async () => {
+    seedTrack({ status: "uploading" });
+    seedSegment({ id: "t1", segmentIndex: 0, status: "recording" });
+    seedSegment({ id: "seg-2", segmentIndex: 1, status: "uploading" });
+    // The client uploaded the segment blob but died before calling complete.
+    s3Objects.set(
+      "sessions/s1/tracks/t1/segments/seg-2/recording.webm",
+      new Uint8Array([4, 5, 6])
+    );
+
+    const result = await recoverTrack("t1");
+
+    expect(result.outcome).toBe("recovered_from_recording");
+    expect(trackStore.get("t1")).toMatchObject({
+      status: "complete",
+      s3Key: "sessions/s1/tracks/t1/segments/seg-2/recording.webm",
+    });
+    expect(segmentStore.get("seg-2")?.status).toBe("complete");
+    expect(putCalls).toHaveLength(0);
+  });
+
+  it("marks the default segment complete when stitching default chunks", async () => {
+    seedTrack();
+    seedSegment({ id: "t1", segmentIndex: 0, status: "recording" });
+    s3Objects.set("sessions/s1/tracks/t1/0.webm", new Uint8Array([0xaa]));
+    s3Objects.set("sessions/s1/tracks/t1/1.webm", new Uint8Array([0xbb]));
+
+    const result = await recoverTrack("t1");
+
+    expect(result.outcome).toBe("recovered_from_chunks");
+    expect(trackStore.get("t1")?.status).toBe("complete");
+    // The segment row must agree with the track, otherwise a later segment
+    // completion would see this one as forever-pending.
+    expect(segmentStore.get("t1")?.status).toBe("complete");
   });
 
   it("marks failed_too_large when chunk bytes exceed the configured cap", async () => {
