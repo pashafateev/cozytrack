@@ -16,6 +16,10 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_DECODE_SAMPLE_RATE = 48000;
 const DEFAULT_ANALYSIS_SAMPLE_RATE = 8000;
 const DEFAULT_MAX_SEARCH_MS = 5000;
+// Normalized-correlation thresholds tuned empirically against the WebM/Opus
+// round-trip fixture (clears ~0.55); >= DETECTED_CONFIDENCE counts as a match,
+// the band down to LOW_CONFIDENCE is reported as "low_confidence", and below
+// that is treated as "missing".
 const DETECTED_CONFIDENCE = 0.45;
 const LOW_CONFIDENCE = 0.35;
 
@@ -46,7 +50,7 @@ export type DetectSyncMarkerOptions = {
   lowConfidence?: number;
 };
 
-function markerInfo(): SyncMarkerDetectionResult["marker"] {
+export function markerInfo(): SyncMarkerDetectionResult["marker"] {
   return {
     durationMs: SYNC_MARKER_DURATION_MS,
     startFrequencyHz: SYNC_MARKER_START_FREQUENCY_HZ,
@@ -149,7 +153,22 @@ export function detectSyncMarkerInPcm(
     options.detectedConfidence ?? DETECTED_CONFIDENCE;
   const lowConfidence = options.lowConfidence ?? LOW_CONFIDENCE;
 
-  const analysisSamples = resampleLinear(samples, sampleRate, analysisSampleRate);
+  // Detection only searches the first `maxSearchMs`, so cap the input to that
+  // window (plus one marker length) before resampling to avoid processing the
+  // entire recording for long tracks.
+  const searchWindowMs = maxSearchMs + SYNC_MARKER_DURATION_MS;
+  const neededSourceSamples =
+    Math.ceil((searchWindowMs / 1000) * sampleRate) + 1;
+  const windowedSamples =
+    samples.length > neededSourceSamples
+      ? samples.subarray(0, neededSourceSamples)
+      : samples;
+
+  const analysisSamples = resampleLinear(
+    windowedSamples,
+    sampleRate,
+    analysisSampleRate,
+  );
   const template = generateSyncMarkerTemplate(analysisSampleRate);
   if (analysisSamples.length < template.length) return emptyResult("missing");
 
@@ -209,12 +228,17 @@ export function detectSyncMarkerInPcm(
 export async function decodeWebmToPcm(
   bytes: Uint8Array,
   sampleRate = DEFAULT_DECODE_SAMPLE_RATE,
+  maxDurationMs?: number,
 ): Promise<Float32Array> {
   const dir = await mkdtemp(join(tmpdir(), "cozytrack-marker-decode-"));
   try {
     const inputPath = join(dir, "input.webm");
     const outputPath = join(dir, "output.f32le");
     await writeFile(inputPath, bytes);
+    const durationArgs =
+      maxDurationMs && maxDurationMs > 0
+        ? ["-t", (maxDurationMs / 1000).toFixed(3)]
+        : [];
     await execFileAsync(
       process.env.FFMPEG_PATH ?? ffmpegStaticPath ?? "ffmpeg",
       [
@@ -224,6 +248,7 @@ export async function decodeWebmToPcm(
         "error",
         "-i",
         inputPath,
+        ...durationArgs,
         "-ac",
         "1",
         "-ar",
@@ -248,6 +273,14 @@ export async function detectSyncMarkerInWebmBytes(
   bytes: Uint8Array,
   options: DetectSyncMarkerOptions = {},
 ): Promise<SyncMarkerDetectionResult> {
-  const samples = await decodeWebmToPcm(bytes, DEFAULT_DECODE_SAMPLE_RATE);
+  const maxSearchMs = options.maxSearchMs ?? DEFAULT_MAX_SEARCH_MS;
+  // Only decode the window detection actually searches (plus one marker length
+  // of slack), so long recordings don't fill /tmp or blow up memory.
+  const maxDecodeMs = maxSearchMs + SYNC_MARKER_DURATION_MS;
+  const samples = await decodeWebmToPcm(
+    bytes,
+    DEFAULT_DECODE_SAMPLE_RATE,
+    maxDecodeMs,
+  );
   return detectSyncMarkerInPcm(samples, DEFAULT_DECODE_SAMPLE_RATE, options);
 }

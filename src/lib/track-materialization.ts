@@ -7,14 +7,9 @@ import ffmpegStaticPath from "ffmpeg-static";
 import { db } from "@/lib/db";
 import {
   detectSyncMarkerInWebmBytes,
+  markerInfo,
   type SyncMarkerDetectionResult,
 } from "@/lib/sync-marker-detection";
-import {
-  SYNC_MARKER_DURATION_MS,
-  SYNC_MARKER_END_FREQUENCY_HZ,
-  SYNC_MARKER_GAIN,
-  SYNC_MARKER_START_FREQUENCY_HZ,
-} from "@/lib/sync-marker";
 import {
   getObjectBytes,
   putObjectBytes,
@@ -200,14 +195,56 @@ async function markSyncMarkerSourceMissing(segmentId: string) {
       detectedAtMs: null,
       detectedAtSamples: null,
       confidence: 0,
-      marker: {
-        durationMs: SYNC_MARKER_DURATION_MS,
-        startFrequencyHz: SYNC_MARKER_START_FREQUENCY_HZ,
-        endFrequencyHz: SYNC_MARKER_END_FREQUENCY_HZ,
-        gain: SYNC_MARKER_GAIN,
-      },
+      marker: markerInfo(),
     },
   });
+}
+
+// Detection decodes each segment with ffmpeg, so bound how many run at once to
+// avoid spiking memory and /tmp usage on tracks with many marker segments.
+const SYNC_MARKER_DETECTION_CONCURRENCY = 2;
+
+async function detectAndPersistOneSegment(input: {
+  sessionId: string;
+  trackId: string;
+  segment: CompletedSegment;
+  sourceKey: string;
+  detectSyncMarker: (input: DetectSyncMarkerInput) => Promise<SyncMarkerDetectionResult>;
+}) {
+  const { sessionId, trackId, segment, sourceKey, detectSyncMarker } = input;
+  try {
+    const result = await detectSyncMarker({
+      sessionId,
+      trackId,
+      segmentId: segment.id,
+      sourceKey,
+    });
+    await persistSegmentSyncMarkerDetection({ segmentId: segment.id, result });
+  } catch (error) {
+    console.error(
+      `[sync-marker] segment=${segment.id} detection failed:`,
+      error,
+    );
+    // Best-effort: record the failure, but never let a metadata write reject
+    // the materialization that already completed successfully.
+    try {
+      await persistSegmentSyncMarkerDetection({
+        segmentId: segment.id,
+        result: {
+          status: "decode_failed",
+          detectedAtMs: null,
+          detectedAtSamples: null,
+          confidence: 0,
+          marker: markerInfo(),
+        },
+      });
+    } catch (persistError) {
+      console.error(
+        `[sync-marker] segment=${segment.id} failed to persist decode_failed status:`,
+        persistError,
+      );
+    }
+  }
 }
 
 async function detectAndPersistSyncMarkers(input: {
@@ -218,6 +255,8 @@ async function detectAndPersistSyncMarkers(input: {
   deps: MaterializeTrackDeps;
 }) {
   const { sessionId, trackId, segments, sourceKeys, deps } = input;
+  // `sourceKeys` is built in lockstep with `segments` (same order/length) by the
+  // caller, so a positional zip is the correct segment -> recording mapping.
   const markerSegments = segments
     .map((segment, index) => ({ segment, sourceKey: sourceKeys[index] }))
     .filter(
@@ -232,42 +271,27 @@ async function detectAndPersistSyncMarkers(input: {
     ((detectInput: DetectSyncMarkerInput) =>
       detectSegmentSyncMarker(detectInput, { readObjectBytes }));
 
-  await Promise.all(
-    markerSegments.map(async ({ segment, sourceKey }) => {
-      try {
-        const result = await detectSyncMarker({
+  for (
+    let start = 0;
+    start < markerSegments.length;
+    start += SYNC_MARKER_DETECTION_CONCURRENCY
+  ) {
+    const batch = markerSegments.slice(
+      start,
+      start + SYNC_MARKER_DETECTION_CONCURRENCY,
+    );
+    await Promise.all(
+      batch.map(({ segment, sourceKey }) =>
+        detectAndPersistOneSegment({
           sessionId,
           trackId,
-          segmentId: segment.id,
+          segment,
           sourceKey,
-        });
-        await persistSegmentSyncMarkerDetection({
-          segmentId: segment.id,
-          result,
-        });
-      } catch (error) {
-        console.error(
-          `[sync-marker] segment=${segment.id} detection failed:`,
-          error,
-        );
-        await persistSegmentSyncMarkerDetection({
-          segmentId: segment.id,
-          result: {
-            status: "decode_failed",
-            detectedAtMs: null,
-            detectedAtSamples: null,
-            confidence: 0,
-            marker: {
-              durationMs: SYNC_MARKER_DURATION_MS,
-              startFrequencyHz: SYNC_MARKER_START_FREQUENCY_HZ,
-              endFrequencyHz: SYNC_MARKER_END_FREQUENCY_HZ,
-              gain: SYNC_MARKER_GAIN,
-            },
-          },
-        });
-      }
-    }),
-  );
+          detectSyncMarker,
+        }),
+      ),
+    );
+  }
 }
 
 async function markTrackFailed(input: {
@@ -482,13 +506,23 @@ export async function materializeTrack(
     };
   }
 
-  await detectAndPersistSyncMarkers({
-    sessionId: track.sessionId,
-    trackId,
-    segments: sourceSegments,
-    sourceKeys,
-    deps,
-  });
+  // Sync-marker detection is secondary metadata. The track is already marked
+  // complete above, so a detection failure must never reject materialization
+  // (which would turn a successful upload into a 500 and skip route cleanup).
+  try {
+    await detectAndPersistSyncMarkers({
+      sessionId: track.sessionId,
+      trackId,
+      segments: sourceSegments,
+      sourceKeys,
+      deps,
+    });
+  } catch (error) {
+    console.error(
+      `[sync-marker] track=${trackId} detection pass failed:`,
+      error,
+    );
+  }
 
   return {
     trackId,
