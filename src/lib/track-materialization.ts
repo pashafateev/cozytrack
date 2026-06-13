@@ -180,12 +180,6 @@ export async function materializeTrack(
     return await markTrackFailed(trackId, finalKey, 0);
   }
 
-  const readObjectBytes = deps.readObjectBytes ?? getObjectBytes;
-  const writeObjectBytes = deps.writeObjectBytes ?? putObjectBytes;
-  const remuxSegments =
-    deps.remuxSegments ??
-    ((input: RemuxSegmentsInput) =>
-      remuxWebmSegments(input, { readObjectBytes, writeObjectBytes }));
   const sourceKeys = segmentRecordingKeys(
     track.sessionId,
     trackId,
@@ -196,9 +190,17 @@ export async function materializeTrack(
     if (sourceKeys.length === 1) {
       const [sourceKey] = sourceKeys;
       if (sourceKey !== finalKey) {
+        const readObjectBytes = deps.readObjectBytes ?? getObjectBytes;
+        const writeObjectBytes = deps.writeObjectBytes ?? putObjectBytes;
         await writeObjectBytes(finalKey, await readObjectBytes(sourceKey));
       }
     } else {
+      const readObjectBytes = deps.readObjectBytes ?? getObjectBytes;
+      const writeObjectBytes = deps.writeObjectBytes ?? putObjectBytes;
+      const remuxSegments =
+        deps.remuxSegments ??
+        ((input: RemuxSegmentsInput) =>
+          remuxWebmSegments(input, { readObjectBytes, writeObjectBytes }));
       await remuxSegments({ sourceKeys, outputKey: finalKey });
     }
   } catch (error) {
