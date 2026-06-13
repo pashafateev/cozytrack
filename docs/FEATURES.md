@@ -1,6 +1,6 @@
 # Cozytrack Roadmap
 
-This roadmap was reconciled against every GitHub issue that was open on June 11, 2026.
+This roadmap was reconciled against every GitHub issue that was open on June 13, 2026.
 
 - Every currently open issue appears exactly once as a primary roadmap entry below.
 - No open issues are explicitly excluded right now.
@@ -14,6 +14,11 @@ This roadmap was reconciled against every GitHub issue that was open on June 11,
 - #6 Chunk-upload failure observability: surface a lightweight failure count or warning signal from the client into upload completion so chunk-loss events become debuggable without changing final-artifact authority.
 - #15 Direct-monitor recommendation: detect likely audio interfaces, default software monitoring off for those users, and steer them toward hardware direct monitoring.
 - #20 Mobile recording investigation: gather real iOS and Android samples, inspect container/codec behavior, and decide whether mobile should be gated, downgraded, or given a separate path.
+- #41 Host-visible accurate meters: give hosts real live audio levels for every participant without showing misleading receiver-side data as source truth.
+- #43 Live meter calibration: tune meter scale, smoothing, and clipping thresholds so valid loud input does not look broken while true clipping remains obvious.
+- #44 Guest meter simplification: show non-host participants only their own mic meter until remote metering is accurate enough to be useful.
+- #47 Remote level monitoring reliability: reconcile the remaining bug scope with the shipped Option A meter and the longer-term `#59` data-channel source-meter path.
+- #59 Source-side audio levels over LiveKit data channel: publish each participant's local RMS/peak values as the long-term accurate remote-meter signal, with the current stats-based meter as fallback.
 - #84 Output-device visibility: show the selected playback device alongside the microphone wherever browser support makes that trustworthy, and fall back cleanly when it does not.
 - #106 Host-visible recording-risk alerts: elevate participant or storage failures into obvious in-studio alerts so the host can react before the take ends.
 
@@ -26,6 +31,9 @@ This roadmap was reconciled against every GitHub issue that was open on June 11,
 - #28 Remote mic metadata propagation: send `micLabel` and `isBuiltInMic` over LiveKit so remote participant strips and host warnings reflect real device state.
 - #30 Remote meter responsiveness: replace smoothed speaking-state visuals with more direct audio-level data for remote participants.
 - #34 Button pending states: add visible in-flight feedback for the slowest primary actions, starting with home create-session and studio record.
+- #42 Recording countdown and start indicator: make the transition into active recording obvious enough that hosts and guests know exactly when the take begins.
+- #51 In-app recordings browser: make recorded sessions discoverable through Cozytrack metadata and downloads instead of requiring S3-console folder spelunking.
+- #53 Ambient audio-only session visual: explore a calm screen presence that can coexist with trustworthy meters and later respond subtly to room audio.
 - #81 Recovery-state badges in the dashboard: surface partial and failed recovery outcomes clearly enough that hosts can see which tracks need attention.
 
 ### Delivery and repo operations
@@ -45,14 +53,16 @@ This roadmap was reconciled against every GitHub issue that was open on June 11,
 - #115 Upload and recovery boundary tests: add targeted input-contract and property-style checks as another `#108` follow-up for storage-path and recovery invariants.
 - #116 Ingest download and purge integration tests: add service-backed coverage for Podline-facing ingest lifecycle behavior as another `#108` follow-up.
 - #117 Finalize/recovery/completion race integration tests: add a small real-service race suite as another `#108` follow-up for the highest-risk lifecycle ordering cases.
+- #63 Deferred multi-participant browser E2E harness: promote this after the narrower integration coverage and reconnect stack stabilize, or sooner if a real LiveKit/multi-participant regression demands it.
 - #109 Simplify recording and recovery code after the recent safety work: do this after the current safety path and its coverage work stabilize so cleanup is guided by proven invariants instead of guesswork.
-- #120 Logical track and segment model: continue the reconnect-safe recording stack after the participant-identity and take-lifecycle foundations, introducing internal segments without exposing them as the product abstraction.
-- #75 Participant reconnect and resume: pursue this after `#120`, so reconnect behavior builds on a real logical-track/segment model instead of leaking physical browser blobs into downstream flows.
+- #131 Media stitching/materialization for logical track segments: continue the reconnect-safe recording stack after `#120`/`#126` by producing one downstream-facing artifact per logical track from one or more internal segments.
+- #75 Participant reconnect and resume: pursue this after `#131`, so reconnect behavior builds on a safe materialized-track boundary instead of exposing physical browser blobs downstream.
 
 ## Needs Clarification
 
 ### Resolve the ambiguity before implementation scope hardens
 
 - #7 Cross-track conversation latency design: clarify which timing metadata is authoritative, where alignment logic should live, and what sync quality threshold is acceptable for MVP versus later export polish.
+- #68 Transcript-driven in-browser audio editor: keep this future-facing until recording reliability, session browsing, and export basics are stable enough to support an editor roadmap.
 - #72 Role-aware guest and cohost studio view: decide whether cohosts ever get dashboard access from inside an active session, or whether non-host participants should always stay inside a simplified studio shell.
 - #111 Reconnect-safe recording architecture plan: settle the remaining architecture choices around participant identity semantics, materialization timing, and how reconnect gaps should be represented before extending the stack further.
