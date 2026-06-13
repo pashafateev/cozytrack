@@ -360,15 +360,18 @@ test("keeps catch-up and start-message races to one local recorder", async ({
 });
 
 test("does not resume recording after the stop state update fails", async ({
+  browser,
   page,
 }) => {
   const sessionName = `Stop failure smoke ${Date.now()}`;
   const participantName = "Stop Failure Host";
+  const guestName = "Stop Failure Guest";
   const sessionId = await createAndJoinHostStudio(
     page,
     sessionName,
     participantName,
   );
+  const inviteUrl = await createInviteUrl(page, sessionId);
   let failedStopStateUpdate = false;
 
   await page.route("**/api/sessions/**/recording-state", async (route) => {
@@ -449,6 +452,28 @@ test("does not resume recording after the stop state update fails", async ({
     await expect(
       page.getByRole("button", { name: "Stop recording" }),
     ).toBeHidden();
+  });
+
+  await test.step("new guests do not catch up to the stopped take", async () => {
+    const guestContext = await browser.newContext({
+      permissions: ["microphone"],
+      viewport: { width: 1280, height: 720 },
+    });
+    try {
+      const guestPage = await guestContext.newPage();
+      await joinGuestStudio(guestPage, inviteUrl, sessionId, guestName);
+
+      await guestPage.waitForTimeout(3_000);
+      await expect(
+        guestPage.getByRole("status", { name: "Recording in progress" }),
+      ).toBeHidden();
+      const guestTrackCount = await db.track.count({
+        where: { sessionId, participantName: guestName },
+      });
+      expect(guestTrackCount).toBe(0);
+    } finally {
+      await guestContext.close();
+    }
   });
 });
 

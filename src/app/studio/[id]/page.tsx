@@ -1954,6 +1954,16 @@ function RoomContent({
         }
 
         const catchupKey = `${state.take.id}:${state.sessionStartedAt}`;
+        const hostTakeStatus = state.take.participantStatuses.find(
+          (status) => status.participantId === "host",
+        );
+        if (
+          hostTakeStatus?.recordingStatus &&
+          hostTakeStatus.recordingStatus !== "recording"
+        ) {
+          activeTakeCatchupRef.current = catchupKey;
+          return;
+        }
         const localTakeStatus = state.take.participantStatuses.find(
           (status) => status.participantId === localParticipantId,
         );
