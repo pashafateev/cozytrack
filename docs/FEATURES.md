@@ -56,6 +56,7 @@ This roadmap was reconciled against every GitHub issue that was open on June 13,
 - #63 Deferred multi-participant browser E2E harness: promote this after the narrower integration coverage and reconnect stack stabilize, or sooner if a real LiveKit/multi-participant regression demands it.
 - #109 Simplify recording and recovery code after the recent safety work: do this after the current safety path and its coverage work stabilize so cleanup is guided by proven invariants instead of guesswork.
 - #131 Media stitching/materialization for logical track segments: continue the reconnect-safe recording stack after `#120`/`#126` by producing one downstream-facing artifact per logical track from one or more internal segments.
+- #134 Automated release-readiness gate for live reconnect recording: run this after the active reconnect/materialization work is ready to validate, and before merging or shipping that stack, so recording, reconnect, upload, recovery, and materialization all pass in one repeatable command and CI path.
 - #75 Participant reconnect and resume: pursue this after `#131`, so reconnect behavior builds on a safe materialized-track boundary instead of exposing physical browser blobs downstream.
 
 ## Needs Clarification
