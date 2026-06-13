@@ -5,6 +5,7 @@ import {
   resolvePrincipal,
   type Principal,
 } from "@/lib/auth";
+import { isHostStoppedRoomStatus } from "@/lib/recording-take-status";
 
 type RecordingTakeWithStatuses = {
   id: string;
@@ -110,9 +111,7 @@ function hostHasStoppedTake(take: RecordingTakeWithStatuses): boolean {
   const hostStatus = take.participantStatuses?.find(
     (status) => status.participantId === "host",
   );
-  return Boolean(
-    hostStatus?.recordingStatus && hostStatus.recordingStatus !== "recording",
-  );
+  return Boolean(hostStatus && isHostStoppedRoomStatus(hostStatus));
 }
 
 async function closeTake(

@@ -15,6 +15,7 @@ import { PrismaClient } from "@prisma/client";
 
 const db = new PrismaClient();
 const cleanupSessions = new Set<string>();
+const HOST_STOPPED_ROOM_REASON = "host_stopped_room";
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -432,7 +433,8 @@ test("does not resume recording after the stop state update fails", async ({
             take.participantStatuses.some(
               (status) =>
                 status.participantId === "host" &&
-                status.recordingStatus === "connected",
+                status.recordingStatus === "connected" &&
+                status.statusReason === HOST_STOPPED_ROOM_REASON,
             ),
           );
           failedStopTakeId = failedStopTake?.id ?? "";

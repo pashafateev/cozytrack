@@ -149,6 +149,7 @@ import {
   PATCH as reportRecordingState,
   POST as setRecordingState,
 } from "@/app/api/sessions/[id]/recording-state/route";
+import { HOST_STOPPED_ROOM_REASON } from "@/lib/recording-take-status";
 
 function params(id = "s1") {
   return { params: Promise.resolve({ id }) };
@@ -303,7 +304,44 @@ describe("/api/sessions/[id]/recording-state", () => {
     expect(mocks.takes.get("take-1")?.stoppedAt).toBeNull();
   });
 
-  it("starts a new take when the active take has a host stopped status", async () => {
+  it("keeps an active take when the returning host failed to start recording", async () => {
+    mocks.takes.set("take-1", {
+      id: "take-1",
+      sessionId: "s1",
+      startedAt: new Date("2026-06-01T12:00:00.000Z"),
+      stoppedAt: null,
+    });
+    mocks.participantStatuses.set("take-1:host", {
+      takeId: "take-1",
+      participantId: "host",
+      participantName: null,
+      readinessStatus: null,
+      recordingStatus: "failed",
+      statusReason: "upload initialization failed",
+      updatedAt: new Date(),
+    });
+    mocks.participantStatuses.set("take-1:guest_alice", {
+      takeId: "take-1",
+      participantId: "guest_alice",
+      participantName: "Alice",
+      readinessStatus: null,
+      recordingStatus: "recording",
+      statusReason: null,
+      updatedAt: new Date(),
+    });
+
+    const read = await getRecordingState(request("GET"), params());
+
+    expect(read.status).toBe(200);
+    await expect(read.json()).resolves.toMatchObject({
+      active: true,
+      sessionStartedAt: "2026-06-01T12:00:00.000Z",
+      take: { id: "take-1", stoppedAt: null },
+    });
+    expect(mocks.takes.get("take-1")?.stoppedAt).toBeNull();
+  });
+
+  it("starts a new take when the active take has a host stop marker", async () => {
     mocks.takes.set("take-old", {
       id: "take-old",
       sessionId: "s1",
@@ -316,7 +354,7 @@ describe("/api/sessions/[id]/recording-state", () => {
       participantName: null,
       readinessStatus: null,
       recordingStatus: "connected",
-      statusReason: null,
+      statusReason: HOST_STOPPED_ROOM_REASON,
       updatedAt: new Date(),
     });
 

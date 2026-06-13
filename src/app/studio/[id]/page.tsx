@@ -41,6 +41,11 @@ import {
   stopRecordingTake,
 } from "@/lib/recording-state";
 import {
+  HOST_STOPPED_ROOM_REASON,
+  isHostStoppedRoomStatus,
+  isParticipantStoppedRecordingStatus,
+} from "@/lib/recording-take-status";
+import {
   browserRecordingBackupStore,
   recordingBackupId,
   type RecordingBackupManifest,
@@ -1875,6 +1880,7 @@ function RoomContent({
     stoppingRef.current = true;
     const stoppingTakeId = recordingTakeIdRef.current;
     const stoppingSessionStartedAt = recordingSessionStartedAtRef.current;
+    let shouldMarkHostStoppedRoom = false;
     try {
       try {
         await stopRecordingTake(sessionId);
@@ -1883,6 +1889,7 @@ function RoomContent({
         console.error("Failed to close recording take:", err);
         if (stoppingTakeId && stoppingSessionStartedAt) {
           suppressedActiveTakeCatchupRef.current = `${stoppingTakeId}:${stoppingSessionStartedAt}`;
+          shouldMarkHostStoppedRoom = true;
         }
         showNotification("Couldn't update recording state");
       }
@@ -1893,10 +1900,29 @@ function RoomContent({
         showNotification("Couldn't tell the room to stop recording");
       }
       await stopRecordingLocal();
+      if (shouldMarkHostStoppedRoom && stoppingTakeId) {
+        try {
+          await reportRecordingTakeParticipantStatus(sessionId, {
+            takeId: stoppingTakeId,
+            participantName,
+            recordingStatus: "connected",
+            reason: HOST_STOPPED_ROOM_REASON,
+          });
+        } catch (err) {
+          console.error("Failed to mark host-stopped recording take:", err);
+        }
+      }
     } finally {
       stoppingRef.current = false;
     }
-  }, [isHost, sessionId, transport, stopRecordingLocal, showNotification]);
+  }, [
+    isHost,
+    participantName,
+    sessionId,
+    transport,
+    stopRecordingLocal,
+    showNotification,
+  ]);
 
   useEffect(() => {
     if (studioState !== "recording") return;
@@ -1957,10 +1983,7 @@ function RoomContent({
         const hostTakeStatus = state.take.participantStatuses.find(
           (status) => status.participantId === "host",
         );
-        if (
-          hostTakeStatus?.recordingStatus &&
-          hostTakeStatus.recordingStatus !== "recording"
-        ) {
+        if (hostTakeStatus && isHostStoppedRoomStatus(hostTakeStatus)) {
           activeTakeCatchupRef.current = catchupKey;
           return;
         }
@@ -1969,7 +1992,7 @@ function RoomContent({
         );
         if (
           localTakeStatus?.recordingStatus &&
-          localTakeStatus.recordingStatus !== "recording"
+          isParticipantStoppedRecordingStatus(localTakeStatus.recordingStatus)
         ) {
           activeTakeCatchupRef.current = catchupKey;
           return;
