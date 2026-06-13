@@ -43,6 +43,8 @@ export type MaterializeTrackDeps = {
   readObjectBytes?: (key: string) => Promise<Uint8Array>;
   writeObjectBytes?: (key: string, bytes: Uint8Array) => Promise<void>;
   remuxSegments?: (input: RemuxSegmentsInput) => Promise<void>;
+  partial?: boolean;
+  allowIncompleteLatest?: boolean;
 };
 
 function segmentRecordingKeys(
@@ -162,7 +164,10 @@ export async function materializeTrack(
     (segment) => segment.status === "complete",
   );
 
-  if (!latestSegment || latestSegment.status !== "complete") {
+  if (
+    !latestSegment ||
+    (latestSegment.status !== "complete" && !deps.allowIncompleteLatest)
+  ) {
     await db.track.updateMany({
       where: { id: trackId, status: { not: "complete" } },
       data: { status: "uploading" },
@@ -220,7 +225,7 @@ export async function materializeTrack(
       status: "complete",
       s3Key: finalKey,
       durationMs,
-      partial: false,
+      partial: deps.partial ?? false,
     },
   });
 

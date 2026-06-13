@@ -9,6 +9,7 @@ import {
   trackSegmentRecordingExists,
   trackSegmentRecordingKey,
 } from "@/lib/s3";
+import { materializeTrack } from "@/lib/track-materialization";
 
 export type RecoveryOutcome =
   | "already_complete"
@@ -17,7 +18,8 @@ export type RecoveryOutcome =
   | "recovered_partial"
   | "skipped_active"
   | "failed_no_chunks"
-  | "failed_too_large";
+  | "failed_too_large"
+  | "failed_materialization";
 
 export interface RecoveryResult {
   trackId: string;
@@ -113,14 +115,20 @@ async function stitchSegmentChunks(input: {
     data: { status: "complete", completedAt: new Date() },
   });
 
-  await db.track.update({
-    where: { id: trackId },
-    data: {
-      status: "complete",
-      s3Key: recordingKey,
-      partial,
-    },
+  const materialized = await materializeTrack(trackId, {
+    partial,
+    ...(forcePartial ? { allowIncompleteLatest: true } : {}),
   });
+  if (materialized.status !== "complete") {
+    return {
+      trackId,
+      outcome: "failed_materialization",
+      partial,
+      status: materialized.status,
+      chunkCount: parts.length,
+      missingPartNumbers: missing,
+    };
+  }
 
   if (partial) {
     console.warn(
@@ -252,14 +260,20 @@ export async function recoverTrack(
           data: { status: "complete", completedAt: new Date() },
         });
       }
-      await db.track.update({
-        where: { id: trackId },
-        data: {
-          status: "complete",
-          s3Key: trackSegmentRecordingKey(sessionId, trackId, segment.id),
-          partial: newerSegmentLost,
-        },
+      const materialized = await materializeTrack(trackId, {
+        partial: newerSegmentLost,
+        ...(newerSegmentLost ? { allowIncompleteLatest: true } : {}),
       });
+      if (materialized.status !== "complete") {
+        return {
+          trackId,
+          outcome: "failed_materialization",
+          partial: newerSegmentLost,
+          status: materialized.status,
+          chunkCount: 0,
+          missingPartNumbers: [],
+        };
+      }
       return {
         trackId,
         outcome: "recovered_from_recording",
