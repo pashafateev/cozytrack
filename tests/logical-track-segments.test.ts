@@ -1033,15 +1033,14 @@ describe("logical track segments", () => {
   });
 
   it("does not demote a complete track when an older segment completes late", async () => {
-    // Race outcome state: the newest segment's completion already promoted
+    // Race outcome state: the newest segment's completion already materialized
     // the track while an older segment's completion was still in flight.
     mocks.tracks.set("logical-track", {
       id: "logical-track",
       sessionId: "s1",
       participantName: "Alice",
       participantId: "guest_alice",
-      s3Key:
-        "sessions/s1/tracks/logical-track/segments/browser-seg-2/recording.webm",
+      s3Key: "sessions/s1/tracks/logical-track/recording.webm",
       status: "complete",
       durationMs: 5000,
     });
@@ -1081,8 +1080,7 @@ describe("logical track segments", () => {
     // to uploading — that would block finalize with every segment complete.
     expect(mocks.tracks.get("logical-track")).toMatchObject({
       status: "complete",
-      s3Key:
-        "sessions/s1/tracks/logical-track/segments/browser-seg-2/recording.webm",
+      s3Key: "sessions/s1/tracks/logical-track/recording.webm",
     });
   });
 
@@ -1134,8 +1132,7 @@ describe("logical track segments", () => {
     // track in uploading and block finalize.
     expect(mocks.tracks.get("logical-track")).toMatchObject({
       status: "complete",
-      s3Key:
-        "sessions/s1/tracks/logical-track/segments/browser-seg-2/recording.webm",
+      s3Key: "sessions/s1/tracks/logical-track/recording.webm",
       durationMs: 5000,
     });
   });
