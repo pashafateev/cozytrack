@@ -70,8 +70,7 @@ jobs:
               name.startsWith("src/components/") ||
               name.startsWith("src/hooks/") ||
               name === "src/lib/auth.ts" ||
-              /^src\/lib\/recording-backup.*\.ts$/.test(name) ||
-              name === "src/lib/recording-state.ts" ||
+              /^src\/lib\/recording-.*\.ts$/.test(name) ||
               name === "src/lib/recorder.ts" ||
               name === "src/lib/recovery.ts" ||
               name === "src/lib/s3.ts" ||
