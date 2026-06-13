@@ -40,6 +40,7 @@ jobs:
               name === ".github/workflows/service-integration.yml" ||
               name === "package.json" ||
               name === "package-lock.json" ||
+              name === "scripts/release-check.sh" ||
               name === "vitest.integration.config.ts" ||
               name.startsWith("prisma/") ||
               name.startsWith("src/app/api/") ||
@@ -49,6 +50,7 @@ jobs:
               name === "src/lib/recovery.ts" ||
               name === "src/lib/s3.ts" ||
               name === "src/lib/sessions.ts" ||
+              name === "src/lib/track-materialization.ts" ||
               /^src\/lib\/upload.*\.ts$/.test(name) ||
               name.startsWith("tests/integration/");
 
@@ -57,13 +59,24 @@ jobs:
               name === "package.json" ||
               name === "package-lock.json" ||
               name === "playwright.config.ts" ||
+              name === "scripts/release-check.sh" ||
               name === "scripts/test-browser-smoke.sh" ||
+              name.startsWith("src/app/api/auth/") ||
+              name.startsWith("src/app/api/sessions/") ||
+              name.startsWith("src/app/api/upload/") ||
               name.startsWith("src/app/session/") ||
               name.startsWith("src/app/studio/") ||
               name.startsWith("src/components/") ||
               name.startsWith("src/hooks/") ||
+              name === "src/lib/auth.ts" ||
+              /^src\/lib\/recording-backup.*\.ts$/.test(name) ||
+              name === "src/lib/recording-state.ts" ||
               name === "src/lib/recorder.ts" ||
+              name === "src/lib/recovery.ts" ||
+              name === "src/lib/s3.ts" ||
+              name === "src/lib/track-materialization.ts" ||
               name.startsWith("src/lib/transport/") ||
+              /^src\/lib\/upload.*\.ts$/.test(name) ||
               name.startsWith("tests/browser/");
 
             const docsOnly = names.length > 0 && names.every(isDocsOnlyFile);
