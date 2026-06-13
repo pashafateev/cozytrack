@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
+const materializationMocks = vi.hoisted(() => ({
+  materializeTrack: vi.fn(),
+}));
+
 type Track = {
   id: string;
   sessionId: string;
@@ -194,6 +198,10 @@ vi.mock("@/lib/s3", () => ({
   }),
 }));
 
+vi.mock("@/lib/track-materialization", () => ({
+  materializeTrack: materializationMocks.materializeTrack,
+}));
+
 import { recoverTrack } from "@/lib/recovery";
 
 beforeEach(() => {
@@ -203,6 +211,40 @@ beforeEach(() => {
   s3Timestamps.clear();
   putCalls.length = 0;
   vi.clearAllMocks();
+  materializationMocks.materializeTrack.mockImplementation(
+    async (
+      trackId: string,
+      options?: {
+        partial?: boolean;
+        allowIncompleteLatest?: boolean;
+        skipMissingSegments?: boolean;
+      },
+    ) => {
+      const track = trackStore.get(trackId);
+      if (!track) throw new Error("track not found");
+      const segments = Array.from(segmentStore.values())
+        .filter((segment) => segment.trackId === trackId)
+        .sort((a, b) => a.segmentIndex - b.segmentIndex);
+      const completed = segments.filter((segment) => segment.status === "complete");
+      const durationMs = completed.some((segment) => segment.durationMs === null)
+        ? null
+        : completed.reduce((sum, segment) => sum + segment.durationMs!, 0);
+      const s3Key = `sessions/${track.sessionId}/tracks/${trackId}/recording.webm`;
+      trackStore.set(trackId, {
+        ...track,
+        status: "complete",
+        s3Key,
+        partial: options?.partial ?? false,
+      });
+      return {
+        trackId,
+        status: "complete",
+        s3Key,
+        segmentCount: completed.length,
+        durationMs,
+      };
+    },
+  );
 });
 
 function seedTrack(overrides: Partial<Track> = {}): Track {
@@ -410,7 +452,7 @@ describe("recoverTrack", () => {
     expect(trackStore.get("t1")?.status).toBe("complete");
   });
 
-  it("recovers a stuck multi-segment track to the latest complete segment", async () => {
+  it("recovers a stuck multi-segment track to one logical artifact", async () => {
     seedTrack({ status: "uploading" });
     seedSegment({ id: "t1", segmentIndex: 0, status: "complete" });
     seedSegment({ id: "seg-2", segmentIndex: 1, status: "complete", durationMs: 5000 });
@@ -426,11 +468,15 @@ describe("recoverTrack", () => {
     const result = await recoverTrack("t1");
 
     expect(result.outcome).toBe("recovered_from_recording");
-    // Latest-wins: the newest segment's audio is the authoritative artifact,
-    // not the default segment's older recording.
+    // The materialized logical artifact is authoritative, not either
+    // individual segment recording.
     expect(trackStore.get("t1")).toMatchObject({
       status: "complete",
-      s3Key: "sessions/s1/tracks/t1/segments/seg-2/recording.webm",
+      s3Key: "sessions/s1/tracks/t1/recording.webm",
+    });
+    expect(materializationMocks.materializeTrack).toHaveBeenCalledWith("t1", {
+      partial: false,
+      skipMissingSegments: true,
     });
     expect(putCalls).toHaveLength(0);
   });
@@ -450,9 +496,13 @@ describe("recoverTrack", () => {
     expect(result.outcome).toBe("recovered_from_recording");
     expect(trackStore.get("t1")).toMatchObject({
       status: "complete",
-      s3Key: "sessions/s1/tracks/t1/segments/seg-2/recording.webm",
+      s3Key: "sessions/s1/tracks/t1/recording.webm",
     });
     expect(segmentStore.get("seg-2")?.status).toBe("complete");
+    expect(materializationMocks.materializeTrack).toHaveBeenCalledWith("t1", {
+      partial: false,
+      skipMissingSegments: true,
+    });
     expect(putCalls).toHaveLength(0);
   });
 
@@ -541,6 +591,11 @@ describe("recoverTrack", () => {
       s3Key: "sessions/s1/tracks/t1/recording.webm",
       partial: true,
     });
+    expect(materializationMocks.materializeTrack).toHaveBeenCalledWith("t1", {
+      partial: true,
+      skipMissingSegments: true,
+      allowIncompleteLatest: true,
+    });
   });
 
   it("stitches the newest segment's chunks when its final blob is missing", async () => {
@@ -580,8 +635,12 @@ describe("recoverTrack", () => {
     expect(segmentStore.get("seg-2")?.status).toBe("complete");
     expect(trackStore.get("t1")).toMatchObject({
       status: "complete",
-      s3Key: "sessions/s1/tracks/t1/segments/seg-2/recording.webm",
+      s3Key: "sessions/s1/tracks/t1/recording.webm",
       partial: false,
+    });
+    expect(materializationMocks.materializeTrack).toHaveBeenCalledWith("t1", {
+      partial: false,
+      skipMissingSegments: true,
     });
   });
 
@@ -613,8 +672,12 @@ describe("recoverTrack", () => {
     expect(result.missingPartNumbers).toEqual([1]);
     expect(trackStore.get("t1")).toMatchObject({
       status: "complete",
-      s3Key: "sessions/s1/tracks/t1/segments/seg-2/recording.webm",
+      s3Key: "sessions/s1/tracks/t1/recording.webm",
       partial: true,
+    });
+    expect(materializationMocks.materializeTrack).toHaveBeenCalledWith("t1", {
+      partial: true,
+      skipMissingSegments: true,
     });
   });
 
@@ -637,6 +700,11 @@ describe("recoverTrack", () => {
     expect(trackStore.get("t1")).toMatchObject({
       status: "complete",
       partial: true,
+    });
+    expect(materializationMocks.materializeTrack).toHaveBeenCalledWith("t1", {
+      partial: true,
+      skipMissingSegments: true,
+      allowIncompleteLatest: true,
     });
   });
 

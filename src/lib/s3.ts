@@ -116,6 +116,17 @@ export function trackSegmentRecordingKey(
   return `${trackSegmentPrefix(sessionId, trackId, segmentId)}recording.webm`;
 }
 
+export function trackSegmentSourceRecordingKey(
+  sessionId: string,
+  trackId: string,
+  segmentId: string
+): string {
+  if (segmentId === trackId) {
+    return `sessions/${sessionId}/tracks/${trackId}/segments/${segmentId}/recording.webm`;
+  }
+  return trackSegmentRecordingKey(sessionId, trackId, segmentId);
+}
+
 export function sessionPrefix(sessionId: string): string {
   return `sessions/${sessionId}/`;
 }
@@ -228,6 +239,16 @@ export async function trackSegmentRecordingExists(
   segmentId: string
 ): Promise<boolean> {
   return objectExists(trackSegmentRecordingKey(sessionId, trackId, segmentId));
+}
+
+export async function trackSegmentSourceRecordingExists(
+  sessionId: string,
+  trackId: string,
+  segmentId: string
+): Promise<boolean> {
+  return objectExists(
+    trackSegmentSourceRecordingKey(sessionId, trackId, segmentId)
+  );
 }
 
 export async function getObjectBytes(key: string): Promise<Uint8Array> {

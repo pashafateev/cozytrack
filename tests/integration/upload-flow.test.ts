@@ -5,7 +5,13 @@ import {
   ListObjectsV2Command,
   type S3Client,
 } from "@aws-sdk/client-s3";
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import ffmpegStaticPath from "ffmpeg-static";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
 
@@ -21,6 +27,7 @@ type Modules = {
 
 let modules: Modules;
 const cleanupSessions = new Set<string>();
+const execFileAsync = promisify(execFile);
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -148,6 +155,38 @@ async function putPresignedBytes(url: string, bytes: Uint8Array) {
   expect(response.ok).toBe(true);
 }
 
+async function makeTinyWebm(frequency: number): Promise<Uint8Array> {
+  const dir = await mkdtemp(join(tmpdir(), "cozytrack-webm-fixture-"));
+  try {
+    const output = join(dir, `${frequency}.webm`);
+    await execFileAsync(
+      process.env.FFMPEG_PATH ?? ffmpegStaticPath ?? "ffmpeg",
+      [
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        `sine=frequency=${frequency}:duration=0.12`,
+        "-ac",
+        "1",
+        "-ar",
+        "48000",
+        "-c:a",
+        "libopus",
+        "-b:a",
+        "32k",
+        output,
+      ],
+    );
+    return await readFile(output);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 async function createSession(name = "Integration test session"): Promise<string> {
   const sessionId = `it-${randomUUID()}`;
   cleanupSessions.add(sessionId);
@@ -203,6 +242,10 @@ beforeAll(async () => {
 afterEach(async () => {
   for (const sessionId of cleanupSessions) {
     await modules.db.track.deleteMany({ where: { sessionId } });
+    await modules.db.recordingTakeParticipantStatus.deleteMany({
+      where: { take: { sessionId } },
+    });
+    await modules.db.recordingTake.deleteMany({ where: { sessionId } });
     await modules.db.session.deleteMany({ where: { id: sessionId } });
     await deletePrefix(
       modules.s3.s3,
@@ -307,6 +350,137 @@ describe("recording upload service integration", () => {
     ).resolves.toEqual(new Uint8Array([7, 8, 9, 10]));
     await expect(modules.s3.listTrackChunkParts(sessionId, trackId)).resolves
       .toHaveLength(0);
+  });
+
+  it("materializes multiple completed segments through real ffmpeg remuxing", async () => {
+    const sessionId = await createSession();
+    const takeId = `take-${randomUUID()}`;
+    await modules.db.recordingTake.create({
+      data: {
+        id: takeId,
+        sessionId,
+        startedAt: new Date("2026-01-01T00:00:00.000Z"),
+      },
+    });
+
+    const logicalTrackId = `track-${randomUUID()}`;
+    const firstWebm = await makeTinyWebm(440);
+    const secondWebm = await makeTinyWebm(660);
+
+    const firstStart = await startUpload(sessionId, logicalTrackId);
+    const firstFinalUpload = await modules.presignUpload(
+      postJson(
+        "/api/upload/presign",
+        { sessionId, trackId: logicalTrackId, partNumber: 9999 },
+        { "x-cozytrack-recording-token": firstStart.recordingToken },
+      ),
+    );
+    expect(firstFinalUpload.status).toBe(200);
+    const firstFinalBody = (await firstFinalUpload.json()) as {
+      key: string;
+      url: string;
+    };
+    expect(firstFinalBody.key).toBe(
+      modules.s3.trackRecordingKey(sessionId, logicalTrackId),
+    );
+    await putPresignedBytes(firstFinalBody.url, firstWebm);
+
+    const firstComplete = await modules.completeUpload(
+      postJson(
+        "/api/upload/complete",
+        { sessionId, trackId: logicalTrackId, durationMs: 120 },
+        { "x-cozytrack-recording-token": firstStart.recordingToken },
+      ),
+    );
+    expect(firstComplete.status).toBe(200);
+
+    const secondSegmentId = `segment-${randomUUID()}`;
+    const secondStart = await modules.presignUpload(
+      postJson(
+        "/api/upload/presign",
+        {
+          sessionId,
+          trackId: logicalTrackId,
+          segmentId: secondSegmentId,
+          partNumber: 0,
+          participantName: "Integration Host",
+          deviceLabel: "USB Integration Mic",
+          deviceId: "integration-device",
+          isBuiltInMic: false,
+          sessionStartedAt: new Date("2026-01-01T00:00:01.000Z").toISOString(),
+        },
+        await hostHeaders(),
+      ),
+    );
+    expect(secondStart.status).toBe(200);
+    const secondStartBody = (await secondStart.json()) as {
+      recordingToken: string;
+      segmentId: string;
+      trackId: string;
+    };
+    expect(secondStartBody.trackId).toBe(logicalTrackId);
+    expect(secondStartBody.segmentId).toBe(secondSegmentId);
+
+    const secondFinalUpload = await modules.presignUpload(
+      postJson(
+        "/api/upload/presign",
+        {
+          sessionId,
+          trackId: logicalTrackId,
+          segmentId: secondSegmentId,
+          partNumber: 9999,
+        },
+        { "x-cozytrack-recording-token": secondStartBody.recordingToken },
+      ),
+    );
+    expect(secondFinalUpload.status).toBe(200);
+    const secondFinalBody = (await secondFinalUpload.json()) as {
+      key: string;
+      url: string;
+    };
+    expect(secondFinalBody.key).toBe(
+      modules.s3.trackSegmentRecordingKey(
+        sessionId,
+        logicalTrackId,
+        secondSegmentId,
+      ),
+    );
+    await putPresignedBytes(secondFinalBody.url, secondWebm);
+
+    const secondComplete = await modules.completeUpload(
+      postJson(
+        "/api/upload/complete",
+        {
+          sessionId,
+          trackId: logicalTrackId,
+          segmentId: secondSegmentId,
+          durationMs: 230,
+        },
+        { "x-cozytrack-recording-token": secondStartBody.recordingToken },
+      ),
+    );
+    expect(secondComplete.status).toBe(200);
+
+    const track = await modules.db.track.findUnique({
+      where: { id: logicalTrackId },
+    });
+    expect(track).toMatchObject({
+      sessionId,
+      takeId,
+      s3Key: modules.s3.trackRecordingKey(sessionId, logicalTrackId),
+      status: "complete",
+      durationMs: 350,
+      partial: false,
+    });
+
+    const finalBytes = await modules.s3.getObjectBytes(
+      modules.s3.trackRecordingKey(sessionId, logicalTrackId),
+    );
+    expect(finalBytes.byteLength).toBeGreaterThan(
+      Math.max(firstWebm.byteLength, secondWebm.byteLength),
+    );
+    expect(finalBytes).not.toEqual(firstWebm);
+    expect(finalBytes).not.toEqual(secondWebm);
   });
 
   it("rejects a recording token when presigning or completing a different track", async () => {

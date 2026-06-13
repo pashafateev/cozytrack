@@ -1,10 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import {
-  deleteTrackSegmentChunks,
-  trackSegmentRecordingKey,
-} from "@/lib/s3";
+import { deleteTrackSegmentChunks } from "@/lib/s3";
 import { resolvePrincipal, verifyRecordingUploadToken } from "@/lib/auth";
+import { materializeTrack } from "@/lib/track-materialization";
 
 export async function POST(req: NextRequest) {
   try {
@@ -75,41 +73,16 @@ export async function POST(req: NextRequest) {
       orderBy: { segmentIndex: "asc" },
       select: { id: true, status: true, durationMs: true, segmentIndex: true },
     });
-    // Interim semantics until media stitching lands (#111 stack 4): the latest
-    // segment's recording is the track's authoritative artifact. Earlier
-    // segments stay in S3 and in TrackSegment rows for the future stitcher.
-    // The track is done once its newest segment is — older incomplete
-    // segments are superseded attempts (sequential per participant) and must
-    // not park the track in uploading; only a newer in-flight segment may.
+    // The logical track is complete only after materialization creates the
+    // downstream-facing artifact at the logical track key. Older incomplete
+    // segments are superseded attempts and do not block a newer complete
+    // segment, but a newer in-flight segment keeps the logical track pending.
     const latestSegment = segments[segments.length - 1];
     const latestSegmentComplete = latestSegment.status === "complete";
 
     let track;
     if (latestSegmentComplete) {
-      // Conditional write: a newer segment may have been created between the
-      // segment read above and this update. Promoting then would mark
-      // superseded audio complete and downloadable while the new attempt
-      // records, so the write proves no newer segment exists.
-      await db.track.updateMany({
-        where: {
-          id: trackId,
-          segments: {
-            none: { segmentIndex: { gt: latestSegment.segmentIndex } },
-          },
-        },
-        data: {
-          status: "complete",
-          s3Key: trackSegmentRecordingKey(
-            sessionId,
-            trackId,
-            latestSegment.id,
-          ),
-          durationMs: latestSegment.durationMs ?? null,
-          // Reset any premature partial flag from racing recovery — the client
-          // successfully produced and uploaded its merged blob.
-          partial: false,
-        },
-      });
+      await materializeTrack(trackId);
       track = await db.track.findUnique({ where: { id: trackId } });
     } else {
       // Conditional write: an older segment's completion can read the
