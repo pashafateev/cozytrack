@@ -144,6 +144,29 @@ function audioInput(deviceId: string, label: string): MediaDeviceInfo {
   } as MediaDeviceInfo;
 }
 
+function stubAudioContext() {
+  class TestAudioContext {
+    createMediaStreamSource() {
+      return { connect: vi.fn(), disconnect: vi.fn() };
+    }
+
+    createAnalyser() {
+      return {
+        fftSize: 2048,
+        smoothingTimeConstant: 0,
+        getByteTimeDomainData: vi.fn((data: Uint8Array) => data.fill(128)),
+      };
+    }
+
+    close = vi.fn(async () => undefined);
+  }
+
+  vi.stubGlobal(
+    "AudioContext",
+    TestAudioContext as unknown as typeof AudioContext,
+  );
+}
+
 beforeEach(() => {
   studioPageHarness.authMeResponse = { role: "guest", name: "Guest Alice" };
   studioPageHarness.route.sessionId = "session-guest";
@@ -167,6 +190,7 @@ beforeEach(() => {
     removeItem: vi.fn(),
     clear: vi.fn(),
   });
+  stubAudioContext();
 
   Object.defineProperty(navigator, "mediaDevices", {
     configurable: true,
