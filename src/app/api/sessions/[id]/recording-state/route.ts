@@ -106,6 +106,28 @@ function latestTakeActivityAt(take: RecordingTakeWithStatuses): Date {
   );
 }
 
+function hostHasStoppedTake(take: RecordingTakeWithStatuses): boolean {
+  const hostStatus = take.participantStatuses?.find(
+    (status) => status.participantId === "host",
+  );
+  return Boolean(
+    hostStatus?.recordingStatus && hostStatus.recordingStatus !== "recording",
+  );
+}
+
+async function closeTake(
+  take: RecordingTakeWithStatuses,
+  stoppedAt = new Date(),
+): Promise<void> {
+  await db.recordingTake.update({
+    where: { id: take.id },
+    data: { stoppedAt },
+    include: {
+      participantStatuses: { orderBy: { participantName: "asc" } },
+    },
+  });
+}
+
 async function expireIfStale(
   take: RecordingTakeWithStatuses,
   now = new Date(),
@@ -116,13 +138,15 @@ async function expireIfStale(
     return false;
   }
 
-  await db.recordingTake.update({
-    where: { id: take.id },
-    data: { stoppedAt: now },
-    include: {
-      participantStatuses: { orderBy: { participantName: "asc" } },
-    },
-  });
+  await closeTake(take, now);
+  return true;
+}
+
+async function closeIfHostStoppedTake(
+  take: RecordingTakeWithStatuses,
+): Promise<boolean> {
+  if (take.stoppedAt || !hostHasStoppedTake(take)) return false;
+  await closeTake(take);
   return true;
 }
 
@@ -131,6 +155,7 @@ async function findFreshActiveTake(
 ): Promise<RecordingTakeWithStatuses | null> {
   const take = await findActiveTake(sessionId);
   if (!take) return null;
+  if (await closeIfHostStoppedTake(take)) return null;
   return (await expireIfStale(take)) ? null : take;
 }
 

@@ -303,6 +303,41 @@ describe("/api/sessions/[id]/recording-state", () => {
     expect(mocks.takes.get("take-1")?.stoppedAt).toBeNull();
   });
 
+  it("starts a new take when the active take has a host stopped status", async () => {
+    mocks.takes.set("take-old", {
+      id: "take-old",
+      sessionId: "s1",
+      startedAt: new Date("2026-06-01T12:00:00.000Z"),
+      stoppedAt: null,
+    });
+    mocks.participantStatuses.set("take-old:host", {
+      takeId: "take-old",
+      participantId: "host",
+      participantName: null,
+      readinessStatus: null,
+      recordingStatus: "connected",
+      statusReason: null,
+      updatedAt: new Date(),
+    });
+
+    const start = await setRecordingState(
+      request("POST", {
+        active: true,
+        sessionStartedAt: "2026-06-01T12:06:00.000Z",
+      }),
+      params(),
+    );
+
+    expect(start.status).toBe(200);
+    await expect(start.json()).resolves.toMatchObject({
+      active: true,
+      sessionStartedAt: "2026-06-01T12:06:00.000Z",
+      take: { id: "take-1", stoppedAt: null },
+    });
+    expect(mocks.takes.get("take-old")?.stoppedAt).toEqual(expect.any(Date));
+    expect(mocks.takes.get("take-1")?.stoppedAt).toBeNull();
+  });
+
   it("does not expire a take from another session when reporting by takeId", async () => {
     const staleStartedAt = new Date(Date.now() - 11 * 60 * 1000);
     mocks.takes.set("take-other", {

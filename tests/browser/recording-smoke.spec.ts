@@ -373,6 +373,7 @@ test("does not resume recording after the stop state update fails", async ({
   );
   const inviteUrl = await createInviteUrl(page, sessionId);
   let failedStopStateUpdate = false;
+  let failedStopTakeId = "";
 
   await page.route("**/api/sessions/**/recording-state", async (route) => {
     const request = route.request();
@@ -396,7 +397,7 @@ test("does not resume recording after the stop state update fails", async ({
     await route.continue();
   });
 
-  await test.step("stop locally while the server take remains active", async () => {
+  await test.step("stop locally after the server state update fails", async () => {
     await page.waitForTimeout(1_000);
     await page.getByRole("button", { name: "Start recording" }).click();
     await expect(
@@ -422,17 +423,20 @@ test("does not resume recording after the stop state update fails", async ({
     await expect
       .poll(
         async () => {
-          const take = await db.recordingTake.findFirst({
-            where: { sessionId, stoppedAt: null },
+          const takes = await db.recordingTake.findMany({
+            where: { sessionId },
+            orderBy: { startedAt: "desc" },
             include: { participantStatuses: true },
           });
-          return (
-            take?.participantStatuses.some(
+          const failedStopTake = takes.find((take) =>
+            take.participantStatuses.some(
               (status) =>
                 status.participantId === "host" &&
                 status.recordingStatus === "connected",
-            ) ?? false
+            ),
           );
+          failedStopTakeId = failedStopTake?.id ?? "";
+          return Boolean(failedStopTakeId);
         },
         { timeout: 30_000 },
       )
@@ -474,6 +478,42 @@ test("does not resume recording after the stop state update fails", async ({
     } finally {
       await guestContext.close();
     }
+  });
+
+  await test.step("manual restart creates a new take", async () => {
+    await page.getByRole("button", { name: "Start recording" }).click();
+    await expect(
+      page.getByRole("button", { name: "Stop recording" }),
+    ).toBeVisible();
+
+    await expect
+      .poll(
+        async () => {
+          const activeTake = await db.recordingTake.findFirst({
+            where: { sessionId, stoppedAt: null },
+            orderBy: { startedAt: "desc" },
+            select: { id: true },
+          });
+          const failedStopTake = await db.recordingTake.findUnique({
+            where: { id: failedStopTakeId },
+            select: { stoppedAt: true },
+          });
+          return Boolean(
+            activeTake &&
+              activeTake.id !== failedStopTakeId &&
+              failedStopTake?.stoppedAt,
+          );
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(true);
+
+    await page.waitForTimeout(2_000);
+    await page.getByRole("button", { name: "Stop recording" }).click();
+    await expect(page.getByText("FINALIZING").first()).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Start recording" }),
+    ).toBeVisible({ timeout: 60_000 });
   });
 });
 
