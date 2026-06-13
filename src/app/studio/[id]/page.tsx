@@ -714,6 +714,7 @@ function RoomContent({
     [remoteParticipantNames],
   );
   const recorderRef = useRef<CozyRecorder | null>(null);
+  const localRecordingStartRef = useRef<Promise<boolean> | null>(null);
   const trackIdRef = useRef<string>("");
   const segmentIdRef = useRef<string>("");
   const recordingUploadTokenRef = useRef<string | undefined>(undefined);
@@ -1247,7 +1248,7 @@ function RoomContent({
   // Core recording start. Idempotent against double-invocation: if we're
   // already recording (our own click echoed via a later remote message, or the
   // button pressed twice), this is a no-op.
-  const startRecordingLocal = useCallback(
+  const startRecordingLocalCore = useCallback(
     async (sessionStartedAtIso: string, takeId?: string | null) => {
       const effectiveTakeId = takeId ?? recordingTakeIdRef.current;
       if (effectiveTakeId) recordingTakeIdRef.current = effectiveTakeId;
@@ -1503,6 +1504,25 @@ function RoomContent({
       trackerTrackUpload,
       timingDebug,
     ],
+  );
+
+  const startRecordingLocal = useCallback(
+    async (sessionStartedAtIso: string, takeId?: string | null) => {
+      if (localRecordingStartRef.current) {
+        return await localRecordingStartRef.current;
+      }
+
+      const startPromise = startRecordingLocalCore(sessionStartedAtIso, takeId);
+      localRecordingStartRef.current = startPromise;
+      try {
+        return await startPromise;
+      } finally {
+        if (localRecordingStartRef.current === startPromise) {
+          localRecordingStartRef.current = null;
+        }
+      }
+    },
+    [startRecordingLocalCore],
   );
 
   // Core recording stop. Idempotent: no-op when we have no active recorder or

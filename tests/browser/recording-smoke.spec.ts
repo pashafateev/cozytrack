@@ -1,4 +1,10 @@
-import { expect, test, type BrowserContext, type Page } from "@playwright/test";
+import {
+  expect,
+  test,
+  type BrowserContext,
+  type Page,
+  type Request,
+} from "@playwright/test";
 import {
   DeleteObjectsCommand,
   HeadObjectCommand,
@@ -174,6 +180,20 @@ async function createInviteUrl(hostPage: Page, sessionId: string): Promise<strin
   return body.url!;
 }
 
+function parseJsonRequestBody(request: Request): Record<string, unknown> | null {
+  const body = request.postData();
+  if (!body) return null;
+
+  try {
+    const parsed = JSON.parse(body);
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 async function joinGuestStudio(
   page: Page,
   inviteUrl: string,
@@ -212,6 +232,132 @@ async function assertStoredRecording(
   );
   expect(head.ContentLength).toBeGreaterThan(0);
 }
+
+test("keeps catch-up and start-message races to one local recorder", async ({
+  browser,
+  page,
+}) => {
+  const hostName = "Race Host";
+  const guestName = "Race Guest";
+  const guestContext = await browser.newContext({
+    permissions: ["microphone"],
+    viewport: { width: 1280, height: 720 },
+  });
+
+  let releaseCatchupRequest = () => {};
+  const catchupRequestBarrier = new Promise<void>((resolve) => {
+    releaseCatchupRequest = resolve;
+  });
+  let catchupRequestBlocked = false;
+  let releaseFirstPresign = () => {};
+  const firstPresignBarrier = new Promise<void>((resolve) => {
+    releaseFirstPresign = resolve;
+  });
+  let firstPresignReleased = false;
+  let guestInitialPresignCount = 0;
+
+  const releasePresign = () => {
+    if (firstPresignReleased) return;
+    firstPresignReleased = true;
+    releaseFirstPresign();
+  };
+
+  try {
+    const sessionName = `Start race smoke ${Date.now()}`;
+    const sessionId = await createAndJoinHostStudio(page, sessionName, hostName);
+    const inviteUrl = await createInviteUrl(page, sessionId);
+
+    const guestPage = await guestContext.newPage();
+    await guestPage.route("**/api/sessions/**/recording-state", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (
+        request.method() === "GET" &&
+        url.pathname === `/api/sessions/${sessionId}/recording-state` &&
+        !catchupRequestBlocked
+      ) {
+        catchupRequestBlocked = true;
+        await catchupRequestBarrier;
+      }
+
+      await route.continue();
+    });
+
+    await guestPage.route("**/api/upload/presign", async (route) => {
+      const request = route.request();
+      const body = parseJsonRequestBody(request);
+      if (
+        request.method() === "POST" &&
+        body?.sessionId === sessionId &&
+        body?.participantName === guestName &&
+        body?.partNumber === 0
+      ) {
+        guestInitialPresignCount += 1;
+        if (guestInitialPresignCount === 1) {
+          await firstPresignBarrier;
+        }
+      }
+
+      await route.continue();
+    });
+
+    await joinGuestStudio(guestPage, inviteUrl, sessionId, guestName);
+    await expect
+      .poll(() => catchupRequestBlocked, { timeout: 30_000 })
+      .toBe(true);
+
+    await test.step("start while the guest catch-up request is pending", async () => {
+      await page.getByRole("button", { name: "Start recording" }).click();
+      await expect(
+        page.getByRole("button", { name: "Stop recording" }),
+      ).toBeVisible();
+      await expect
+        .poll(() => guestInitialPresignCount, { timeout: 30_000 })
+        .toBe(1);
+
+      releaseCatchupRequest();
+      await guestPage.waitForTimeout(1_000);
+      expect(guestInitialPresignCount).toBe(1);
+
+      releasePresign();
+      await expect(
+        guestPage.getByRole("status", { name: "Recording in progress" }),
+      ).toBeVisible({ timeout: 30_000 });
+    });
+
+    await test.step("stop and verify the raced guest still has one segment", async () => {
+      await page.waitForTimeout(2_000);
+      await page.getByRole("button", { name: "Stop recording" }).click();
+      await expect(page.getByText("FINALIZING").first()).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "Start recording" }),
+      ).toBeVisible({ timeout: 60_000 });
+
+      await expect
+        .poll(
+          async () => {
+            const tracks = await db.track.findMany({
+              where: { sessionId, participantName: guestName },
+              include: { segments: true },
+            });
+            return {
+              trackCount: tracks.length,
+              segmentCount: tracks.reduce(
+                (total, track) => total + track.segments.length,
+                0,
+              ),
+            };
+          },
+          { timeout: 60_000 },
+        )
+        .toEqual({ trackCount: 1, segmentCount: 1 });
+    });
+  } finally {
+    releaseCatchupRequest();
+    releasePresign();
+    await guestContext.close();
+  }
+});
 
 test("records a host track through the browser and stores a completed WebM", async ({
   page,
