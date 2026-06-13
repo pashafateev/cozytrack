@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { issueGuestSessionCookie, verifyInviteToken } from "@/lib/auth";
+import {
+  AUTH_COOKIES,
+  issueGuestSessionCookie,
+  verifyGuestCookie,
+  verifyInviteToken,
+} from "@/lib/auth";
 
 export async function POST(req: NextRequest) {
   let body: { token?: unknown; name?: unknown };
@@ -21,7 +26,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invite invalid or expired" }, { status: 401 });
   }
 
-  const { cookieName, value, ttl } = await issueGuestSessionCookie(payload.sessionId, name);
+  const existingGuest = await verifyGuestCookie(
+    req.cookies.get(AUTH_COOKIES.guest(payload.sessionId))?.value,
+    payload.sessionId,
+  );
+
+  const { cookieName, value, ttl } = await issueGuestSessionCookie(
+    payload.sessionId,
+    name,
+    existingGuest?.participantId,
+  );
 
   const res = NextResponse.json({ ok: true, sessionId: payload.sessionId });
   res.cookies.set(cookieName, value, {

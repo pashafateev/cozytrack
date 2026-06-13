@@ -11,6 +11,7 @@ type RecordingTakeWithStatuses = {
   sessionId: string;
   startedAt: Date;
   stoppedAt: Date | null;
+  updatedAt?: Date;
   participantStatuses?: Array<{
     participantId: string;
     participantName: string | null;
@@ -21,6 +22,7 @@ type RecordingTakeWithStatuses = {
   }>;
 };
 
+const ACTIVE_TAKE_STALE_AFTER_MS = 10 * 60 * 1000;
 const READINESS_STATUSES = new Set(["ready", "not_ready"]);
 const RECORDING_STATUSES = new Set([
   "connected",
@@ -88,6 +90,48 @@ async function findActiveTake(
       participantStatuses: { orderBy: { participantName: "asc" } },
     },
   });
+}
+
+function latestTakeActivityAt(take: RecordingTakeWithStatuses): Date {
+  const statusTimes = (take.participantStatuses ?? []).map((status) =>
+    status.updatedAt.getTime(),
+  );
+  const latestStatusTime = statusTimes.length > 0 ? Math.max(...statusTimes) : 0;
+  return new Date(
+    Math.max(
+      take.startedAt.getTime(),
+      take.updatedAt?.getTime() ?? 0,
+      latestStatusTime,
+    ),
+  );
+}
+
+async function expireIfStale(
+  take: RecordingTakeWithStatuses,
+  now = new Date(),
+): Promise<boolean> {
+  if (take.stoppedAt) return false;
+  const lastActivityAt = latestTakeActivityAt(take);
+  if (now.getTime() - lastActivityAt.getTime() <= ACTIVE_TAKE_STALE_AFTER_MS) {
+    return false;
+  }
+
+  await db.recordingTake.update({
+    where: { id: take.id },
+    data: { stoppedAt: now },
+    include: {
+      participantStatuses: { orderBy: { participantName: "asc" } },
+    },
+  });
+  return true;
+}
+
+async function findFreshActiveTake(
+  sessionId: string,
+): Promise<RecordingTakeWithStatuses | null> {
+  const take = await findActiveTake(sessionId);
+  if (!take) return null;
+  return (await expireIfStale(take)) ? null : take;
 }
 
 function serializeTake(take: RecordingTakeWithStatuses | null) {
@@ -164,7 +208,7 @@ export async function GET(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    const take = await findActiveTake(id);
+    const take = await findFreshActiveTake(id);
     return NextResponse.json(serializeRecordingState(take, Boolean(take)));
   } catch (error) {
     console.error("Failed to read recording state:", error);
@@ -206,7 +250,7 @@ export async function POST(
         );
       }
 
-      const existing = await findActiveTake(id);
+      const existing = await findFreshActiveTake(id);
       if (existing) {
         return NextResponse.json(serializeRecordingState(existing, true));
       }
@@ -298,12 +342,16 @@ export async function PATCH(
     }
 
     const requestedTakeId = typeof body?.takeId === "string" ? body.takeId : null;
-    const take = requestedTakeId
+    let take = requestedTakeId
       ? await db.recordingTake.findUnique({
           where: { id: requestedTakeId },
           include: { participantStatuses: true },
         })
-      : await findActiveTake(id);
+      : await findFreshActiveTake(id);
+
+    if (take?.stoppedAt === null && (await expireIfStale(take))) {
+      take = null;
+    }
 
     if (!take) {
       return NextResponse.json(

@@ -35,6 +35,7 @@ import {
   completeUpload,
 } from "@/lib/upload";
 import {
+  getRecordingTakeState,
   reportRecordingTakeParticipantStatus,
   startRecordingTake,
   stopRecordingTake,
@@ -112,6 +113,7 @@ const BANDWIDTH_SAVING_PUBLISH = {
 } as const;
 
 const RECORDING_CONFIRMATION_TIMEOUT_MS = 4000;
+const RECORDING_STATUS_HEARTBEAT_MS = 30_000;
 
 // ---------- Helpers ----------
 
@@ -1764,6 +1766,7 @@ function RoomContent({
   // not permanently lock out the button.
   const startingRef = useRef(false);
   const stoppingRef = useRef(false);
+  const activeTakeCatchupRef = useRef<string | null>(null);
 
   // Button handler: broadcast first so remote participants start close to our
   // own start time, then start locally. sessionStartedAt uses our local clock
@@ -1865,6 +1868,87 @@ function RoomContent({
       stoppingRef.current = false;
     }
   }, [isHost, sessionId, transport, stopRecordingLocal, showNotification]);
+
+  useEffect(() => {
+    if (studioState !== "recording") return;
+    const takeId = recordingTakeIdRef.current;
+    if (!takeId) return;
+
+    let cancelled = false;
+    const reportHeartbeat = async () => {
+      try {
+        await reportRecordingTakeParticipantStatus(sessionId, {
+          takeId,
+          participantName,
+          recordingStatus: "recording",
+        });
+      } catch (err) {
+        if (!cancelled) {
+          console.error("Failed to report recording heartbeat:", err);
+        }
+      }
+    };
+
+    void reportHeartbeat();
+    const interval = window.setInterval(
+      () => void reportHeartbeat(),
+      RECORDING_STATUS_HEARTBEAT_MS,
+    );
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [participantName, sessionId, studioState]);
+
+  useEffect(() => {
+    if (!recordingStream || studioState !== "connected" || recorderRef.current) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function catchUpToActiveTake() {
+      try {
+        const state = await getRecordingTakeState(sessionId);
+        if (cancelled) return;
+        if (!state.active || !state.take || !state.sessionStartedAt) {
+          activeTakeCatchupRef.current = null;
+          return;
+        }
+
+        const catchupKey = `${state.take.id}:${state.sessionStartedAt}`;
+        if (activeTakeCatchupRef.current === catchupKey) return;
+        if (studioStateRef.current !== "connected" || recorderRef.current) return;
+
+        activeTakeCatchupRef.current = catchupKey;
+        const started = await startRecordingLocal(
+          state.sessionStartedAt,
+          state.take.id,
+        );
+        if (!cancelled && !started) {
+          activeTakeCatchupRef.current = null;
+          showNotification("Couldn't resume active recording - check your mic");
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.error("Failed to catch up to active recording take:", err);
+        }
+      }
+    }
+
+    void catchUpToActiveTake();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    recordingStream,
+    sessionId,
+    startRecordingLocal,
+    studioState,
+    showNotification,
+  ]);
 
   // Subscribe to remote control messages. LiveKit does not echo the sender's
   // own messages back, but startRecordingLocal/stopRecordingLocal are

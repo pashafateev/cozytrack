@@ -47,6 +47,20 @@ async function jsonRequest<T>(
   return (await res.json()) as T;
 }
 
+export async function getRecordingTakeState(
+  sessionId: string,
+): Promise<RecordingTakeState> {
+  const res = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/recording-state`,
+  );
+
+  if (!res.ok) {
+    throw new Error(await parseError(res));
+  }
+
+  return (await res.json()) as RecordingTakeState;
+}
+
 export async function startRecordingTake(
   sessionId: string,
   sessionStartedAt: string,
