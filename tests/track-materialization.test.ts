@@ -97,6 +97,12 @@ vi.mock("@/lib/s3", () => ({
   putObjectBytes: mocks.writeObjectBytes,
   trackRecordingKey: (sessionId: string, trackId: string) =>
     `sessions/${sessionId}/tracks/${trackId}/recording.webm`,
+  trackSegmentSourceRecordingKey: (
+    sessionId: string,
+    trackId: string,
+    segmentId: string,
+  ) =>
+    `sessions/${sessionId}/tracks/${trackId}/segments/${segmentId}/recording.webm`,
   trackSegmentRecordingKey: (
     sessionId: string,
     trackId: string,
@@ -199,6 +205,65 @@ describe("materializeTrack", () => {
     });
   });
 
+  it("uses an immutable default segment source when rematerializing later segments", async () => {
+    seedTrack();
+    seedSegment({ id: "track-1", segmentIndex: 0, durationMs: 1000 });
+    seedSegment({ id: "segment-2", segmentIndex: 1, durationMs: 5000 });
+
+    const defaultUploadKey = "sessions/s1/tracks/track-1/recording.webm";
+    const defaultSourceKey =
+      "sessions/s1/tracks/track-1/segments/track-1/recording.webm";
+    const secondSegmentKey =
+      "sessions/s1/tracks/track-1/segments/segment-2/recording.webm";
+    const thirdSegmentKey =
+      "sessions/s1/tracks/track-1/segments/segment-3/recording.webm";
+    const objects = new Map<string, Uint8Array>([
+      [defaultUploadKey, new Uint8Array([1])],
+      [secondSegmentKey, new Uint8Array([2])],
+      [thirdSegmentKey, new Uint8Array([3])],
+    ]);
+    mocks.readObjectBytes.mockImplementation(async (key) => {
+      const bytes = objects.get(key);
+      if (!bytes) throw new Error(`missing ${key}`);
+      return bytes;
+    });
+    mocks.writeObjectBytes.mockImplementation(async (key, bytes) => {
+      objects.set(key, bytes);
+    });
+
+    await materializeTrack("track-1", {
+      readObjectBytes: mocks.readObjectBytes,
+      writeObjectBytes: mocks.writeObjectBytes,
+      remuxSegments: mocks.remuxSegments,
+    });
+
+    expect(mocks.writeObjectBytes).toHaveBeenCalledWith(
+      defaultSourceKey,
+      new Uint8Array([1]),
+    );
+    expect(mocks.remuxSegments).toHaveBeenLastCalledWith({
+      sourceKeys: [defaultSourceKey, secondSegmentKey],
+      outputKey: defaultUploadKey,
+    });
+
+    seedSegment({ id: "segment-3", segmentIndex: 2, durationMs: 7000 });
+    mocks.readObjectBytes.mockClear();
+    mocks.writeObjectBytes.mockClear();
+    mocks.remuxSegments.mockClear();
+
+    await materializeTrack("track-1", {
+      readObjectBytes: mocks.readObjectBytes,
+      writeObjectBytes: mocks.writeObjectBytes,
+      remuxSegments: mocks.remuxSegments,
+    });
+
+    expect(mocks.readObjectBytes).not.toHaveBeenCalledWith(defaultUploadKey);
+    expect(mocks.remuxSegments).toHaveBeenCalledWith({
+      sourceKeys: [defaultSourceKey, secondSegmentKey, thirdSegmentKey],
+      outputKey: defaultUploadKey,
+    });
+  });
+
   it("does not mark the logical track complete when remuxing fails", async () => {
     seedTrack({ status: "uploading" });
     seedSegment({ id: "track-1", segmentIndex: 0, durationMs: 1000 });
@@ -220,6 +285,35 @@ describe("materializeTrack", () => {
       status: "failed",
     });
     expect(mocks.tracks.get("track-1")?.status).not.toBe("complete");
+  });
+
+  it("does not mark failed when a newer segment appears before remux failure", async () => {
+    seedTrack({ status: "uploading" });
+    seedSegment({ id: "track-1", segmentIndex: 0, durationMs: 1000 });
+    seedSegment({ id: "segment-2", segmentIndex: 1, durationMs: 5000 });
+    mocks.remuxSegments.mockImplementationOnce(async () => {
+      seedSegment({ id: "segment-3", segmentIndex: 2, status: "recording" });
+      const track = mocks.tracks.get("track-1");
+      if (track) {
+        mocks.tracks.set("track-1", { ...track, status: "recording" });
+      }
+      throw new Error("ffmpeg failed");
+    });
+
+    const result = await materializeTrack("track-1", {
+      readObjectBytes: mocks.readObjectBytes,
+      writeObjectBytes: mocks.writeObjectBytes,
+      remuxSegments: mocks.remuxSegments,
+    });
+
+    expect(result).toMatchObject({
+      status: "superseded",
+      s3Key: "sessions/s1/tracks/track-1/recording.webm",
+      segmentCount: 2,
+    });
+    expect(mocks.tracks.get("track-1")).toMatchObject({
+      status: "recording",
+    });
   });
 
   it("skips missing completed segment artifacts for recovery materialization", async () => {
