@@ -12,6 +12,7 @@ import {
 } from "@/lib/sync-marker-detection";
 import {
   getObjectBytes,
+  getObjectBytesRange,
   putObjectBytes,
   trackRecordingKey,
   trackSegmentRecordingExists,
@@ -51,6 +52,7 @@ export type RemuxSegmentsInput = {
 
 export type MaterializeTrackDeps = {
   readObjectBytes?: (key: string) => Promise<Uint8Array>;
+  readObjectBytesRange?: (key: string, maxBytes: number) => Promise<Uint8Array>;
   writeObjectBytes?: (key: string, bytes: Uint8Array) => Promise<void>;
   remuxSegments?: (input: RemuxSegmentsInput) => Promise<void>;
   detectSyncMarker?: (
@@ -162,11 +164,21 @@ async function remuxWebmSegments(
   }
 }
 
+// Detection only inspects the first ~5.3s, and ffmpeg's `-t` cap stops decoding
+// before reaching the end of this slice for any realistic Opus bitrate (Opus
+// tops out near 510kbps; 4 MiB holds >60s at that rate). Reading a bounded
+// range instead of the whole object keeps an arbitrarily large upload from
+// being downloaded and buffered into /tmp just to look at its start.
+const DETECTION_SOURCE_READ_MAX_BYTES = 4 * 1024 * 1024;
+
 async function detectSegmentSyncMarker(
   input: DetectSyncMarkerInput,
-  deps: Required<Pick<MaterializeTrackDeps, "readObjectBytes">>,
+  deps: Required<Pick<MaterializeTrackDeps, "readObjectBytesRange">>,
 ): Promise<SyncMarkerDetectionResult> {
-  const bytes = await deps.readObjectBytes(input.sourceKey);
+  const bytes = await deps.readObjectBytesRange(
+    input.sourceKey,
+    DETECTION_SOURCE_READ_MAX_BYTES,
+  );
   return await detectSyncMarkerInWebmBytes(bytes);
 }
 
@@ -265,11 +277,12 @@ async function detectAndPersistSyncMarkers(input: {
     );
   if (markerSegments.length === 0) return;
 
-  const readObjectBytes = deps.readObjectBytes ?? getObjectBytes;
   const detectSyncMarker =
     deps.detectSyncMarker ??
     ((detectInput: DetectSyncMarkerInput) =>
-      detectSegmentSyncMarker(detectInput, { readObjectBytes }));
+      detectSegmentSyncMarker(detectInput, {
+        readObjectBytesRange: deps.readObjectBytesRange ?? getObjectBytesRange,
+      }));
 
   for (
     let start = 0;
