@@ -469,3 +469,142 @@ test("records host plus two guests and stores three completed WebMs", async ({
     await Promise.all(guestContexts.map((context) => context.close()));
   }
 });
+
+test("keeps a returning guest in one logical track during an active recording", async ({
+  browser,
+  page,
+}) => {
+  const hostName = "Reconnect Host";
+  const guestName = "Reconnect Guest";
+  const guestContexts: BrowserContext[] = [];
+
+  try {
+    const sessionName = `Reconnect smoke ${Date.now()}`;
+    const sessionId = await createAndJoinHostStudio(page, sessionName, hostName);
+    const inviteUrl = await createInviteUrl(page, sessionId);
+
+    const guestContext = await browser.newContext({
+      permissions: ["microphone"],
+      viewport: { width: 1280, height: 720 },
+    });
+    guestContexts.push(guestContext);
+
+    const firstGuestPage = await guestContext.newPage();
+    await joinGuestStudio(firstGuestPage, inviteUrl, sessionId, guestName);
+
+    await test.step("start recording with the first guest present", async () => {
+      await page.waitForTimeout(1_000);
+      await page.getByRole("button", { name: "Start recording" }).click();
+      await expect(
+        page.getByRole("button", { name: "Stop recording" }),
+      ).toBeVisible();
+      await expect(
+        firstGuestPage.getByRole("status", { name: "Recording in progress" }),
+      ).toBeVisible({ timeout: 30_000 });
+    });
+
+    await test.step("close the guest tab after its first segment starts", async () => {
+      await expect
+        .poll(
+          async () => {
+            const track = await db.track.findFirst({
+              where: { sessionId, participantName: guestName },
+              include: { segments: true },
+            });
+            return track?.segments.length ?? 0;
+          },
+          { timeout: 30_000 },
+        )
+        .toBe(1);
+
+      await page.waitForTimeout(6_000);
+      await firstGuestPage.close();
+    });
+
+    const returningGuestPage = await guestContext.newPage();
+    await joinGuestStudio(returningGuestPage, inviteUrl, sessionId, guestName);
+
+    await test.step("returning guest catches up to the active recording", async () => {
+      await expect(
+        returningGuestPage.getByRole("status", {
+          name: "Recording in progress",
+        }),
+      ).toBeVisible({ timeout: 45_000 });
+
+      await expect
+        .poll(
+          async () => {
+            const tracks = await db.track.findMany({
+              where: { sessionId, participantName: guestName },
+              include: { segments: true },
+            });
+            return {
+              trackCount: tracks.length,
+              segmentCount: tracks.reduce(
+                (total, track) => total + track.segments.length,
+                0,
+              ),
+            };
+          },
+          { timeout: 30_000 },
+        )
+        .toEqual({ trackCount: 1, segmentCount: 2 });
+    });
+
+    await test.step("stop and verify the returned guest materializes once", async () => {
+      await page.waitForTimeout(2_000);
+      await page.getByRole("button", { name: "Stop recording" }).click();
+      await expect(page.getByText("FINALIZING").first()).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "Start recording" }),
+      ).toBeVisible({ timeout: 60_000 });
+
+      await expect
+        .poll(
+          async () => {
+            const tracks = await db.track.findMany({
+              where: { sessionId, participantName: guestName },
+              select: {
+                id: true,
+                status: true,
+                segments: {
+                  select: { status: true },
+                  orderBy: { segmentIndex: "asc" },
+                },
+              },
+            });
+            return tracks.map((track) => ({
+              status: track.status,
+              segmentCount: track.segments.length,
+              completedSegments: track.segments.filter(
+                (segment) => segment.status === "complete",
+              ).length,
+            }));
+          },
+          { timeout: 60_000 },
+        )
+        .toEqual([
+          {
+            status: "complete",
+            segmentCount: 2,
+            completedSegments: 1,
+          },
+        ]);
+
+      const guestTrack = await db.track.findFirstOrThrow({
+        where: { sessionId, participantName: guestName },
+        select: { durationMs: true, s3Key: true },
+      });
+      await assertStoredRecording(sessionId, guestTrack);
+    });
+
+    await test.step("finish the recording from the host UI", async () => {
+      await page.getByRole("button", { name: "Finish recording" }).click();
+      await expect(page.getByText("Ready for ingest")).toBeVisible({
+        timeout: 45_000,
+      });
+    });
+  } finally {
+    await Promise.all(guestContexts.map((context) => context.close()));
+  }
+});
