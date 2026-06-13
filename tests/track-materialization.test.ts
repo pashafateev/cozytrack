@@ -28,6 +28,9 @@ const mocks = vi.hoisted(() => ({
   trackSegmentRecordingExists: vi.fn<
     (sessionId: string, trackId: string, segmentId: string) => Promise<boolean>
   >(),
+  trackSegmentSourceRecordingExists: vi.fn<
+    (sessionId: string, trackId: string, segmentId: string) => Promise<boolean>
+  >(),
 }));
 
 vi.mock("@/lib/db", () => ({
@@ -103,6 +106,7 @@ vi.mock("@/lib/s3", () => ({
     segmentId: string,
   ) =>
     `sessions/${sessionId}/tracks/${trackId}/segments/${segmentId}/recording.webm`,
+  trackSegmentSourceRecordingExists: mocks.trackSegmentSourceRecordingExists,
   trackSegmentRecordingKey: (
     sessionId: string,
     trackId: string,
@@ -147,6 +151,7 @@ beforeEach(() => {
   mocks.writeObjectBytes.mockResolvedValue(undefined);
   mocks.remuxSegments.mockResolvedValue(undefined);
   mocks.trackSegmentRecordingExists.mockResolvedValue(true);
+  mocks.trackSegmentSourceRecordingExists.mockResolvedValue(false);
 });
 
 describe("materializeTrack", () => {
@@ -188,7 +193,7 @@ describe("materializeTrack", () => {
 
     expect(mocks.remuxSegments).toHaveBeenCalledWith({
       sourceKeys: [
-        "sessions/s1/tracks/track-1/recording.webm",
+        "sessions/s1/tracks/track-1/segments/track-1/recording.webm",
         "sessions/s1/tracks/track-1/segments/segment-2/recording.webm",
       ],
       outputKey: "sessions/s1/tracks/track-1/recording.webm",
@@ -222,6 +227,10 @@ describe("materializeTrack", () => {
       [secondSegmentKey, new Uint8Array([2])],
       [thirdSegmentKey, new Uint8Array([3])],
     ]);
+    mocks.trackSegmentSourceRecordingExists.mockImplementation(
+      async (_sessionId, _trackId, segmentId) =>
+        segmentId === "track-1" && objects.has(defaultSourceKey),
+    );
     mocks.readObjectBytes.mockImplementation(async (key) => {
       const bytes = objects.get(key);
       if (!bytes) throw new Error(`missing ${key}`);

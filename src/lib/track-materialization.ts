@@ -11,6 +11,8 @@ import {
   trackRecordingKey,
   trackSegmentRecordingExists,
   trackSegmentRecordingKey,
+  trackSegmentSourceRecordingExists,
+  trackSegmentSourceRecordingKey,
 } from "@/lib/s3";
 
 const execFileAsync = promisify(execFile);
@@ -50,14 +52,41 @@ export type MaterializeTrackDeps = {
   skipMissingSegments?: boolean;
 };
 
-function segmentRecordingKeys(
+async function segmentRecordingKeys(
   sessionId: string,
   trackId: string,
   segments: CompletedSegment[],
-): string[] {
-  return segments.map((segment) =>
-    trackSegmentRecordingKey(sessionId, trackId, segment.id),
-  );
+  deps: Required<
+    Pick<MaterializeTrackDeps, "readObjectBytes" | "writeObjectBytes">
+  >,
+): Promise<string[]> {
+  const keys: string[] = [];
+  for (const segment of segments) {
+    if (segment.id !== trackId) {
+      keys.push(trackSegmentRecordingKey(sessionId, trackId, segment.id));
+      continue;
+    }
+
+    const sourceKey = trackSegmentSourceRecordingKey(
+      sessionId,
+      trackId,
+      segment.id,
+    );
+    if (
+      !(await trackSegmentSourceRecordingExists(sessionId, trackId, segment.id))
+    ) {
+      // The default segment originally uploads to the logical output key.
+      // Preserve that raw source before remuxing overwrites the logical file.
+      await deps.writeObjectBytes(
+        sourceKey,
+        await deps.readObjectBytes(
+          trackSegmentRecordingKey(sessionId, trackId, segment.id),
+        ),
+      );
+    }
+    keys.push(sourceKey);
+  }
+  return keys;
 }
 
 function totalDurationMs(segments: CompletedSegment[]): number | null {
@@ -117,15 +146,35 @@ async function remuxWebmSegments(
   }
 }
 
-async function markTrackFailed(
-  trackId: string,
-  finalKey: string,
-  segmentCount: number,
-): Promise<MaterializationResult> {
-  await db.track.updateMany({
-    where: { id: trackId, status: { not: "complete" } },
+async function markTrackFailed(input: {
+  trackId: string;
+  currentS3Key: string;
+  finalKey: string;
+  segmentCount: number;
+  latestSegmentIndex: number;
+}): Promise<MaterializationResult> {
+  const { trackId, currentS3Key, finalKey, segmentCount, latestSegmentIndex } =
+    input;
+  const updated = await db.track.updateMany({
+    where: {
+      id: trackId,
+      status: { not: "complete" },
+      segments: {
+        none: { segmentIndex: { gt: latestSegmentIndex } },
+      },
+    },
     data: { status: "failed" },
   });
+
+  if (updated.count === 0) {
+    return {
+      trackId,
+      status: "superseded",
+      s3Key: currentS3Key,
+      segmentCount,
+      durationMs: null,
+    };
+  }
 
   return {
     trackId,
@@ -134,6 +183,21 @@ async function markTrackFailed(
     segmentCount,
     durationMs: null,
   };
+}
+
+async function markTrackFailedIfNoSegments(
+  trackId: string,
+  currentS3Key: string,
+  finalKey: string,
+  latestSegmentIndex: number,
+): Promise<MaterializationResult> {
+  return await markTrackFailed({
+    trackId,
+    currentS3Key,
+    finalKey,
+    segmentCount: 0,
+    latestSegmentIndex,
+  });
 }
 
 export async function materializeTrack(
@@ -204,16 +268,38 @@ export async function materializeTrack(
   }
 
   if (sourceSegments.length === 0) {
-    return await markTrackFailed(trackId, finalKey, 0);
+    return await markTrackFailedIfNoSegments(
+      trackId,
+      track.s3Key,
+      finalKey,
+      latestSegment.segmentIndex,
+    );
   }
 
-  const sourceKeys = segmentRecordingKeys(
-    track.sessionId,
-    trackId,
-    sourceSegments,
-  );
-
   try {
+    let sourceKeys: string[];
+    if (sourceSegments.length === 1) {
+      sourceKeys = [
+        trackSegmentRecordingKey(
+          track.sessionId,
+          trackId,
+          sourceSegments[0]!.id,
+        ),
+      ];
+    } else {
+      const readObjectBytes = deps.readObjectBytes ?? getObjectBytes;
+      const writeObjectBytes = deps.writeObjectBytes ?? putObjectBytes;
+      sourceKeys = await segmentRecordingKeys(
+        track.sessionId,
+        trackId,
+        sourceSegments,
+        {
+          readObjectBytes,
+          writeObjectBytes,
+        },
+      );
+    }
+
     if (sourceKeys.length === 1) {
       const [sourceKey] = sourceKeys;
       if (sourceKey !== finalKey) {
@@ -232,7 +318,13 @@ export async function materializeTrack(
     }
   } catch (error) {
     console.error(`[materialize] track=${trackId} failed:`, error);
-    return await markTrackFailed(trackId, finalKey, sourceSegments.length);
+    return await markTrackFailed({
+      trackId,
+      currentS3Key: track.s3Key,
+      finalKey,
+      segmentCount: sourceSegments.length,
+      latestSegmentIndex: latestSegment.segmentIndex,
+    });
   }
 
   const durationMs = totalDurationMs(sourceSegments);
