@@ -349,10 +349,6 @@ export async function PATCH(
         })
       : await findFreshActiveTake(id);
 
-    if (take?.stoppedAt === null && (await expireIfStale(take))) {
-      take = null;
-    }
-
     if (!take) {
       return NextResponse.json(
         { error: "Recording take not found" },
@@ -361,6 +357,12 @@ export async function PATCH(
     }
     if (take.sessionId !== id) {
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
+    }
+    if (take.stoppedAt === null && (await expireIfStale(take))) {
+      return NextResponse.json(
+        { error: "Recording take not found" },
+        { status: 404 },
+      );
     }
 
     const participantId = principalParticipantId(auth.principal);

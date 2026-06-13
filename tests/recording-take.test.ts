@@ -303,6 +303,28 @@ describe("/api/sessions/[id]/recording-state", () => {
     expect(mocks.takes.get("take-1")?.stoppedAt).toBeNull();
   });
 
+  it("does not expire a take from another session when reporting by takeId", async () => {
+    const staleStartedAt = new Date(Date.now() - 11 * 60 * 1000);
+    mocks.takes.set("take-other", {
+      id: "take-other",
+      sessionId: "s2",
+      startedAt: staleStartedAt,
+      stoppedAt: null,
+    });
+
+    const res = await reportRecordingState(
+      request("PATCH", {
+        takeId: "take-other",
+        recordingStatus: "recording",
+      }),
+      params("s1"),
+    );
+
+    expect(res.status).toBe(403);
+    expect(mocks.takes.get("take-other")?.stoppedAt).toBeNull();
+    expect(mocks.participantStatuses).toHaveLength(0);
+  });
+
   it("allows guests to read but not mutate room-level active state", async () => {
     mocks.resolvePrincipal.mockResolvedValue({
       kind: "guest",
