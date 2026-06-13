@@ -4,6 +4,11 @@ import {
   getPresignedUploadTarget,
   getPresignedUploadUrl,
 } from "@/lib/upload";
+import {
+  SYNC_MARKER_DURATION_MS,
+  SYNC_MARKER_OFFSET_MS,
+  SYNC_MARKER_VERSION,
+} from "@/lib/sync-marker";
 
 const fetchMock = vi.fn();
 
@@ -72,6 +77,33 @@ describe("upload client auth", () => {
         },
       }),
     );
+  });
+
+  it("sends sync marker metadata when starting a recording", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ url: "https://s3.example/chunk-0" }),
+    );
+
+    await getPresignedUploadTarget("session-1", "track-1", 0, "Alice", {
+      syncMarker: {
+        version: SYNC_MARKER_VERSION,
+        offsetMs: SYNC_MARKER_OFFSET_MS,
+        durationMs: SYNC_MARKER_DURATION_MS,
+      },
+    });
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      sessionId: "session-1",
+      trackId: "track-1",
+      partNumber: 0,
+      participantName: "Alice",
+      syncMarker: {
+        version: SYNC_MARKER_VERSION,
+        offsetMs: SYNC_MARKER_OFFSET_MS,
+        durationMs: SYNC_MARKER_DURATION_MS,
+      },
+    });
   });
 
   it("sends the recording token when completing the upload", async () => {
