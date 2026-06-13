@@ -62,6 +62,7 @@ jobs:
               name === "scripts/release-check.sh" ||
               name === "scripts/test-browser-smoke.sh" ||
               name.startsWith("src/app/api/auth/") ||
+              name.startsWith("src/app/api/livekit-token/") ||
               name.startsWith("src/app/api/sessions/") ||
               name.startsWith("src/app/api/upload/") ||
               name.startsWith("src/app/session/") ||
