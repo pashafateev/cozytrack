@@ -15,6 +15,14 @@ type TrackSegment = {
   segmentIndex: number;
   status: string;
   durationMs: number | null;
+  syncMarkerVersion?: string | null;
+  syncMarkerOffsetMs?: number | null;
+  syncMarkerDurationMs?: number | null;
+  syncMarkerDetectedAtMs?: number | null;
+  syncMarkerDetectedAtSamples?: number | null;
+  syncMarkerConfidence?: number | null;
+  syncMarkerDetectionStatus?: string | null;
+  syncMarkerAnalyzedAt?: Date | null;
 };
 
 const mocks = vi.hoisted(() => ({
@@ -25,6 +33,7 @@ const mocks = vi.hoisted(() => ({
   remuxSegments: vi.fn<
     (input: { sourceKeys: string[]; outputKey: string }) => Promise<void>
   >(),
+  detectSyncMarker: vi.fn(),
   trackSegmentRecordingExists: vi.fn<
     (sessionId: string, trackId: string, segmentId: string) => Promise<boolean>
   >(),
@@ -91,6 +100,21 @@ vi.mock("@/lib/db", () => ({
           return list;
         },
       ),
+      update: vi.fn(
+        async ({
+          where: { id },
+          data,
+        }: {
+          where: { id: string };
+          data: Partial<TrackSegment>;
+        }) => {
+          const existing = mocks.segments.get(id);
+          if (!existing) throw new Error("segment not found");
+          const updated = { ...existing, ...data };
+          mocks.segments.set(id, updated);
+          return { ...updated };
+        },
+      ),
     },
   },
 }));
@@ -150,6 +174,12 @@ beforeEach(() => {
   mocks.readObjectBytes.mockResolvedValue(new Uint8Array([1, 2, 3]));
   mocks.writeObjectBytes.mockResolvedValue(undefined);
   mocks.remuxSegments.mockResolvedValue(undefined);
+  mocks.detectSyncMarker.mockResolvedValue({
+    status: "detected",
+    detectedAtMs: 103,
+    detectedAtSamples: 4944,
+    confidence: 0.92,
+  });
   mocks.trackSegmentRecordingExists.mockResolvedValue(true);
   mocks.trackSegmentSourceRecordingExists.mockResolvedValue(false);
 });
@@ -178,6 +208,104 @@ describe("materializeTrack", () => {
     expect(mocks.readObjectBytes).not.toHaveBeenCalled();
     expect(mocks.writeObjectBytes).not.toHaveBeenCalled();
     expect(mocks.remuxSegments).not.toHaveBeenCalled();
+  });
+
+  it("persists sync marker detection metadata for completed source segments", async () => {
+    seedTrack();
+    seedSegment({
+      id: "track-1",
+      durationMs: 12345,
+      syncMarkerVersion: "chirp-v1",
+      syncMarkerOffsetMs: 100,
+      syncMarkerDurationMs: 300,
+    });
+
+    const result = await materializeTrack("track-1", {
+      readObjectBytes: mocks.readObjectBytes,
+      writeObjectBytes: mocks.writeObjectBytes,
+      remuxSegments: mocks.remuxSegments,
+      detectSyncMarker: mocks.detectSyncMarker,
+    });
+
+    expect(result.status).toBe("complete");
+    expect(mocks.detectSyncMarker).toHaveBeenCalledWith({
+      sessionId: "s1",
+      trackId: "track-1",
+      segmentId: "track-1",
+      sourceKey: "sessions/s1/tracks/track-1/recording.webm",
+    });
+    expect(mocks.segments.get("track-1")).toMatchObject({
+      syncMarkerDetectionStatus: "detected",
+      syncMarkerDetectedAtMs: 103,
+      syncMarkerDetectedAtSamples: 4944,
+      syncMarkerConfidence: 0.92,
+    });
+    expect(mocks.segments.get("track-1")?.syncMarkerAnalyzedAt).toBeInstanceOf(
+      Date,
+    );
+  });
+
+  it("records sync marker decode failures without failing materialization", async () => {
+    seedTrack();
+    seedSegment({
+      id: "track-1",
+      durationMs: 12345,
+      syncMarkerVersion: "chirp-v1",
+      syncMarkerOffsetMs: 100,
+      syncMarkerDurationMs: 300,
+    });
+    mocks.detectSyncMarker.mockRejectedValueOnce(new Error("ffmpeg failed"));
+
+    const result = await materializeTrack("track-1", {
+      readObjectBytes: mocks.readObjectBytes,
+      writeObjectBytes: mocks.writeObjectBytes,
+      remuxSegments: mocks.remuxSegments,
+      detectSyncMarker: mocks.detectSyncMarker,
+    });
+
+    expect(result.status).toBe("complete");
+    expect(mocks.tracks.get("track-1")).toMatchObject({
+      status: "complete",
+    });
+    expect(mocks.segments.get("track-1")).toMatchObject({
+      syncMarkerDetectionStatus: "decode_failed",
+      syncMarkerDetectedAtMs: null,
+      syncMarkerDetectedAtSamples: null,
+      syncMarkerConfidence: 0,
+    });
+  });
+
+  it("marks marker-bearing segments skipped during partial recovery as source_missing", async () => {
+    seedTrack({ status: "uploading" });
+    seedSegment({ id: "track-1", segmentIndex: 0, durationMs: 1000 });
+    seedSegment({
+      id: "segment-2",
+      segmentIndex: 1,
+      durationMs: 5000,
+      syncMarkerVersion: "chirp-v1",
+      syncMarkerOffsetMs: 100,
+      syncMarkerDurationMs: 300,
+    });
+    mocks.trackSegmentRecordingExists.mockImplementation(
+      async (_sessionId, _trackId, segmentId) => segmentId === "track-1",
+    );
+
+    const result = await materializeTrack("track-1", {
+      readObjectBytes: mocks.readObjectBytes,
+      writeObjectBytes: mocks.writeObjectBytes,
+      remuxSegments: mocks.remuxSegments,
+      detectSyncMarker: mocks.detectSyncMarker,
+      skipMissingSegments: true,
+    });
+
+    expect(result.status).toBe("complete");
+    expect(mocks.segments.get("segment-2")).toMatchObject({
+      syncMarkerDetectionStatus: "source_missing",
+      syncMarkerDetectedAtMs: null,
+      syncMarkerDetectedAtSamples: null,
+      syncMarkerConfidence: 0,
+    });
+    expect(mocks.detectSyncMarker).not.toHaveBeenCalled();
   });
 
   it("remuxes multiple completed segments into the logical track artifact", async () => {

@@ -6,6 +6,16 @@ import { promisify } from "node:util";
 import ffmpegStaticPath from "ffmpeg-static";
 import { db } from "@/lib/db";
 import {
+  detectSyncMarkerInWebmBytes,
+  type SyncMarkerDetectionResult,
+} from "@/lib/sync-marker-detection";
+import {
+  SYNC_MARKER_DURATION_MS,
+  SYNC_MARKER_END_FREQUENCY_HZ,
+  SYNC_MARKER_GAIN,
+  SYNC_MARKER_START_FREQUENCY_HZ,
+} from "@/lib/sync-marker";
+import {
   getObjectBytes,
   putObjectBytes,
   trackRecordingKey,
@@ -22,6 +32,7 @@ type CompletedSegment = {
   segmentIndex: number;
   status: string;
   durationMs: number | null;
+  syncMarkerVersion: string | null;
 };
 
 export type MaterializationStatus =
@@ -47,9 +58,19 @@ export type MaterializeTrackDeps = {
   readObjectBytes?: (key: string) => Promise<Uint8Array>;
   writeObjectBytes?: (key: string, bytes: Uint8Array) => Promise<void>;
   remuxSegments?: (input: RemuxSegmentsInput) => Promise<void>;
+  detectSyncMarker?: (
+    input: DetectSyncMarkerInput,
+  ) => Promise<SyncMarkerDetectionResult>;
   partial?: boolean;
   allowIncompleteLatest?: boolean;
   skipMissingSegments?: boolean;
+};
+
+export type DetectSyncMarkerInput = {
+  sessionId: string;
+  trackId: string;
+  segmentId: string;
+  sourceKey: string;
 };
 
 async function segmentRecordingKeys(
@@ -146,6 +167,109 @@ async function remuxWebmSegments(
   }
 }
 
+async function detectSegmentSyncMarker(
+  input: DetectSyncMarkerInput,
+  deps: Required<Pick<MaterializeTrackDeps, "readObjectBytes">>,
+): Promise<SyncMarkerDetectionResult> {
+  const bytes = await deps.readObjectBytes(input.sourceKey);
+  return await detectSyncMarkerInWebmBytes(bytes);
+}
+
+async function persistSegmentSyncMarkerDetection(input: {
+  segmentId: string;
+  result: SyncMarkerDetectionResult;
+}) {
+  const { segmentId, result } = input;
+  await db.trackSegment.update({
+    where: { id: segmentId },
+    data: {
+      syncMarkerDetectionStatus: result.status,
+      syncMarkerDetectedAtMs: result.detectedAtMs,
+      syncMarkerDetectedAtSamples: result.detectedAtSamples,
+      syncMarkerConfidence: result.confidence,
+      syncMarkerAnalyzedAt: new Date(),
+    },
+  });
+}
+
+async function markSyncMarkerSourceMissing(segmentId: string) {
+  await persistSegmentSyncMarkerDetection({
+    segmentId,
+    result: {
+      status: "source_missing",
+      detectedAtMs: null,
+      detectedAtSamples: null,
+      confidence: 0,
+      marker: {
+        durationMs: SYNC_MARKER_DURATION_MS,
+        startFrequencyHz: SYNC_MARKER_START_FREQUENCY_HZ,
+        endFrequencyHz: SYNC_MARKER_END_FREQUENCY_HZ,
+        gain: SYNC_MARKER_GAIN,
+      },
+    },
+  });
+}
+
+async function detectAndPersistSyncMarkers(input: {
+  sessionId: string;
+  trackId: string;
+  segments: CompletedSegment[];
+  sourceKeys: string[];
+  deps: MaterializeTrackDeps;
+}) {
+  const { sessionId, trackId, segments, sourceKeys, deps } = input;
+  const markerSegments = segments
+    .map((segment, index) => ({ segment, sourceKey: sourceKeys[index] }))
+    .filter(
+      (entry): entry is { segment: CompletedSegment; sourceKey: string } =>
+        Boolean(entry.segment.syncMarkerVersion && entry.sourceKey),
+    );
+  if (markerSegments.length === 0) return;
+
+  const readObjectBytes = deps.readObjectBytes ?? getObjectBytes;
+  const detectSyncMarker =
+    deps.detectSyncMarker ??
+    ((detectInput: DetectSyncMarkerInput) =>
+      detectSegmentSyncMarker(detectInput, { readObjectBytes }));
+
+  await Promise.all(
+    markerSegments.map(async ({ segment, sourceKey }) => {
+      try {
+        const result = await detectSyncMarker({
+          sessionId,
+          trackId,
+          segmentId: segment.id,
+          sourceKey,
+        });
+        await persistSegmentSyncMarkerDetection({
+          segmentId: segment.id,
+          result,
+        });
+      } catch (error) {
+        console.error(
+          `[sync-marker] segment=${segment.id} detection failed:`,
+          error,
+        );
+        await persistSegmentSyncMarkerDetection({
+          segmentId: segment.id,
+          result: {
+            status: "decode_failed",
+            detectedAtMs: null,
+            detectedAtSamples: null,
+            confidence: 0,
+            marker: {
+              durationMs: SYNC_MARKER_DURATION_MS,
+              startFrequencyHz: SYNC_MARKER_START_FREQUENCY_HZ,
+              endFrequencyHz: SYNC_MARKER_END_FREQUENCY_HZ,
+              gain: SYNC_MARKER_GAIN,
+            },
+          },
+        });
+      }
+    }),
+  );
+}
+
 async function markTrackFailed(input: {
   trackId: string;
   currentS3Key: string;
@@ -225,6 +349,7 @@ export async function materializeTrack(
       status: true,
       durationMs: true,
       segmentIndex: true,
+      syncMarkerVersion: true,
     },
   });
 
@@ -262,6 +387,9 @@ export async function materializeTrack(
         existingSegments.push(segment);
       } else {
         skippedMissingSegment = true;
+        if (segment.syncMarkerVersion) {
+          await markSyncMarkerSourceMissing(segment.id);
+        }
       }
     }
     sourceSegments = existingSegments;
@@ -276,8 +404,8 @@ export async function materializeTrack(
     );
   }
 
+  let sourceKeys: string[] = [];
   try {
-    let sourceKeys: string[];
     if (sourceSegments.length === 1) {
       sourceKeys = [
         trackSegmentRecordingKey(
@@ -353,6 +481,14 @@ export async function materializeTrack(
       durationMs,
     };
   }
+
+  await detectAndPersistSyncMarkers({
+    sessionId: track.sessionId,
+    trackId,
+    segments: sourceSegments,
+    sourceKeys,
+    deps,
+  });
 
   return {
     trackId,

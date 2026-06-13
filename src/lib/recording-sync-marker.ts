@@ -2,7 +2,10 @@
 
 import {
   SYNC_MARKER_DURATION_MS,
+  SYNC_MARKER_END_FREQUENCY_HZ,
+  SYNC_MARKER_GAIN,
   SYNC_MARKER_OFFSET_MS,
+  SYNC_MARKER_START_FREQUENCY_HZ,
   SYNC_MARKER_VERSION,
   syncMarkerMetadata,
   type SyncMarkerMetadata,
@@ -10,17 +13,16 @@ import {
 
 export {
   SYNC_MARKER_DURATION_MS,
+  SYNC_MARKER_END_FREQUENCY_HZ,
+  SYNC_MARKER_GAIN,
   SYNC_MARKER_OFFSET_MS,
+  SYNC_MARKER_START_FREQUENCY_HZ,
   SYNC_MARKER_VERSION,
   syncMarkerMetadata,
 };
 export type { SyncMarkerMetadata };
 
 export type AudioContextCtor = new (options?: AudioContextOptions) => AudioContext;
-
-export const SYNC_MARKER_START_FREQUENCY_HZ = 1200;
-export const SYNC_MARKER_END_FREQUENCY_HZ = 3200;
-export const SYNC_MARKER_GAIN = 0.12;
 
 export type SyncMarkerRecordingStream = {
   stream: MediaStream;
