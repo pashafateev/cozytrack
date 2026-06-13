@@ -415,6 +415,40 @@ test("does not resume recording after the stop state update fails", async ({
     await expect(
       page.getByRole("button", { name: "Stop recording" }),
     ).toBeHidden();
+
+    await expect
+      .poll(
+        async () => {
+          const take = await db.recordingTake.findFirst({
+            where: { sessionId, stoppedAt: null },
+            include: { participantStatuses: true },
+          });
+          return (
+            take?.participantStatuses.some(
+              (status) =>
+                status.participantId === "host" &&
+                status.recordingStatus === "connected",
+            ) ?? false
+          );
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(true);
+  });
+
+  await test.step("reload and do not catch up to the stopped take", async () => {
+    await page.reload();
+    await joinStudioWithFakeMicrophone(page, participantName, {
+      expectHostControls: true,
+    });
+
+    await page.waitForTimeout(3_000);
+    await expect(
+      page.getByRole("button", { name: "Start recording" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Stop recording" }),
+    ).toBeHidden();
   });
 });
 

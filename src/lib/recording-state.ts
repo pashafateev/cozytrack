@@ -8,6 +8,15 @@ export type ParticipantRecordingStatus =
   | "complete"
   | "failed";
 
+export type RecordingTakeParticipantStatus = {
+  participantId: string;
+  participantName: string | null;
+  readinessStatus: ParticipantReadinessStatus | null;
+  recordingStatus: ParticipantRecordingStatus | null;
+  statusReason: string | null;
+  updatedAt: string;
+};
+
 export type RecordingTakeState = {
   active: boolean;
   sessionStartedAt: string | null;
@@ -16,6 +25,7 @@ export type RecordingTakeState = {
     sessionId: string;
     startedAt: string;
     stoppedAt: string | null;
+    participantStatuses: RecordingTakeParticipantStatus[];
   } | null;
 };
 

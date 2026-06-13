@@ -696,6 +696,7 @@ function RoomContent({
 }) {
   const remoteParticipants = useRemoteParticipants();
   const { localParticipant } = useLocalParticipant();
+  const localParticipantId = localParticipant.identity;
   const transport = useTransport();
   const remoteParticipantNames = useMemo(() => {
     const next = new Map<string, string>();
@@ -1953,6 +1954,16 @@ function RoomContent({
         }
 
         const catchupKey = `${state.take.id}:${state.sessionStartedAt}`;
+        const localTakeStatus = state.take.participantStatuses.find(
+          (status) => status.participantId === localParticipantId,
+        );
+        if (
+          localTakeStatus?.recordingStatus &&
+          localTakeStatus.recordingStatus !== "recording"
+        ) {
+          activeTakeCatchupRef.current = catchupKey;
+          return;
+        }
         if (suppressedActiveTakeCatchupRef.current === catchupKey) return;
         if (
           suppressedActiveTakeCatchupRef.current &&
@@ -1993,6 +2004,7 @@ function RoomContent({
     };
   }, [
     recordingStream,
+    localParticipantId,
     sessionId,
     startRecordingLocal,
     studioState,
