@@ -20,6 +20,7 @@ type Track = {
   s3Key: string;
   status: string;
   durationMs: number | null;
+  partial?: boolean;
 };
 
 type TrackSegment = {
@@ -40,6 +41,7 @@ const mocks = vi.hoisted(() => ({
   getPresignedPutUrl: vi.fn(async (key: string) => `https://s3.example/${key}`),
   deleteTrackChunks: vi.fn(async () => undefined),
   deleteTrackSegmentChunks: vi.fn(async () => undefined),
+  materializeTrack: vi.fn(),
   resolvePrincipal: vi.fn<() => Promise<Principal | null>>(),
 }));
 
@@ -242,6 +244,10 @@ vi.mock("@/lib/s3", () => ({
       : `sessions/${sessionId}/tracks/${trackId}/segments/${segmentId}/recording.webm`,
 }));
 
+vi.mock("@/lib/track-materialization", () => ({
+  materializeTrack: mocks.materializeTrack,
+}));
+
 vi.mock("@/lib/auth", async () => {
   const actual = await vi.importActual<typeof import("@/lib/auth")>(
     "@/lib/auth",
@@ -282,6 +288,44 @@ beforeEach(() => {
   mocks.sessions.add("s1");
   vi.clearAllMocks();
   mocks.resolvePrincipal.mockResolvedValue(null);
+  mocks.materializeTrack.mockImplementation(async (trackId: string) => {
+    const track = mocks.tracks.get(trackId);
+    if (!track) throw new Error("track not found");
+    const segments = Array.from(mocks.segments.values())
+      .filter((segment) => segment.trackId === trackId)
+      .sort((a, b) => a.segmentIndex - b.segmentIndex);
+    const completed = segments.filter((segment) => segment.status === "complete");
+    const latest = segments[segments.length - 1];
+    if (!latest || latest.status !== "complete") {
+      mocks.tracks.set(trackId, { ...track, status: "uploading" });
+      return {
+        trackId,
+        status: "pending",
+        s3Key: track.s3Key,
+        segmentCount: completed.length,
+        durationMs: null,
+      };
+    }
+
+    const durationMs = completed.some((segment) => segment.durationMs === null)
+      ? null
+      : completed.reduce((sum, segment) => sum + segment.durationMs!, 0);
+    const s3Key = `sessions/${track.sessionId}/tracks/${trackId}/recording.webm`;
+    mocks.tracks.set(trackId, {
+      ...track,
+      status: "complete",
+      s3Key,
+      durationMs,
+      partial: false,
+    });
+    return {
+      trackId,
+      status: "complete",
+      s3Key,
+      segmentCount: completed.length,
+      durationMs,
+    };
+  });
 });
 
 afterEach(() => {
@@ -479,6 +523,7 @@ describe("logical track segments", () => {
       status: "complete",
       durationMs: 12345,
     });
+    expect(mocks.materializeTrack).toHaveBeenCalledWith("track-1");
     expect(mocks.deleteTrackSegmentChunks).toHaveBeenCalledWith(
       "s1",
       "track-1",
@@ -486,7 +531,7 @@ describe("logical track segments", () => {
     );
   });
 
-  it("promotes the logical track to the latest segment once all segments complete", async () => {
+  it("materializes the logical track once all segments complete", async () => {
     mocks.tracks.set("logical-track", {
       id: "logical-track",
       sessionId: "s1",
@@ -533,13 +578,13 @@ describe("logical track segments", () => {
       durationMs: 5000,
     });
     // The logical track must not be demoted back to uploading — with every
-    // segment complete it stays finalizable and serves the newest audio.
+    // segment complete it stays finalizable and serves one logical artifact.
     expect(mocks.tracks.get("logical-track")).toMatchObject({
       status: "complete",
-      s3Key:
-        "sessions/s1/tracks/logical-track/segments/browser-seg-2/recording.webm",
-      durationMs: 5000,
+      s3Key: "sessions/s1/tracks/logical-track/recording.webm",
+      durationMs: 6000,
     });
+    expect(mocks.materializeTrack).toHaveBeenCalledWith("logical-track");
     expect(mocks.deleteTrackSegmentChunks).toHaveBeenCalledWith(
       "s1",
       "logical-track",
@@ -592,6 +637,7 @@ describe("logical track segments", () => {
 
     expect(defaultSegmentRes.status).toBe(200);
     expect(mocks.tracks.get("logical-track")?.status).toBe("uploading");
+    expect(mocks.materializeTrack).not.toHaveBeenCalled();
 
     const secondSegmentRes = await completeUpload(
       postJson(
@@ -609,10 +655,10 @@ describe("logical track segments", () => {
     expect(secondSegmentRes.status).toBe(200);
     expect(mocks.tracks.get("logical-track")).toMatchObject({
       status: "complete",
-      s3Key:
-        "sessions/s1/tracks/logical-track/segments/browser-seg-2/recording.webm",
-      durationMs: 5000,
+      s3Key: "sessions/s1/tracks/logical-track/recording.webm",
+      durationMs: 6000,
     });
+    expect(mocks.materializeTrack).toHaveBeenCalledWith("logical-track");
   });
 
   it("rejects a segment-scoped token presigning a different segment of the track", async () => {
