@@ -6,6 +6,7 @@ type Track = {
   s3Key: string;
   status: string;
   durationMs: number | null;
+  partial?: boolean;
 };
 
 type TrackSegment = {
@@ -23,6 +24,9 @@ const mocks = vi.hoisted(() => ({
   writeObjectBytes: vi.fn<(key: string, bytes: Uint8Array) => Promise<void>>(),
   remuxSegments: vi.fn<
     (input: { sourceKeys: string[]; outputKey: string }) => Promise<void>
+  >(),
+  trackSegmentRecordingExists: vi.fn<
+    (sessionId: string, trackId: string, segmentId: string) => Promise<boolean>
   >(),
 }));
 
@@ -88,6 +92,22 @@ vi.mock("@/lib/db", () => ({
   },
 }));
 
+vi.mock("@/lib/s3", () => ({
+  getObjectBytes: mocks.readObjectBytes,
+  putObjectBytes: mocks.writeObjectBytes,
+  trackRecordingKey: (sessionId: string, trackId: string) =>
+    `sessions/${sessionId}/tracks/${trackId}/recording.webm`,
+  trackSegmentRecordingKey: (
+    sessionId: string,
+    trackId: string,
+    segmentId: string,
+  ) =>
+    segmentId === trackId
+      ? `sessions/${sessionId}/tracks/${trackId}/recording.webm`
+      : `sessions/${sessionId}/tracks/${trackId}/segments/${segmentId}/recording.webm`,
+  trackSegmentRecordingExists: mocks.trackSegmentRecordingExists,
+}));
+
 import { materializeTrack } from "@/lib/track-materialization";
 
 function seedTrack(overrides: Partial<Track> = {}) {
@@ -120,6 +140,7 @@ beforeEach(() => {
   mocks.readObjectBytes.mockResolvedValue(new Uint8Array([1, 2, 3]));
   mocks.writeObjectBytes.mockResolvedValue(undefined);
   mocks.remuxSegments.mockResolvedValue(undefined);
+  mocks.trackSegmentRecordingExists.mockResolvedValue(true);
 });
 
 describe("materializeTrack", () => {
@@ -199,5 +220,41 @@ describe("materializeTrack", () => {
       status: "failed",
     });
     expect(mocks.tracks.get("track-1")?.status).not.toBe("complete");
+  });
+
+  it("skips missing completed segment artifacts for recovery materialization", async () => {
+    seedTrack({ status: "uploading" });
+    seedSegment({ id: "track-1", segmentIndex: 0, durationMs: 1000 });
+    seedSegment({ id: "segment-2", segmentIndex: 1, durationMs: 5000 });
+    mocks.trackSegmentRecordingExists.mockImplementation(
+      async (_sessionId, _trackId, segmentId) => segmentId === "segment-2",
+    );
+
+    const result = await materializeTrack("track-1", {
+      readObjectBytes: mocks.readObjectBytes,
+      writeObjectBytes: mocks.writeObjectBytes,
+      remuxSegments: mocks.remuxSegments,
+      skipMissingSegments: true,
+    });
+
+    expect(result).toMatchObject({
+      status: "complete",
+      s3Key: "sessions/s1/tracks/track-1/recording.webm",
+      segmentCount: 1,
+    });
+    expect(mocks.readObjectBytes).toHaveBeenCalledWith(
+      "sessions/s1/tracks/track-1/segments/segment-2/recording.webm",
+    );
+    expect(mocks.writeObjectBytes).toHaveBeenCalledWith(
+      "sessions/s1/tracks/track-1/recording.webm",
+      new Uint8Array([1, 2, 3]),
+    );
+    expect(mocks.remuxSegments).not.toHaveBeenCalled();
+    expect(mocks.tracks.get("track-1")).toMatchObject({
+      status: "complete",
+      s3Key: "sessions/s1/tracks/track-1/recording.webm",
+      durationMs: 5000,
+      partial: true,
+    });
   });
 });

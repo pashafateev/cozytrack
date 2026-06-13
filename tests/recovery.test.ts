@@ -214,7 +214,11 @@ beforeEach(() => {
   materializationMocks.materializeTrack.mockImplementation(
     async (
       trackId: string,
-      options?: { partial?: boolean; allowIncompleteLatest?: boolean },
+      options?: {
+        partial?: boolean;
+        allowIncompleteLatest?: boolean;
+        skipMissingSegments?: boolean;
+      },
     ) => {
       const track = trackStore.get(trackId);
       if (!track) throw new Error("track not found");
@@ -472,6 +476,7 @@ describe("recoverTrack", () => {
     });
     expect(materializationMocks.materializeTrack).toHaveBeenCalledWith("t1", {
       partial: false,
+      skipMissingSegments: true,
     });
     expect(putCalls).toHaveLength(0);
   });
@@ -496,6 +501,7 @@ describe("recoverTrack", () => {
     expect(segmentStore.get("seg-2")?.status).toBe("complete");
     expect(materializationMocks.materializeTrack).toHaveBeenCalledWith("t1", {
       partial: false,
+      skipMissingSegments: true,
     });
     expect(putCalls).toHaveLength(0);
   });
@@ -585,6 +591,11 @@ describe("recoverTrack", () => {
       s3Key: "sessions/s1/tracks/t1/recording.webm",
       partial: true,
     });
+    expect(materializationMocks.materializeTrack).toHaveBeenCalledWith("t1", {
+      partial: true,
+      skipMissingSegments: true,
+      allowIncompleteLatest: true,
+    });
   });
 
   it("stitches the newest segment's chunks when its final blob is missing", async () => {
@@ -629,6 +640,7 @@ describe("recoverTrack", () => {
     });
     expect(materializationMocks.materializeTrack).toHaveBeenCalledWith("t1", {
       partial: false,
+      skipMissingSegments: true,
     });
   });
 
@@ -665,6 +677,7 @@ describe("recoverTrack", () => {
     });
     expect(materializationMocks.materializeTrack).toHaveBeenCalledWith("t1", {
       partial: true,
+      skipMissingSegments: true,
     });
   });
 
@@ -687,6 +700,11 @@ describe("recoverTrack", () => {
     expect(trackStore.get("t1")).toMatchObject({
       status: "complete",
       partial: true,
+    });
+    expect(materializationMocks.materializeTrack).toHaveBeenCalledWith("t1", {
+      partial: true,
+      skipMissingSegments: true,
+      allowIncompleteLatest: true,
     });
   });
 

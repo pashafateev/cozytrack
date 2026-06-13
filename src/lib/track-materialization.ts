@@ -3,11 +3,13 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import ffmpegStaticPath from "ffmpeg-static";
 import { db } from "@/lib/db";
 import {
   getObjectBytes,
   putObjectBytes,
   trackRecordingKey,
+  trackSegmentRecordingExists,
   trackSegmentRecordingKey,
 } from "@/lib/s3";
 
@@ -45,6 +47,7 @@ export type MaterializeTrackDeps = {
   remuxSegments?: (input: RemuxSegmentsInput) => Promise<void>;
   partial?: boolean;
   allowIncompleteLatest?: boolean;
+  skipMissingSegments?: boolean;
 };
 
 function segmentRecordingKeys(
@@ -89,21 +92,24 @@ async function remuxWebmSegments(
       `${inputPaths.map(concatListLine).join("\n")}\n`,
     );
 
-    await execFileAsync(process.env.FFMPEG_PATH ?? "ffmpeg", [
-      "-y",
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      "-f",
-      "concat",
-      "-safe",
-      "0",
-      "-i",
-      listPath,
-      "-c",
-      "copy",
-      outputPath,
-    ]);
+    await execFileAsync(
+      process.env.FFMPEG_PATH ?? ffmpegStaticPath ?? "ffmpeg",
+      [
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        listPath,
+        "-c",
+        "copy",
+        outputPath,
+      ],
+    );
 
     await deps.writeObjectBytes(input.outputKey, await readFile(outputPath));
   } finally {
@@ -181,14 +187,30 @@ export async function materializeTrack(
     };
   }
 
-  if (completedSegments.length === 0) {
+  let sourceSegments = completedSegments;
+  let skippedMissingSegment = false;
+  if (deps.skipMissingSegments) {
+    const existingSegments: CompletedSegment[] = [];
+    for (const segment of completedSegments) {
+      if (
+        await trackSegmentRecordingExists(track.sessionId, trackId, segment.id)
+      ) {
+        existingSegments.push(segment);
+      } else {
+        skippedMissingSegment = true;
+      }
+    }
+    sourceSegments = existingSegments;
+  }
+
+  if (sourceSegments.length === 0) {
     return await markTrackFailed(trackId, finalKey, 0);
   }
 
   const sourceKeys = segmentRecordingKeys(
     track.sessionId,
     trackId,
-    completedSegments,
+    sourceSegments,
   );
 
   try {
@@ -210,10 +232,11 @@ export async function materializeTrack(
     }
   } catch (error) {
     console.error(`[materialize] track=${trackId} failed:`, error);
-    return await markTrackFailed(trackId, finalKey, completedSegments.length);
+    return await markTrackFailed(trackId, finalKey, sourceSegments.length);
   }
 
-  const durationMs = totalDurationMs(completedSegments);
+  const durationMs = totalDurationMs(sourceSegments);
+  const partial = deps.partial || skippedMissingSegment;
   const updated = await db.track.updateMany({
     where: {
       id: trackId,
@@ -225,7 +248,7 @@ export async function materializeTrack(
       status: "complete",
       s3Key: finalKey,
       durationMs,
-      partial: deps.partial ?? false,
+      partial,
     },
   });
 
@@ -234,7 +257,7 @@ export async function materializeTrack(
       trackId,
       status: "superseded",
       s3Key: track.s3Key,
-      segmentCount: completedSegments.length,
+      segmentCount: sourceSegments.length,
       durationMs,
     };
   }
@@ -243,7 +266,7 @@ export async function materializeTrack(
     trackId,
     status: "complete",
     s3Key: finalKey,
-    segmentCount: completedSegments.length,
+    segmentCount: sourceSegments.length,
     durationMs,
   };
 }

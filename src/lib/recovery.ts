@@ -117,6 +117,7 @@ async function stitchSegmentChunks(input: {
 
   const materialized = await materializeTrack(trackId, {
     partial,
+    skipMissingSegments: true,
     ...(forcePartial ? { allowIncompleteLatest: true } : {}),
   });
   if (materialized.status !== "complete") {
@@ -262,6 +263,7 @@ export async function recoverTrack(
       }
       const materialized = await materializeTrack(trackId, {
         partial: newerSegmentLost,
+        skipMissingSegments: true,
         ...(newerSegmentLost ? { allowIncompleteLatest: true } : {}),
       });
       if (materialized.status !== "complete") {
