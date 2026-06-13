@@ -1902,7 +1902,13 @@ function RoomContent({
   }, [participantName, sessionId, studioState]);
 
   useEffect(() => {
-    if (!recordingStream || studioState !== "connected" || recorderRef.current) {
+    if (
+      !recordingStream ||
+      studioState !== "connected" ||
+      recorderRef.current ||
+      startingRef.current ||
+      stoppingRef.current
+    ) {
       return;
     }
 
@@ -1919,7 +1925,14 @@ function RoomContent({
 
         const catchupKey = `${state.take.id}:${state.sessionStartedAt}`;
         if (activeTakeCatchupRef.current === catchupKey) return;
-        if (studioStateRef.current !== "connected" || recorderRef.current) return;
+        if (
+          studioStateRef.current !== "connected" ||
+          recorderRef.current ||
+          startingRef.current ||
+          stoppingRef.current
+        ) {
+          return;
+        }
 
         activeTakeCatchupRef.current = catchupKey;
         const started = await startRecordingLocal(
