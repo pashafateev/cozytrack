@@ -19,6 +19,9 @@ type TrackSegment = {
   status: string;
   durationMs: number | null;
   completedAt?: Date | null;
+  syncMarkerVersion?: string | null;
+  syncMarkerOffsetMs?: number | null;
+  syncMarkerDurationMs?: number | null;
 };
 
 const mocks = vi.hoisted(() => ({
@@ -221,6 +224,11 @@ import { NextRequest } from "next/server";
 import { POST as presignUpload } from "@/app/api/upload/presign/route";
 import { POST as completeUpload } from "@/app/api/upload/complete/route";
 import { issueRecordingUploadToken } from "@/lib/auth";
+import {
+  SYNC_MARKER_DURATION_MS,
+  SYNC_MARKER_OFFSET_MS,
+  SYNC_MARKER_VERSION,
+} from "@/lib/sync-marker";
 
 function postJson(
   path: string,
@@ -277,6 +285,62 @@ describe("recording upload auth", () => {
     expect(body.url).toBe("https://s3.example/sessions/s1/tracks/t1/0.webm");
     expect(body.recordingToken).toEqual(expect.any(String));
     expect(mocks.tracks.get("t1")?.participantName).toBe("Alice");
+  });
+
+  it("stores sync marker metadata on the created track segment", async () => {
+    mocks.resolvePrincipal.mockResolvedValue({ kind: "host" });
+
+    const res = await presignUpload(
+      postJson(
+        "/api/upload/presign",
+        {
+          sessionId: "s1",
+          trackId: "t1",
+          segmentId: "seg-1",
+          partNumber: 0,
+          participantName: "Alice",
+          syncMarker: {
+            version: SYNC_MARKER_VERSION,
+            offsetMs: SYNC_MARKER_OFFSET_MS,
+            durationMs: SYNC_MARKER_DURATION_MS,
+          },
+        },
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    expect(mocks.segments.get("seg-1")).toMatchObject({
+      syncMarkerVersion: SYNC_MARKER_VERSION,
+      syncMarkerOffsetMs: SYNC_MARKER_OFFSET_MS,
+      syncMarkerDurationMs: SYNC_MARKER_DURATION_MS,
+    });
+  });
+
+  it("rejects malformed sync marker metadata", async () => {
+    mocks.resolvePrincipal.mockResolvedValue({ kind: "host" });
+
+    const res = await presignUpload(
+      postJson(
+        "/api/upload/presign",
+        {
+          sessionId: "s1",
+          trackId: "t1",
+          partNumber: 0,
+          participantName: "Alice",
+          syncMarker: {
+            version: "unknown-marker",
+            offsetMs: SYNC_MARKER_OFFSET_MS,
+            durationMs: SYNC_MARKER_DURATION_MS,
+          },
+        },
+      ),
+    );
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "syncMarker is invalid",
+    });
+    expect(mocks.segments.size).toBe(0);
   });
 
   it("stores the guest participant id from the authenticated principal", async () => {
