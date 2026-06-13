@@ -1298,8 +1298,11 @@ function RoomContent({
       let syncMarkerRecording: SyncMarkerRecordingStream | null = null;
       try {
         syncMarkerRecording = createSyncMarkerRecordingStream(streamRef.current);
+        await syncMarkerRecording.prepare();
       } catch (err) {
         console.error("Recording: sync marker unavailable; recording raw stream.", err);
+        syncMarkerRecording?.dispose();
+        syncMarkerRecording = null;
         showNotification("Sync marker unavailable - recording raw audio");
       }
 

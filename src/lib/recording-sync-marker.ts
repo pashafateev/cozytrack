@@ -25,6 +25,7 @@ export const SYNC_MARKER_GAIN = 0.12;
 export type SyncMarkerRecordingStream = {
   stream: MediaStream;
   marker: SyncMarkerMetadata;
+  prepare: () => Promise<SyncMarkerMetadata>;
   playSyncMarker: () => Promise<SyncMarkerMetadata>;
   dispose: () => void;
 };
@@ -63,15 +64,37 @@ export function createSyncMarkerRecordingStream(
 
   let disposed = false;
 
+  async function ensureAudioContextRunning(): Promise<SyncMarkerMetadata> {
+    if (disposed) {
+      throw new Error("Sync marker audio graph is disposed");
+    }
+
+    if (ctx.state === "suspended") {
+      try {
+        await ctx.resume();
+      } catch (error) {
+        const detail = error instanceof Error ? `: ${error.message}` : "";
+        throw new Error(`AudioContext failed to resume for sync marker${detail}`);
+      }
+    }
+
+    if (ctx.state === "suspended") {
+      throw new Error("AudioContext stayed suspended for sync marker");
+    }
+
+    if (ctx.state !== "running") {
+      throw new Error(`AudioContext is ${ctx.state} for sync marker`);
+    }
+
+    return syncMarkerMetadata();
+  }
+
   return {
     stream: destination.stream,
     marker: syncMarkerMetadata(),
+    prepare: ensureAudioContextRunning,
     playSyncMarker: async () => {
-      if (disposed) return syncMarkerMetadata();
-
-      if (ctx.state === "suspended") {
-        await ctx.resume().catch(() => undefined);
-      }
+      const marker = await ensureAudioContextRunning();
 
       const startAt = ctx.currentTime + SYNC_MARKER_OFFSET_MS / 1000;
       const endAt = startAt + SYNC_MARKER_DURATION_MS / 1000;
@@ -100,7 +123,7 @@ export function createSyncMarkerRecordingStream(
         }
       };
 
-      return syncMarkerMetadata();
+      return marker;
     },
     dispose: () => {
       if (disposed) return;

@@ -107,7 +107,9 @@ function makeMockAudioContextCtor() {
       .mockReturnValueOnce(micGain)
       .mockReturnValueOnce(markerGain);
     createOscillator = vi.fn().mockReturnValue(oscillator);
-    resume = vi.fn().mockResolvedValue(undefined);
+    resume = vi.fn().mockImplementation(async () => {
+      this.state = "running";
+    });
     close = vi.fn().mockResolvedValue(undefined);
 
     constructor() {
@@ -162,6 +164,42 @@ describe("createSyncMarkerRecordingStream", () => {
     );
     expect((graph.stream as unknown as { _kind?: string })._kind).toBe(
       "marker-stream",
+    );
+  });
+
+  it("prepares the marker stream only after the AudioContext is running", async () => {
+    const fakeStream = {} as MediaStream;
+    const graph = createSyncMarkerRecordingStream(fakeStream, captured.Ctor);
+
+    await expect(graph.prepare()).resolves.toMatchObject({
+      version: SYNC_MARKER_VERSION,
+      offsetMs: SYNC_MARKER_OFFSET_MS,
+      durationMs: SYNC_MARKER_DURATION_MS,
+    });
+
+    expect(captured.instances[0].resume).toHaveBeenCalledTimes(1);
+    expect(captured.instances[0].state).toBe("running");
+  });
+
+  it("rejects prepare when the AudioContext cannot resume", async () => {
+    const fakeStream = {} as MediaStream;
+    const graph = createSyncMarkerRecordingStream(fakeStream, captured.Ctor);
+    captured.instances[0].resume.mockRejectedValueOnce(
+      new Error("activation blocked"),
+    );
+
+    await expect(graph.prepare()).rejects.toThrowError(
+      /AudioContext failed to resume/,
+    );
+  });
+
+  it("rejects prepare when the AudioContext remains suspended", async () => {
+    const fakeStream = {} as MediaStream;
+    const graph = createSyncMarkerRecordingStream(fakeStream, captured.Ctor);
+    captured.instances[0].resume.mockImplementationOnce(async () => undefined);
+
+    await expect(graph.prepare()).rejects.toThrowError(
+      /AudioContext stayed suspended/,
     );
   });
 
