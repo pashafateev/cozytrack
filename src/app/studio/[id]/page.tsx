@@ -1787,6 +1787,7 @@ function RoomContent({
   const startingRef = useRef(false);
   const stoppingRef = useRef(false);
   const activeTakeCatchupRef = useRef<string | null>(null);
+  const suppressedActiveTakeCatchupRef = useRef<string | null>(null);
 
   // Button handler: broadcast first so remote participants start close to our
   // own start time, then start locally. sessionStartedAt uses our local clock
@@ -1822,6 +1823,7 @@ function RoomContent({
           takeState.sessionStartedAt ?? requestedSessionStartedAt;
         takeId = takeState.take?.id ?? null;
         recordingTakeIdRef.current = takeId;
+        suppressedActiveTakeCatchupRef.current = null;
       } catch (err) {
         console.error("Failed to activate recording take:", err);
         showNotification("Couldn't update recording state");
@@ -1870,11 +1872,17 @@ function RoomContent({
     if (!isHost) return;
     if (stoppingRef.current) return;
     stoppingRef.current = true;
+    const stoppingTakeId = recordingTakeIdRef.current;
+    const stoppingSessionStartedAt = recordingSessionStartedAtRef.current;
     try {
       try {
         await stopRecordingTake(sessionId);
+        suppressedActiveTakeCatchupRef.current = null;
       } catch (err) {
         console.error("Failed to close recording take:", err);
+        if (stoppingTakeId && stoppingSessionStartedAt) {
+          suppressedActiveTakeCatchupRef.current = `${stoppingTakeId}:${stoppingSessionStartedAt}`;
+        }
         showNotification("Couldn't update recording state");
       }
       try {
@@ -1940,10 +1948,18 @@ function RoomContent({
         if (cancelled) return;
         if (!state.active || !state.take || !state.sessionStartedAt) {
           activeTakeCatchupRef.current = null;
+          suppressedActiveTakeCatchupRef.current = null;
           return;
         }
 
         const catchupKey = `${state.take.id}:${state.sessionStartedAt}`;
+        if (suppressedActiveTakeCatchupRef.current === catchupKey) return;
+        if (
+          suppressedActiveTakeCatchupRef.current &&
+          suppressedActiveTakeCatchupRef.current !== catchupKey
+        ) {
+          suppressedActiveTakeCatchupRef.current = null;
+        }
         if (activeTakeCatchupRef.current === catchupKey) return;
         if (
           studioStateRef.current !== "connected" ||

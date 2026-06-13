@@ -359,6 +359,65 @@ test("keeps catch-up and start-message races to one local recorder", async ({
   }
 });
 
+test("does not resume recording after the stop state update fails", async ({
+  page,
+}) => {
+  const sessionName = `Stop failure smoke ${Date.now()}`;
+  const participantName = "Stop Failure Host";
+  const sessionId = await createAndJoinHostStudio(
+    page,
+    sessionName,
+    participantName,
+  );
+  let failedStopStateUpdate = false;
+
+  await page.route("**/api/sessions/**/recording-state", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const body = parseJsonRequestBody(request);
+    if (
+      !failedStopStateUpdate &&
+      request.method() === "POST" &&
+      url.pathname === `/api/sessions/${sessionId}/recording-state` &&
+      body?.active === false
+    ) {
+      failedStopStateUpdate = true;
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "forced stop state failure" }),
+      });
+      return;
+    }
+
+    await route.continue();
+  });
+
+  await test.step("stop locally while the server take remains active", async () => {
+    await page.waitForTimeout(1_000);
+    await page.getByRole("button", { name: "Start recording" }).click();
+    await expect(
+      page.getByRole("button", { name: "Stop recording" }),
+    ).toBeVisible();
+
+    await page.waitForTimeout(6_000);
+    await page.getByRole("button", { name: "Stop recording" }).click();
+    await expect(page.getByText("FINALIZING").first()).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Start recording" }),
+    ).toBeVisible({ timeout: 60_000 });
+
+    expect(failedStopStateUpdate).toBe(true);
+    await page.waitForTimeout(3_000);
+    await expect(
+      page.getByRole("button", { name: "Start recording" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Stop recording" }),
+    ).toBeHidden();
+  });
+});
+
 test("records a host track through the browser and stores a completed WebM", async ({
   page,
 }) => {
