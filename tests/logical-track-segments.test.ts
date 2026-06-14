@@ -822,9 +822,10 @@ describe("logical track segments", () => {
     expect(mocks.tracks.get("logical-track")?.status).not.toBe("complete");
   });
 
-  it("binds a stale recording start to its broadcast take, not the newer active take", async () => {
+  it("rejects a stale recording start for a stopped broadcast take", async () => {
     // The participant's start was delayed: by the time presign arrives, the
-    // host has stopped take-a and started take-b. The audio belongs to take-a.
+    // host has stopped take-a and started take-b. Stop wins, so the delayed
+    // start must not attach new audio to either take.
     mocks.recordingTakes.set("take-a", {
       id: "take-a",
       sessionId: "s1",
@@ -854,10 +855,11 @@ describe("logical track segments", () => {
       }),
     );
 
-    expect(res.status).toBe(200);
-    expect(mocks.tracks.get("track-1")).toMatchObject({
-      takeId: "take-a",
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toMatchObject({
+      error: "Recording take is stopped",
     });
+    expect(mocks.tracks.has("track-1")).toBe(false);
   });
 
   it("rejects a recording start for a take from another session", async () => {

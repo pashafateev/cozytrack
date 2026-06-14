@@ -360,6 +360,79 @@ test("keeps catch-up and start-message races to one local recorder", async ({
   }
 });
 
+test("does not start catch-up recording after the host stops during upload init", async ({
+  browser,
+  page,
+}) => {
+  const hostName = "Stop During Catchup Host";
+  const guestName = "Stop During Catchup Guest";
+  const guestContext = await browser.newContext({
+    permissions: ["microphone"],
+    viewport: { width: 1280, height: 720 },
+  });
+
+  let releasePresign = () => {};
+  const presignBarrier = new Promise<void>((resolve) => {
+    releasePresign = resolve;
+  });
+  let guestInitialPresignCount = 0;
+  let guestPresignResponseReady = false;
+
+  try {
+    const sessionName = `Stop during catchup smoke ${Date.now()}`;
+    const sessionId = await createAndJoinHostStudio(page, sessionName, hostName);
+    const inviteUrl = await createInviteUrl(page, sessionId);
+
+    await page.getByRole("button", { name: "Start recording" }).click();
+    await expect(
+      page.getByRole("button", { name: "Stop recording" }),
+    ).toBeVisible();
+
+    const guestPage = await guestContext.newPage();
+    await guestPage.route("**/api/upload/presign", async (route) => {
+      const request = route.request();
+      const body = parseJsonRequestBody(request);
+      if (
+        request.method() === "POST" &&
+        body?.sessionId === sessionId &&
+        body?.participantName === guestName &&
+        body?.partNumber === 0
+      ) {
+        guestInitialPresignCount += 1;
+        const response = await route.fetch();
+        guestPresignResponseReady = true;
+        await presignBarrier;
+        await route.fulfill({ response });
+        return;
+      }
+
+      await route.continue();
+    });
+
+    await joinGuestStudio(guestPage, inviteUrl, sessionId, guestName);
+    await expect
+      .poll(() => guestPresignResponseReady, { timeout: 30_000 })
+      .toBe(true);
+
+    await page.getByRole("button", { name: "Stop recording" }).click();
+    await expect(page.getByText("FINALIZING").first()).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Start recording" }),
+    ).toBeVisible({ timeout: 60_000 });
+
+    releasePresign();
+    await guestPage.waitForTimeout(3_000);
+
+    expect(guestInitialPresignCount).toBe(1);
+    await expect(
+      guestPage.getByRole("status", { name: "Recording in progress" }),
+    ).toBeHidden();
+  } finally {
+    releasePresign();
+    await guestContext.close();
+  }
+});
+
 test("does not resume recording after the stop state update fails", async ({
   browser,
   page,

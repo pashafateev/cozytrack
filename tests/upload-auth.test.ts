@@ -21,8 +21,15 @@ type TrackSegment = {
   completedAt?: Date | null;
 };
 
+type RecordingTake = {
+  id: string;
+  sessionId: string;
+  stoppedAt: Date | null;
+};
+
 const mocks = vi.hoisted(() => ({
   sessions: new Set<string>(),
+  takes: new Map<string, RecordingTake>(),
   tracks: new Map<string, Track>(),
   segments: new Map<string, TrackSegment>(),
   getPresignedPutUrl: vi.fn(async (key: string) => `https://s3.example/${key}`),
@@ -38,7 +45,23 @@ vi.mock("@/lib/db", () => ({
       ),
     },
     recordingTake: {
-      findFirst: vi.fn(async () => null),
+      findFirst: vi.fn(
+        async ({
+          where: { sessionId, stoppedAt },
+        }: {
+          where: { sessionId: string; stoppedAt: null };
+        }) =>
+          Array.from(mocks.takes.values()).find(
+            (take) =>
+              take.sessionId === sessionId && take.stoppedAt === stoppedAt,
+          ) ?? null,
+      ),
+      findUnique: vi.fn(
+        async ({ where: { id } }: { where: { id: string } }) => {
+          const take = mocks.takes.get(id);
+          return take ? { ...take } : null;
+        },
+      ),
     },
     track: {
       findUnique: vi.fn(
@@ -240,6 +263,7 @@ function postJson(
 beforeEach(() => {
   vi.stubEnv("AUTH_SECRET", "test-secret-for-recording-upload-token-123456");
   mocks.sessions.clear();
+  mocks.takes.clear();
   mocks.tracks.clear();
   mocks.segments.clear();
   mocks.sessions.add("s1");
@@ -305,6 +329,35 @@ describe("recording upload auth", () => {
       participantName: "Renamed Alice",
       participantId: "guest_alice",
     });
+  });
+
+  it("rejects starting an upload against a stopped recording take", async () => {
+    mocks.resolvePrincipal.mockResolvedValue({ kind: "host" });
+    mocks.takes.set("take-stopped", {
+      id: "take-stopped",
+      sessionId: "s1",
+      stoppedAt: new Date("2026-06-01T12:05:00.000Z"),
+    });
+
+    const res = await presignUpload(
+      postJson(
+        "/api/upload/presign",
+        {
+          sessionId: "s1",
+          trackId: "t1",
+          partNumber: 0,
+          participantName: "Alice",
+          takeId: "take-stopped",
+        },
+      ),
+    );
+
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toMatchObject({
+      error: "Recording take is stopped",
+    });
+    expect(mocks.tracks).toHaveLength(0);
+    expect(mocks.segments).toHaveLength(0);
   });
 
   it("keeps presigning chunks with the recording token after cookies expire", async () => {

@@ -721,6 +721,7 @@ function RoomContent({
   );
   const recorderRef = useRef<CozyRecorder | null>(null);
   const localRecordingStartRef = useRef<Promise<boolean> | null>(null);
+  const recordingStopRevisionRef = useRef(0);
   const trackIdRef = useRef<string>("");
   const segmentIdRef = useRef<string>("");
   const recordingUploadTokenRef = useRef<string | undefined>(undefined);
@@ -1258,6 +1259,23 @@ function RoomContent({
     async (sessionStartedAtIso: string, takeId?: string | null) => {
       const effectiveTakeId = takeId ?? recordingTakeIdRef.current;
       if (effectiveTakeId) recordingTakeIdRef.current = effectiveTakeId;
+      const startStopRevision = recordingStopRevisionRef.current;
+      const startWasCancelledByStop = () =>
+        recordingStopRevisionRef.current !== startStopRevision;
+      const cancelPendingStart = () => {
+        trackIdRef.current = "";
+        segmentIdRef.current = "";
+        recordingUploadTokenRef.current = undefined;
+        recordingTakeIdRef.current = null;
+        clearRecordingConfirmationState();
+        void broadcastRecordingStatus(
+          "connected",
+          sessionStartedAtIso,
+          undefined,
+          effectiveTakeId,
+        );
+        return false;
+      };
       // Hard invariant from issue #61: cannot start a new recording while a
       // previous one is finalizing. Enforced here so both local and remote
       // (control-message) start paths honor the invariant.
@@ -1321,6 +1339,9 @@ function RoomContent({
         trackIdRef.current = trackId;
         segmentIdRef.current = segmentId;
         recordingUploadTokenRef.current = initialUpload.recordingToken;
+        if (startWasCancelledByStop()) {
+          return cancelPendingStart();
+        }
         try {
           const backup = await browserRecordingBackupStore.startBackup({
             sessionId,
@@ -1336,6 +1357,9 @@ function RoomContent({
           setRecoveryBackupSync(null);
           setBackupError(backupErrorMessage(backupErr));
           showNotification("Local backup unavailable - remote upload only");
+        }
+        if (startWasCancelledByStop()) {
+          return cancelPendingStart();
         }
       } catch (err) {
         console.error("Failed to initialize upload:", err);
@@ -1440,7 +1464,6 @@ function RoomContent({
         void trackerTrackUpload(byteLength, uploadPromise);
       });
 
-      recorderRef.current = recorder;
       recordingStartRef.current = Date.now();
 
       if (timingDebug) {
@@ -1471,7 +1494,16 @@ function RoomContent({
         );
         return false;
       }
+      if (startWasCancelledByStop()) {
+        try {
+          await recorder.stop();
+        } catch (err) {
+          console.error("Failed to stop cancelled recording start:", err);
+        }
+        return cancelPendingStart();
+      }
 
+      recorderRef.current = recorder;
       setRecordingSessionStartedAtSync(sessionStartedAtIso);
       scheduleRecordingConfirmationCheck(sessionStartedAtIso);
       setStudioStateSync("recording");
@@ -1534,6 +1566,7 @@ function RoomContent({
   // Core recording stop. Idempotent: no-op when we have no active recorder or
   // we're already finalizing.
   const stopRecordingLocal = useCallback(async () => {
+    recordingStopRevisionRef.current += 1;
     const sessionStartedAtForStatus =
       recordingSessionStartedAtRef.current ?? undefined;
     const takeIdForStatus = recordingTakeIdRef.current;
