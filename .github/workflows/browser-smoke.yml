@@ -2,7 +2,7 @@ name: Browser smoke
 
 on:
   pull_request:
-    paths:
+    paths: &smoke_paths
       - ".github/workflows/browser-smoke.yml"
       - "package.json"
       - "package-lock.json"
@@ -29,30 +29,7 @@ on:
   push:
     branches:
       - main
-    paths:
-      - ".github/workflows/browser-smoke.yml"
-      - "package.json"
-      - "package-lock.json"
-      - "playwright.config.ts"
-      - "scripts/release-check.sh"
-      - "scripts/test-browser-smoke.sh"
-      - "src/app/api/auth/**"
-      - "src/app/api/livekit-token/**"
-      - "src/app/api/sessions/**"
-      - "src/app/api/upload/**"
-      - "src/app/session/**"
-      - "src/app/studio/**"
-      - "src/components/**"
-      - "src/hooks/**"
-      - "src/lib/auth.ts"
-      - "src/lib/recording-*.ts"
-      - "src/lib/recorder.ts"
-      - "src/lib/recovery.ts"
-      - "src/lib/s3.ts"
-      - "src/lib/track-materialization.ts"
-      - "src/lib/transport/**"
-      - "src/lib/upload*.ts"
-      - "tests/browser/**"
+    paths: *smoke_paths
 
 permissions:
   contents: read

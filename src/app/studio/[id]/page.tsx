@@ -1997,11 +1997,14 @@ function RoomContent({
 
   useEffect(() => {
     if (studioState !== "recording") return;
-    const takeId = recordingTakeIdRef.current;
-    if (!takeId) return;
 
     let cancelled = false;
     const reportHeartbeat = async () => {
+      // Read the take id fresh each tick: it can change (e.g. a new take after
+      // a failed stop) while we stay in the "recording" state, and this effect
+      // does not re-run for ref changes.
+      const takeId = recordingTakeIdRef.current;
+      if (!takeId) return;
       try {
         await reportRecordingTakeParticipantStatus(sessionId, {
           takeId,
@@ -2051,6 +2054,9 @@ function RoomContent({
         }
 
         const catchupKey = `${state.take.id}:${state.sessionStartedAt}`;
+        // The host's own stop is detected via the host-stop marker (statuses are
+        // keyed by the literal "host" id, not a LiveKit identity), so a
+        // returning host is handled here.
         const hostTakeStatus = state.take.participantStatuses.find(
           (status) => status.participantId === "host",
         );
@@ -2058,6 +2064,8 @@ function RoomContent({
           activeTakeCatchupRef.current = catchupKey;
           return;
         }
+        // For guests, statuses are keyed by LiveKit identity, so this matches a
+        // returning guest that already stopped its own segment in this take.
         const localTakeStatus = state.take.participantStatuses.find(
           (status) => status.participantId === localParticipantId,
         );

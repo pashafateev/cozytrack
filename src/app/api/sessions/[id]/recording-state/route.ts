@@ -121,9 +121,6 @@ async function closeTake(
   await db.recordingTake.update({
     where: { id: take.id },
     data: { stoppedAt },
-    include: {
-      participantStatuses: { orderBy: { participantName: "asc" } },
-    },
   });
 }
 
@@ -149,6 +146,11 @@ async function closeIfHostStoppedTake(
   return true;
 }
 
+// NOTE: this intentionally mutates on a read path. Returning participants poll
+// GET to decide whether to catch up, so a host-stopped or stale take must be
+// closed here too — otherwise a dead take would still report active and a
+// rejoiner would try to resume it. closeTake is idempotent, so concurrent
+// readers racing to close the same take is harmless.
 async function findFreshActiveTake(
   sessionId: string,
 ): Promise<RecordingTakeWithStatuses | null> {
