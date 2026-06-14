@@ -275,6 +275,38 @@ describe("materializeTrack", () => {
     });
   });
 
+  it("records decode_failed when detection hangs past the timeout without stalling materialization", async () => {
+    seedTrack();
+    seedSegment({
+      id: "track-1",
+      durationMs: 12345,
+      syncMarkerVersion: "chirp-v1",
+      syncMarkerOffsetMs: 100,
+      syncMarkerDurationMs: 300,
+    });
+    // A detector that never resolves would tie up the upload-completion request
+    // if detection were not bounded by a timeout.
+    mocks.detectSyncMarker.mockImplementation(
+      () => new Promise(() => {}),
+    );
+
+    const result = await materializeTrack("track-1", {
+      readObjectBytes: mocks.readObjectBytes,
+      writeObjectBytes: mocks.writeObjectBytes,
+      remuxSegments: mocks.remuxSegments,
+      detectSyncMarker: mocks.detectSyncMarker,
+      detectionTimeoutMs: 10,
+    });
+
+    expect(result.status).toBe("complete");
+    expect(mocks.segments.get("track-1")).toMatchObject({
+      syncMarkerDetectionStatus: "decode_failed",
+      syncMarkerDetectedAtMs: null,
+      syncMarkerDetectedAtSamples: null,
+      syncMarkerConfidence: 0,
+    });
+  });
+
   it("marks marker-bearing segments skipped during partial recovery as source_missing", async () => {
     seedTrack({ status: "uploading" });
     seedSegment({ id: "track-1", segmentIndex: 0, durationMs: 1000 });

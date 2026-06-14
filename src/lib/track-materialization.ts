@@ -58,6 +58,7 @@ export type MaterializeTrackDeps = {
   detectSyncMarker?: (
     input: DetectSyncMarkerInput,
   ) => Promise<SyncMarkerDetectionResult>;
+  detectionTimeoutMs?: number;
   partial?: boolean;
   allowIncompleteLatest?: boolean;
   skipMissingSegments?: boolean;
@@ -216,21 +217,56 @@ async function markSyncMarkerSourceMissing(segmentId: string) {
 // avoid spiking memory and /tmp usage on tracks with many marker segments.
 const SYNC_MARKER_DETECTION_CONCURRENCY = 2;
 
+// Upper bound on a single segment's detection. The ffmpeg decode has its own
+// inner timeout; this is a backstop covering any other hang so detection can't
+// stall the upload-completion request that awaits materializeTrack.
+const SYNC_MARKER_DETECTION_TIMEOUT_MS = 20000;
+
+class SyncMarkerDetectionTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`sync-marker detection timed out after ${timeoutMs}ms`);
+    this.name = "SyncMarkerDetectionTimeoutError";
+  }
+}
+
+async function withDetectionTimeout<T>(
+  work: Promise<T>,
+  timeoutMs: number,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new SyncMarkerDetectionTimeoutError(timeoutMs)),
+      timeoutMs,
+    );
+  });
+  try {
+    return await Promise.race([work, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function detectAndPersistOneSegment(input: {
   sessionId: string;
   trackId: string;
   segment: CompletedSegment;
   sourceKey: string;
   detectSyncMarker: (input: DetectSyncMarkerInput) => Promise<SyncMarkerDetectionResult>;
+  timeoutMs: number;
 }) {
-  const { sessionId, trackId, segment, sourceKey, detectSyncMarker } = input;
+  const { sessionId, trackId, segment, sourceKey, detectSyncMarker, timeoutMs } =
+    input;
   try {
-    const result = await detectSyncMarker({
-      sessionId,
-      trackId,
-      segmentId: segment.id,
-      sourceKey,
-    });
+    const result = await withDetectionTimeout(
+      detectSyncMarker({
+        sessionId,
+        trackId,
+        segmentId: segment.id,
+        sourceKey,
+      }),
+      timeoutMs,
+    );
     await persistSegmentSyncMarkerDetection({ segmentId: segment.id, result });
   } catch (error) {
     console.error(
@@ -283,6 +319,8 @@ async function detectAndPersistSyncMarkers(input: {
       detectSegmentSyncMarker(detectInput, {
         readObjectBytesRange: deps.readObjectBytesRange ?? getObjectBytesRange,
       }));
+  const timeoutMs =
+    deps.detectionTimeoutMs ?? SYNC_MARKER_DETECTION_TIMEOUT_MS;
 
   for (
     let start = 0;
@@ -301,6 +339,7 @@ async function detectAndPersistSyncMarkers(input: {
           segment,
           sourceKey,
           detectSyncMarker,
+          timeoutMs,
         }),
       ),
     );

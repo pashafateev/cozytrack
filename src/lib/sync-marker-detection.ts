@@ -16,6 +16,9 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_DECODE_SAMPLE_RATE = 48000;
 const DEFAULT_ANALYSIS_SAMPLE_RATE = 8000;
 const DEFAULT_MAX_SEARCH_MS = 5000;
+// Decoding the bounded window is sub-second in practice; this only exists to
+// bound a pathological/malformed input that makes ffmpeg hang instead of fail.
+const DECODE_TIMEOUT_MS = 15000;
 // Normalized-correlation thresholds tuned empirically against the WebM/Opus
 // round-trip fixture (clears ~0.55); >= DETECTED_CONFIDENCE counts as a match,
 // the band down to LOW_CONFIDENCE is reported as "low_confidence", and below
@@ -257,6 +260,9 @@ export async function decodeWebmToPcm(
         "f32le",
         outputPath,
       ],
+      // Hard-kill a hung/malformed decode so it can't tie up the caller. The
+      // rejection is surfaced to detection and recorded as a failed decode.
+      { timeout: DECODE_TIMEOUT_MS, killSignal: "SIGKILL" },
     );
     const output = await readFile(outputPath);
     const arrayBuffer = output.buffer.slice(
