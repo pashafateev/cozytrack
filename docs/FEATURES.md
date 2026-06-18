@@ -1,6 +1,6 @@
 # Cozytrack Roadmap
 
-This roadmap was reconciled against every GitHub issue that was open on June 16, 2026.
+This roadmap was reconciled against every GitHub issue that was open on June 18, 2026.
 
 - Every currently open issue appears exactly once as a primary roadmap entry below.
 - No open issues are explicitly excluded right now.
@@ -55,11 +55,11 @@ This roadmap was reconciled against every GitHub issue that was open on June 16,
 - #117 Finalize/recovery/completion race integration tests: add a small real-service race suite as another `#108` follow-up for the highest-risk lifecycle ordering cases.
 - #63 Deferred multi-participant browser E2E harness: promote this after the narrower integration coverage and reconnect stack stabilize, or sooner if a real LiveKit/multi-participant regression demands it.
 - #109 Simplify recording and recovery code after the recent safety work: do this after the current safety path and its coverage work stabilize so cleanup is guided by proven invariants instead of guesswork.
-- #140 Generate aligned stem artifacts for recording takes: do this after `#7` clarifies the authoritative alignment contract and on top of the current materialized-track pipeline, because aligned exports need a stable cross-track offset model before user-facing delivery can depend on them.
-- #141 Serve aligned stems by default while preserving raw downloads: land this after `#140`, because the session, ingest, and bulk-download surfaces should prefer aligned artifacts only once that export path exists and can report its readiness explicitly.
-- #142 Optional drift analysis and correction for long takes: keep this after `#140`, and only promote it once fixed-offset aligned exports prove out, because the issue explicitly treats drift correction as a later optimization rather than a blocker for first aligned delivery.
+- #140 Generate aligned stem artifacts for recording takes: do this after `#7` settles the alignment metadata strategy and after the existing logical-track materialization path, because aligned stems need authoritative marker offsets and a stable cross-track export step.
+- #141 Serve aligned stems by default while preserving raw downloads: land this after `#140`, because the UI and download routes need aligned derived artifacts before they can switch user-facing defaults safely.
+- #142 Optional drift analysis and correction for long takes: keep this after `#140`, because the first aligned-export path should ship with fixed-offset alignment before drift measurement and time-stretch logic add more moving parts.
 - #134 Automated release-readiness gate for live reconnect recording: run this after the active reconnect/materialization work is ready to validate, and before merging or shipping that stack, so recording, reconnect, upload, recovery, and materialization all pass in one repeatable command and CI path.
-- #75 Participant reconnect and resume: pursue this after `#111` settles reconnect identity/gap semantics and after the current logical-track materialization path is stable, so resume behavior builds on the agreed downstream artifact boundary instead of exposing physical browser blobs directly.
+- #75 Participant reconnect and resume: pursue this after `#111` locks the reconnect-safe recording model and the active materialization path is stable, so reconnect behavior extends a defined logical-track boundary instead of exposing raw browser blobs downstream.
 
 ## Needs Clarification
 
@@ -69,4 +69,4 @@ This roadmap was reconciled against every GitHub issue that was open on June 16,
 - #68 Transcript-driven in-browser audio editor: keep this future-facing until recording reliability, session browsing, and export basics are stable enough to support an editor roadmap.
 - #72 Role-aware guest and cohost studio view: decide whether cohosts ever get dashboard access from inside an active session, or whether non-host participants should always stay inside a simplified studio shell.
 - #111 Reconnect-safe recording architecture plan: settle the remaining architecture choices around participant identity semantics, materialization timing, and how reconnect gaps should be represented before extending the stack further.
-- #135 Local multichannel recording alongside a remote participant: clarify whether extra local tracks are separate participant identities or host-owned source slots, which capture path/browser support matrix is acceptable for v1, and how that model composes with the reconnect-safe logical-track architecture.
+- #135 Local multichannel recording alongside a remote participant: clarify whether local tracks should appear as separate local participants, host-owned track slots, or a multi-channel capture mode, and how that choice should interact with `#111`, `#72`, and `#75`.
