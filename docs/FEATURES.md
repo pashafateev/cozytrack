@@ -1,6 +1,6 @@
 # Cozytrack Roadmap
 
-This roadmap was reconciled against every GitHub issue that was open on June 18, 2026.
+This roadmap was reconciled against every GitHub issue that was open on June 23, 2026 (44 open issues).
 
 - Every currently open issue appears exactly once as a primary roadmap entry below.
 - No open issues are explicitly excluded right now.
