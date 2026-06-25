@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { afterEach, describe, it, expect, beforeEach, vi } from "vitest";
 
 type RecordingTake = {
   id: string;
@@ -149,6 +149,7 @@ import {
   PATCH as reportRecordingState,
   POST as setRecordingState,
 } from "@/app/api/sessions/[id]/recording-state/route";
+import { HOST_STOPPED_ROOM_REASON } from "@/lib/recording-take-status";
 
 function params(id = "s1") {
   return { params: Promise.resolve({ id }) };
@@ -163,6 +164,8 @@ function request(method: "GET" | "PATCH" | "POST", body?: Record<string, unknown
 }
 
 beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-06-01T12:06:00.000Z"));
   mocks.sessions.clear();
   mocks.takes.clear();
   mocks.participantStatuses.clear();
@@ -173,6 +176,10 @@ beforeEach(() => {
     kind: "host",
     participantId: "host",
   });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("/api/sessions/[id]/recording-state", () => {
@@ -247,6 +254,148 @@ describe("/api/sessions/[id]/recording-state", () => {
       take: { id: "take-1" },
     });
     expect(mocks.takes).toHaveLength(1);
+  });
+
+  it("expires an active take after ten minutes with no participant heartbeat", async () => {
+    const staleStartedAt = new Date(Date.now() - 11 * 60 * 1000);
+    mocks.takes.set("take-1", {
+      id: "take-1",
+      sessionId: "s1",
+      startedAt: staleStartedAt,
+      stoppedAt: null,
+    });
+
+    const read = await getRecordingState(request("GET"), params());
+
+    expect(read.status).toBe(200);
+    await expect(read.json()).resolves.toMatchObject({
+      active: false,
+      sessionStartedAt: null,
+      take: null,
+    });
+    expect(mocks.takes.get("take-1")?.stoppedAt).toEqual(expect.any(Date));
+  });
+
+  it("keeps an active take fresh when a participant heartbeat is recent", async () => {
+    const staleStartedAt = new Date(Date.now() - 11 * 60 * 1000);
+    mocks.takes.set("take-1", {
+      id: "take-1",
+      sessionId: "s1",
+      startedAt: staleStartedAt,
+      stoppedAt: null,
+    });
+    mocks.participantStatuses.set("take-1:guest_alice", {
+      takeId: "take-1",
+      participantId: "guest_alice",
+      participantName: "Alice",
+      readinessStatus: null,
+      recordingStatus: "recording",
+      statusReason: null,
+      updatedAt: new Date(),
+    });
+
+    const read = await getRecordingState(request("GET"), params());
+
+    expect(read.status).toBe(200);
+    await expect(read.json()).resolves.toMatchObject({
+      active: true,
+      take: { id: "take-1" },
+    });
+    expect(mocks.takes.get("take-1")?.stoppedAt).toBeNull();
+  });
+
+  it("keeps an active take when the returning host failed to start recording", async () => {
+    mocks.takes.set("take-1", {
+      id: "take-1",
+      sessionId: "s1",
+      startedAt: new Date("2026-06-01T12:00:00.000Z"),
+      stoppedAt: null,
+    });
+    mocks.participantStatuses.set("take-1:host", {
+      takeId: "take-1",
+      participantId: "host",
+      participantName: null,
+      readinessStatus: null,
+      recordingStatus: "failed",
+      statusReason: "upload initialization failed",
+      updatedAt: new Date(),
+    });
+    mocks.participantStatuses.set("take-1:guest_alice", {
+      takeId: "take-1",
+      participantId: "guest_alice",
+      participantName: "Alice",
+      readinessStatus: null,
+      recordingStatus: "recording",
+      statusReason: null,
+      updatedAt: new Date(),
+    });
+
+    const read = await getRecordingState(request("GET"), params());
+
+    expect(read.status).toBe(200);
+    await expect(read.json()).resolves.toMatchObject({
+      active: true,
+      sessionStartedAt: "2026-06-01T12:00:00.000Z",
+      take: { id: "take-1", stoppedAt: null },
+    });
+    expect(mocks.takes.get("take-1")?.stoppedAt).toBeNull();
+  });
+
+  it("starts a new take when the active take has a host stop marker", async () => {
+    mocks.takes.set("take-old", {
+      id: "take-old",
+      sessionId: "s1",
+      startedAt: new Date("2026-06-01T12:00:00.000Z"),
+      stoppedAt: null,
+    });
+    mocks.participantStatuses.set("take-old:host", {
+      takeId: "take-old",
+      participantId: "host",
+      participantName: null,
+      readinessStatus: null,
+      recordingStatus: "connected",
+      statusReason: HOST_STOPPED_ROOM_REASON,
+      updatedAt: new Date(),
+    });
+
+    const start = await setRecordingState(
+      request("POST", {
+        active: true,
+        sessionStartedAt: "2026-06-01T12:06:00.000Z",
+      }),
+      params(),
+    );
+
+    expect(start.status).toBe(200);
+    await expect(start.json()).resolves.toMatchObject({
+      active: true,
+      sessionStartedAt: "2026-06-01T12:06:00.000Z",
+      take: { id: "take-1", stoppedAt: null },
+    });
+    expect(mocks.takes.get("take-old")?.stoppedAt).toEqual(expect.any(Date));
+    expect(mocks.takes.get("take-1")?.stoppedAt).toBeNull();
+  });
+
+  it("does not expire a take from another session when reporting by takeId", async () => {
+    const staleStartedAt = new Date(Date.now() - 11 * 60 * 1000);
+    mocks.takes.set("take-other", {
+      id: "take-other",
+      sessionId: "s2",
+      startedAt: staleStartedAt,
+      stoppedAt: null,
+    });
+
+    const res = await reportRecordingState(
+      request("PATCH", {
+        takeId: "take-other",
+        recordingStatus: "recording",
+      }),
+      params("s1"),
+    );
+
+    expect(res.status).toBe(403);
+    expect(mocks.takes.get("take-other")?.stoppedAt).toBeNull();
+    expect(mocks.participantStatuses).toHaveLength(0);
   });
 
   it("allows guests to read but not mutate room-level active state", async () => {

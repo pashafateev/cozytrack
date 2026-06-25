@@ -1,4 +1,10 @@
-import { expect, test, type BrowserContext, type Page } from "@playwright/test";
+import {
+  expect,
+  test,
+  type BrowserContext,
+  type Page,
+  type Request,
+} from "@playwright/test";
 import {
   DeleteObjectsCommand,
   HeadObjectCommand,
@@ -9,6 +15,7 @@ import { PrismaClient } from "@prisma/client";
 
 const db = new PrismaClient();
 const cleanupSessions = new Set<string>();
+const HOST_STOPPED_ROOM_REASON = "host_stopped_room";
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -174,6 +181,20 @@ async function createInviteUrl(hostPage: Page, sessionId: string): Promise<strin
   return body.url!;
 }
 
+function parseJsonRequestBody(request: Request): Record<string, unknown> | null {
+  const body = request.postData();
+  if (!body) return null;
+
+  try {
+    const parsed = JSON.parse(body);
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 async function joinGuestStudio(
   page: Page,
   inviteUrl: string,
@@ -212,6 +233,364 @@ async function assertStoredRecording(
   );
   expect(head.ContentLength).toBeGreaterThan(0);
 }
+
+test("keeps catch-up and start-message races to one local recorder", async ({
+  browser,
+  page,
+}) => {
+  const hostName = "Race Host";
+  const guestName = "Race Guest";
+  const guestContext = await browser.newContext({
+    permissions: ["microphone"],
+    viewport: { width: 1280, height: 720 },
+  });
+
+  let releaseCatchupRequest = () => {};
+  const catchupRequestBarrier = new Promise<void>((resolve) => {
+    releaseCatchupRequest = resolve;
+  });
+  let catchupRequestBlocked = false;
+  let releaseFirstPresign = () => {};
+  const firstPresignBarrier = new Promise<void>((resolve) => {
+    releaseFirstPresign = resolve;
+  });
+  let firstPresignReleased = false;
+  let guestInitialPresignCount = 0;
+
+  const releasePresign = () => {
+    if (firstPresignReleased) return;
+    firstPresignReleased = true;
+    releaseFirstPresign();
+  };
+
+  try {
+    const sessionName = `Start race smoke ${Date.now()}`;
+    const sessionId = await createAndJoinHostStudio(page, sessionName, hostName);
+    const inviteUrl = await createInviteUrl(page, sessionId);
+
+    const guestPage = await guestContext.newPage();
+    await guestPage.route("**/api/sessions/**/recording-state", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (
+        request.method() === "GET" &&
+        url.pathname === `/api/sessions/${sessionId}/recording-state` &&
+        !catchupRequestBlocked
+      ) {
+        catchupRequestBlocked = true;
+        await catchupRequestBarrier;
+      }
+
+      await route.continue();
+    });
+
+    await guestPage.route("**/api/upload/presign", async (route) => {
+      const request = route.request();
+      const body = parseJsonRequestBody(request);
+      if (
+        request.method() === "POST" &&
+        body?.sessionId === sessionId &&
+        body?.participantName === guestName &&
+        body?.partNumber === 0
+      ) {
+        guestInitialPresignCount += 1;
+        if (guestInitialPresignCount === 1) {
+          await firstPresignBarrier;
+        }
+      }
+
+      await route.continue();
+    });
+
+    await joinGuestStudio(guestPage, inviteUrl, sessionId, guestName);
+    await expect
+      .poll(() => catchupRequestBlocked, { timeout: 30_000 })
+      .toBe(true);
+
+    await test.step("start while the guest catch-up request is pending", async () => {
+      await page.getByRole("button", { name: "Start recording" }).click();
+      await expect(
+        page.getByRole("button", { name: "Stop recording" }),
+      ).toBeVisible();
+      await expect
+        .poll(() => guestInitialPresignCount, { timeout: 30_000 })
+        .toBe(1);
+
+      releaseCatchupRequest();
+      await guestPage.waitForTimeout(1_000);
+      expect(guestInitialPresignCount).toBe(1);
+
+      releasePresign();
+      await expect(
+        guestPage.getByRole("status", { name: "Recording in progress" }),
+      ).toBeVisible({ timeout: 30_000 });
+    });
+
+    await test.step("stop and verify the raced guest still has one segment", async () => {
+      await page.waitForTimeout(2_000);
+      await page.getByRole("button", { name: "Stop recording" }).click();
+      await expect(page.getByText("FINALIZING").first()).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "Start recording" }),
+      ).toBeVisible({ timeout: 60_000 });
+
+      await expect
+        .poll(
+          async () => {
+            const tracks = await db.track.findMany({
+              where: { sessionId, participantName: guestName },
+              include: { segments: true },
+            });
+            return {
+              trackCount: tracks.length,
+              segmentCount: tracks.reduce(
+                (total, track) => total + track.segments.length,
+                0,
+              ),
+            };
+          },
+          { timeout: 60_000 },
+        )
+        .toEqual({ trackCount: 1, segmentCount: 1 });
+    });
+  } finally {
+    releaseCatchupRequest();
+    releasePresign();
+    await guestContext.close();
+  }
+});
+
+test("does not start catch-up recording after the host stops during upload init", async ({
+  browser,
+  page,
+}) => {
+  const hostName = "Stop During Catchup Host";
+  const guestName = "Stop During Catchup Guest";
+  const guestContext = await browser.newContext({
+    permissions: ["microphone"],
+    viewport: { width: 1280, height: 720 },
+  });
+
+  let releasePresign = () => {};
+  const presignBarrier = new Promise<void>((resolve) => {
+    releasePresign = resolve;
+  });
+  let guestInitialPresignCount = 0;
+  let guestPresignResponseReady = false;
+
+  try {
+    const sessionName = `Stop during catchup smoke ${Date.now()}`;
+    const sessionId = await createAndJoinHostStudio(page, sessionName, hostName);
+    const inviteUrl = await createInviteUrl(page, sessionId);
+
+    await page.getByRole("button", { name: "Start recording" }).click();
+    await expect(
+      page.getByRole("button", { name: "Stop recording" }),
+    ).toBeVisible();
+
+    const guestPage = await guestContext.newPage();
+    await guestPage.route("**/api/upload/presign", async (route) => {
+      const request = route.request();
+      const body = parseJsonRequestBody(request);
+      if (
+        request.method() === "POST" &&
+        body?.sessionId === sessionId &&
+        body?.participantName === guestName &&
+        body?.partNumber === 0
+      ) {
+        guestInitialPresignCount += 1;
+        const response = await route.fetch();
+        guestPresignResponseReady = true;
+        await presignBarrier;
+        await route.fulfill({ response });
+        return;
+      }
+
+      await route.continue();
+    });
+
+    await joinGuestStudio(guestPage, inviteUrl, sessionId, guestName);
+    await expect
+      .poll(() => guestPresignResponseReady, { timeout: 30_000 })
+      .toBe(true);
+
+    await page.getByRole("button", { name: "Stop recording" }).click();
+    await expect(page.getByText("FINALIZING").first()).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Start recording" }),
+    ).toBeVisible({ timeout: 60_000 });
+
+    releasePresign();
+    await guestPage.waitForTimeout(3_000);
+
+    expect(guestInitialPresignCount).toBe(1);
+    await expect(
+      guestPage.getByRole("status", { name: "Recording in progress" }),
+    ).toBeHidden();
+  } finally {
+    releasePresign();
+    await guestContext.close();
+  }
+});
+
+test("does not resume recording after the stop state update fails", async ({
+  browser,
+  page,
+}) => {
+  const sessionName = `Stop failure smoke ${Date.now()}`;
+  const participantName = "Stop Failure Host";
+  const guestName = "Stop Failure Guest";
+  const sessionId = await createAndJoinHostStudio(
+    page,
+    sessionName,
+    participantName,
+  );
+  const inviteUrl = await createInviteUrl(page, sessionId);
+  let failedStopStateUpdate = false;
+  let failedStopTakeId = "";
+
+  await page.route("**/api/sessions/**/recording-state", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const body = parseJsonRequestBody(request);
+    if (
+      !failedStopStateUpdate &&
+      request.method() === "POST" &&
+      url.pathname === `/api/sessions/${sessionId}/recording-state` &&
+      body?.active === false
+    ) {
+      failedStopStateUpdate = true;
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "forced stop state failure" }),
+      });
+      return;
+    }
+
+    await route.continue();
+  });
+
+  await test.step("stop locally after the server state update fails", async () => {
+    await page.waitForTimeout(1_000);
+    await page.getByRole("button", { name: "Start recording" }).click();
+    await expect(
+      page.getByRole("button", { name: "Stop recording" }),
+    ).toBeVisible();
+
+    await page.waitForTimeout(6_000);
+    await page.getByRole("button", { name: "Stop recording" }).click();
+    await expect(page.getByText("FINALIZING").first()).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Start recording" }),
+    ).toBeVisible({ timeout: 60_000 });
+
+    expect(failedStopStateUpdate).toBe(true);
+    await page.waitForTimeout(3_000);
+    await expect(
+      page.getByRole("button", { name: "Start recording" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Stop recording" }),
+    ).toBeHidden();
+
+    await expect
+      .poll(
+        async () => {
+          const takes = await db.recordingTake.findMany({
+            where: { sessionId },
+            orderBy: { startedAt: "desc" },
+            include: { participantStatuses: true },
+          });
+          const failedStopTake = takes.find((take) =>
+            take.participantStatuses.some(
+              (status) =>
+                status.participantId === "host" &&
+                status.recordingStatus === "connected" &&
+                status.statusReason === HOST_STOPPED_ROOM_REASON,
+            ),
+          );
+          failedStopTakeId = failedStopTake?.id ?? "";
+          return Boolean(failedStopTakeId);
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(true);
+  });
+
+  await test.step("reload and do not catch up to the stopped take", async () => {
+    await page.reload();
+    await joinStudioWithFakeMicrophone(page, participantName, {
+      expectHostControls: true,
+    });
+
+    await page.waitForTimeout(3_000);
+    await expect(
+      page.getByRole("button", { name: "Start recording" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Stop recording" }),
+    ).toBeHidden();
+  });
+
+  await test.step("new guests do not catch up to the stopped take", async () => {
+    const guestContext = await browser.newContext({
+      permissions: ["microphone"],
+      viewport: { width: 1280, height: 720 },
+    });
+    try {
+      const guestPage = await guestContext.newPage();
+      await joinGuestStudio(guestPage, inviteUrl, sessionId, guestName);
+
+      await guestPage.waitForTimeout(3_000);
+      await expect(
+        guestPage.getByRole("status", { name: "Recording in progress" }),
+      ).toBeHidden();
+      const guestTrackCount = await db.track.count({
+        where: { sessionId, participantName: guestName },
+      });
+      expect(guestTrackCount).toBe(0);
+    } finally {
+      await guestContext.close();
+    }
+  });
+
+  await test.step("manual restart creates a new take", async () => {
+    await page.getByRole("button", { name: "Start recording" }).click();
+    await expect(
+      page.getByRole("button", { name: "Stop recording" }),
+    ).toBeVisible();
+
+    await expect
+      .poll(
+        async () => {
+          const activeTake = await db.recordingTake.findFirst({
+            where: { sessionId, stoppedAt: null },
+            orderBy: { startedAt: "desc" },
+            select: { id: true },
+          });
+          const failedStopTake = await db.recordingTake.findUnique({
+            where: { id: failedStopTakeId },
+            select: { stoppedAt: true },
+          });
+          return Boolean(
+            activeTake &&
+              activeTake.id !== failedStopTakeId &&
+              failedStopTake?.stoppedAt,
+          );
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(true);
+
+    await page.waitForTimeout(2_000);
+    await page.getByRole("button", { name: "Stop recording" }).click();
+    await expect(page.getByText("FINALIZING").first()).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Start recording" }),
+    ).toBeVisible({ timeout: 60_000 });
+  });
+});
 
 test("records a host track through the browser and stores a completed WebM", async ({
   page,
@@ -462,6 +841,295 @@ test("records host plus two guests and stores three completed WebMs", async ({
     await test.step("finish the recording from the host UI", async () => {
       await page.getByRole("button", { name: "Finish recording" }).click();
       await expect(page.getByText("Ready for ingest")).toBeVisible({
+        timeout: 45_000,
+      });
+    });
+  } finally {
+    await Promise.all(guestContexts.map((context) => context.close()));
+  }
+});
+
+test("keeps a returning guest in one logical track during an active recording", async ({
+  browser,
+  page,
+}) => {
+  const hostName = "Reconnect Host";
+  const guestName = "Reconnect Guest";
+  const guestContexts: BrowserContext[] = [];
+
+  try {
+    const sessionName = `Reconnect smoke ${Date.now()}`;
+    const sessionId = await createAndJoinHostStudio(page, sessionName, hostName);
+    const inviteUrl = await createInviteUrl(page, sessionId);
+
+    const guestContext = await browser.newContext({
+      permissions: ["microphone"],
+      viewport: { width: 1280, height: 720 },
+    });
+    guestContexts.push(guestContext);
+
+    const firstGuestPage = await guestContext.newPage();
+    await joinGuestStudio(firstGuestPage, inviteUrl, sessionId, guestName);
+
+    await test.step("start recording with the first guest present", async () => {
+      await page.waitForTimeout(1_000);
+      await page.getByRole("button", { name: "Start recording" }).click();
+      await expect(
+        page.getByRole("button", { name: "Stop recording" }),
+      ).toBeVisible();
+      await expect(
+        firstGuestPage.getByRole("status", { name: "Recording in progress" }),
+      ).toBeVisible({ timeout: 30_000 });
+    });
+
+    await test.step("close the guest tab after its first segment starts", async () => {
+      await expect
+        .poll(
+          async () => {
+            const track = await db.track.findFirst({
+              where: { sessionId, participantName: guestName },
+              include: { segments: true },
+            });
+            return track?.segments.length ?? 0;
+          },
+          { timeout: 30_000 },
+        )
+        .toBe(1);
+
+      await page.waitForTimeout(6_000);
+      await firstGuestPage.close();
+    });
+
+    const returningGuestPage = await guestContext.newPage();
+    await joinGuestStudio(returningGuestPage, inviteUrl, sessionId, guestName);
+
+    await test.step("returning guest catches up to the active recording", async () => {
+      await expect(
+        returningGuestPage.getByRole("status", {
+          name: "Recording in progress",
+        }),
+      ).toBeVisible({ timeout: 45_000 });
+
+      await expect
+        .poll(
+          async () => {
+            const tracks = await db.track.findMany({
+              where: { sessionId, participantName: guestName },
+              include: { segments: true },
+            });
+            return {
+              trackCount: tracks.length,
+              segmentCount: tracks.reduce(
+                (total, track) => total + track.segments.length,
+                0,
+              ),
+            };
+          },
+          { timeout: 30_000 },
+        )
+        .toEqual({ trackCount: 1, segmentCount: 2 });
+    });
+
+    await test.step("stop and verify the returned guest materializes once", async () => {
+      await page.waitForTimeout(2_000);
+      await page.getByRole("button", { name: "Stop recording" }).click();
+      await expect(page.getByText("FINALIZING").first()).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "Start recording" }),
+      ).toBeVisible({ timeout: 60_000 });
+
+      await expect
+        .poll(
+          async () => {
+            const tracks = await db.track.findMany({
+              where: { sessionId, participantName: guestName },
+              select: {
+                id: true,
+                status: true,
+                segments: {
+                  select: { status: true },
+                  orderBy: { segmentIndex: "asc" },
+                },
+              },
+            });
+            return tracks.map((track) => ({
+              status: track.status,
+              segmentCount: track.segments.length,
+              completedSegments: track.segments.filter(
+                (segment) => segment.status === "complete",
+              ).length,
+            }));
+          },
+          { timeout: 60_000 },
+        )
+        .toEqual([
+          {
+            status: "complete",
+            segmentCount: 2,
+            completedSegments: 1,
+          },
+        ]);
+
+      const guestTrack = await db.track.findFirstOrThrow({
+        where: { sessionId, participantName: guestName },
+        select: { durationMs: true, s3Key: true },
+      });
+      await assertStoredRecording(sessionId, guestTrack);
+    });
+
+    await test.step("finish the recording from the host UI", async () => {
+      await page.getByRole("button", { name: "Finish recording" }).click();
+      await expect(page.getByText("Ready for ingest")).toBeVisible({
+        timeout: 45_000,
+      });
+    });
+  } finally {
+    await Promise.all(guestContexts.map((context) => context.close()));
+  }
+});
+
+test("keeps a returning host in one logical track during an active recording", async ({
+  browser,
+  page,
+}) => {
+  const hostName = "Reconnect Host Return";
+  const guestName = "Host Return Guest";
+  const guestContexts: BrowserContext[] = [];
+
+  try {
+    const hostContext = page.context();
+    let hostPage = page;
+    const sessionName = `Host reconnect smoke ${Date.now()}`;
+    const sessionId = await createAndJoinHostStudio(
+      hostPage,
+      sessionName,
+      hostName,
+    );
+    const inviteUrl = await createInviteUrl(hostPage, sessionId);
+
+    const guestContext = await browser.newContext({
+      permissions: ["microphone"],
+      viewport: { width: 1280, height: 720 },
+    });
+    guestContexts.push(guestContext);
+
+    const guestPage = await guestContext.newPage();
+    await joinGuestStudio(guestPage, inviteUrl, sessionId, guestName);
+
+    await test.step("start recording with host and guest present", async () => {
+      await hostPage.waitForTimeout(1_000);
+      await hostPage.getByRole("button", { name: "Start recording" }).click();
+      await expect(
+        hostPage.getByRole("button", { name: "Stop recording" }),
+      ).toBeVisible();
+      await expect(
+        guestPage.getByRole("status", { name: "Recording in progress" }),
+      ).toBeVisible({ timeout: 30_000 });
+    });
+
+    await test.step("close the host tab while the guest keeps recording", async () => {
+      await expect
+        .poll(
+          async () => {
+            const track = await db.track.findFirst({
+              where: { sessionId, participantName: hostName },
+              include: { segments: true },
+            });
+            return track?.segments.length ?? 0;
+          },
+          { timeout: 30_000 },
+        )
+        .toBe(1);
+
+      await hostPage.waitForTimeout(6_000);
+      await hostPage.close();
+
+      await expect(
+        guestPage.getByRole("status", { name: "Recording in progress" }),
+      ).toBeVisible({ timeout: 30_000 });
+    });
+
+    hostPage = await hostContext.newPage();
+    await hostPage.goto(`/studio/${sessionId}`);
+    await joinStudioWithFakeMicrophone(hostPage, hostName, {
+      expectHostControls: true,
+    });
+
+    await test.step("returning host catches up and regains stop controls", async () => {
+      await expect(
+        hostPage.getByRole("button", { name: "Stop recording" }),
+      ).toBeVisible({ timeout: 45_000 });
+
+      await expect
+        .poll(
+          async () => {
+            const tracks = await db.track.findMany({
+              where: { sessionId, participantName: hostName },
+              include: { segments: true },
+            });
+            return {
+              trackCount: tracks.length,
+              segmentCount: tracks.reduce(
+                (total, track) => total + track.segments.length,
+                0,
+              ),
+            };
+          },
+          { timeout: 30_000 },
+        )
+        .toEqual({ trackCount: 1, segmentCount: 2 });
+    });
+
+    await test.step("stop and verify the returned host materializes once", async () => {
+      await hostPage.waitForTimeout(2_000);
+      await hostPage.getByRole("button", { name: "Stop recording" }).click();
+      await expect(hostPage.getByText("FINALIZING").first()).toBeVisible();
+      await expect(
+        hostPage.getByRole("button", { name: "Start recording" }),
+      ).toBeVisible({ timeout: 60_000 });
+
+      await expect
+        .poll(
+          async () => {
+            const tracks = await db.track.findMany({
+              where: { sessionId, participantName: hostName },
+              select: {
+                id: true,
+                status: true,
+                segments: {
+                  select: { status: true },
+                  orderBy: { segmentIndex: "asc" },
+                },
+              },
+            });
+            return tracks.map((track) => ({
+              status: track.status,
+              segmentCount: track.segments.length,
+              completedSegments: track.segments.filter(
+                (segment) => segment.status === "complete",
+              ).length,
+            }));
+          },
+          { timeout: 60_000 },
+        )
+        .toEqual([
+          {
+            status: "complete",
+            segmentCount: 2,
+            completedSegments: 1,
+          },
+        ]);
+
+      const hostTrack = await db.track.findFirstOrThrow({
+        where: { sessionId, participantName: hostName },
+        select: { durationMs: true, s3Key: true },
+      });
+      await assertStoredRecording(sessionId, hostTrack);
+    });
+
+    await test.step("finish the recording from the returned host UI", async () => {
+      await hostPage.getByRole("button", { name: "Finish recording" }).click();
+      await expect(hostPage.getByText("Ready for ingest")).toBeVisible({
         timeout: 45_000,
       });
     });

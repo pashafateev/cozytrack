@@ -20,6 +20,7 @@
     "typecheck": "tsc --noEmit --incremental false",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:browser": "bash ./scripts/test-browser-smoke.sh",
+    "release:check": "bash ./scripts/release-check.sh",
     "db:migrate": "prisma migrate dev",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",

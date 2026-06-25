@@ -39,10 +39,16 @@ import {
   completeUpload,
 } from "@/lib/upload";
 import {
+  getRecordingTakeState,
   reportRecordingTakeParticipantStatus,
   startRecordingTake,
   stopRecordingTake,
 } from "@/lib/recording-state";
+import {
+  HOST_STOPPED_ROOM_REASON,
+  isHostStoppedRoomStatus,
+  isParticipantStoppedRecordingStatus,
+} from "@/lib/recording-take-status";
 import {
   browserRecordingBackupStore,
   recordingBackupId,
@@ -116,6 +122,7 @@ const BANDWIDTH_SAVING_PUBLISH = {
 } as const;
 
 const RECORDING_CONFIRMATION_TIMEOUT_MS = 4000;
+const RECORDING_STATUS_HEARTBEAT_MS = 30_000;
 
 // ---------- Helpers ----------
 
@@ -698,6 +705,7 @@ function RoomContent({
 }) {
   const remoteParticipants = useRemoteParticipants();
   const { localParticipant } = useLocalParticipant();
+  const localParticipantId = localParticipant.identity;
   const transport = useTransport();
   const remoteParticipantNames = useMemo(() => {
     const next = new Map<string, string>();
@@ -716,6 +724,8 @@ function RoomContent({
     [remoteParticipantNames],
   );
   const recorderRef = useRef<CozyRecorder | null>(null);
+  const localRecordingStartRef = useRef<Promise<boolean> | null>(null);
+  const recordingStopRevisionRef = useRef(0);
   const trackIdRef = useRef<string>("");
   const segmentIdRef = useRef<string>("");
   const recordingUploadTokenRef = useRef<string | undefined>(undefined);
@@ -1250,10 +1260,27 @@ function RoomContent({
   // Core recording start. Idempotent against double-invocation: if we're
   // already recording (our own click echoed via a later remote message, or the
   // button pressed twice), this is a no-op.
-  const startRecordingLocal = useCallback(
+  const startRecordingLocalCore = useCallback(
     async (sessionStartedAtIso: string, takeId?: string | null) => {
       const effectiveTakeId = takeId ?? recordingTakeIdRef.current;
       if (effectiveTakeId) recordingTakeIdRef.current = effectiveTakeId;
+      const startStopRevision = recordingStopRevisionRef.current;
+      const startWasCancelledByStop = () =>
+        recordingStopRevisionRef.current !== startStopRevision;
+      const cancelPendingStart = () => {
+        trackIdRef.current = "";
+        segmentIdRef.current = "";
+        recordingUploadTokenRef.current = undefined;
+        recordingTakeIdRef.current = null;
+        clearRecordingConfirmationState();
+        void broadcastRecordingStatus(
+          "connected",
+          sessionStartedAtIso,
+          undefined,
+          effectiveTakeId,
+        );
+        return false;
+      };
       // Hard invariant from issue #61: cannot start a new recording while a
       // previous one is finalizing. Enforced here so both local and remote
       // (control-message) start paths honor the invariant.
@@ -1328,6 +1355,10 @@ function RoomContent({
         trackIdRef.current = trackId;
         segmentIdRef.current = segmentId;
         recordingUploadTokenRef.current = initialUpload.recordingToken;
+        if (startWasCancelledByStop()) {
+          syncMarkerRecording?.dispose();
+          return cancelPendingStart();
+        }
         try {
           const backup = await browserRecordingBackupStore.startBackup({
             sessionId,
@@ -1343,6 +1374,10 @@ function RoomContent({
           setRecoveryBackupSync(null);
           setBackupError(backupErrorMessage(backupErr));
           showNotification("Local backup unavailable - remote upload only");
+        }
+        if (startWasCancelledByStop()) {
+          syncMarkerRecording?.dispose();
+          return cancelPendingStart();
         }
       } catch (err) {
         console.error("Failed to initialize upload:", err);
@@ -1448,8 +1483,6 @@ function RoomContent({
         void trackerTrackUpload(byteLength, uploadPromise);
       });
 
-      recorderRef.current = recorder;
-      syncMarkerRecordingDisposeRef.current = syncMarkerRecording?.dispose ?? null;
       recordingStartRef.current = Date.now();
 
       if (timingDebug) {
@@ -1491,7 +1524,18 @@ function RoomContent({
         );
         return false;
       }
+      if (startWasCancelledByStop()) {
+        try {
+          await recorder.stop();
+        } catch (err) {
+          console.error("Failed to stop cancelled recording start:", err);
+        }
+        syncMarkerRecording?.dispose();
+        return cancelPendingStart();
+      }
 
+      recorderRef.current = recorder;
+      syncMarkerRecordingDisposeRef.current = syncMarkerRecording?.dispose ?? null;
       setRecordingSessionStartedAtSync(sessionStartedAtIso);
       scheduleRecordingConfirmationCheck(sessionStartedAtIso);
       setStudioStateSync("recording");
@@ -1532,9 +1576,29 @@ function RoomContent({
     ],
   );
 
+  const startRecordingLocal = useCallback(
+    async (sessionStartedAtIso: string, takeId?: string | null) => {
+      if (localRecordingStartRef.current) {
+        return await localRecordingStartRef.current;
+      }
+
+      const startPromise = startRecordingLocalCore(sessionStartedAtIso, takeId);
+      localRecordingStartRef.current = startPromise;
+      try {
+        return await startPromise;
+      } finally {
+        if (localRecordingStartRef.current === startPromise) {
+          localRecordingStartRef.current = null;
+        }
+      }
+    },
+    [startRecordingLocalCore],
+  );
+
   // Core recording stop. Idempotent: no-op when we have no active recorder or
   // we're already finalizing.
   const stopRecordingLocal = useCallback(async () => {
+    recordingStopRevisionRef.current += 1;
     const sessionStartedAtForStatus =
       recordingSessionStartedAtRef.current ?? undefined;
     const takeIdForStatus = recordingTakeIdRef.current;
@@ -1799,6 +1863,8 @@ function RoomContent({
   // not permanently lock out the button.
   const startingRef = useRef(false);
   const stoppingRef = useRef(false);
+  const activeTakeCatchupRef = useRef<string | null>(null);
+  const suppressedActiveTakeCatchupRef = useRef<string | null>(null);
 
   // Button handler: broadcast first so remote participants start close to our
   // own start time, then start locally. sessionStartedAt uses our local clock
@@ -1834,6 +1900,7 @@ function RoomContent({
           takeState.sessionStartedAt ?? requestedSessionStartedAt;
         takeId = takeState.take?.id ?? null;
         recordingTakeIdRef.current = takeId;
+        suppressedActiveTakeCatchupRef.current = null;
       } catch (err) {
         console.error("Failed to activate recording take:", err);
         showNotification("Couldn't update recording state");
@@ -1882,11 +1949,19 @@ function RoomContent({
     if (!isHost) return;
     if (stoppingRef.current) return;
     stoppingRef.current = true;
+    const stoppingTakeId = recordingTakeIdRef.current;
+    const stoppingSessionStartedAt = recordingSessionStartedAtRef.current;
+    let shouldMarkHostStoppedRoom = false;
     try {
       try {
         await stopRecordingTake(sessionId);
+        suppressedActiveTakeCatchupRef.current = null;
       } catch (err) {
         console.error("Failed to close recording take:", err);
+        if (stoppingTakeId && stoppingSessionStartedAt) {
+          suppressedActiveTakeCatchupRef.current = `${stoppingTakeId}:${stoppingSessionStartedAt}`;
+          shouldMarkHostStoppedRoom = true;
+        }
         showNotification("Couldn't update recording state");
       }
       try {
@@ -1896,10 +1971,157 @@ function RoomContent({
         showNotification("Couldn't tell the room to stop recording");
       }
       await stopRecordingLocal();
+      if (shouldMarkHostStoppedRoom && stoppingTakeId) {
+        try {
+          await reportRecordingTakeParticipantStatus(sessionId, {
+            takeId: stoppingTakeId,
+            participantName,
+            recordingStatus: "connected",
+            reason: HOST_STOPPED_ROOM_REASON,
+          });
+        } catch (err) {
+          console.error("Failed to mark host-stopped recording take:", err);
+        }
+      }
     } finally {
       stoppingRef.current = false;
     }
-  }, [isHost, sessionId, transport, stopRecordingLocal, showNotification]);
+  }, [
+    isHost,
+    participantName,
+    sessionId,
+    transport,
+    stopRecordingLocal,
+    showNotification,
+  ]);
+
+  useEffect(() => {
+    if (studioState !== "recording") return;
+
+    let cancelled = false;
+    const reportHeartbeat = async () => {
+      // Read the take id fresh each tick: it can change (e.g. a new take after
+      // a failed stop) while we stay in the "recording" state, and this effect
+      // does not re-run for ref changes.
+      const takeId = recordingTakeIdRef.current;
+      if (!takeId) return;
+      try {
+        await reportRecordingTakeParticipantStatus(sessionId, {
+          takeId,
+          participantName,
+          recordingStatus: "recording",
+        });
+      } catch (err) {
+        if (!cancelled) {
+          console.error("Failed to report recording heartbeat:", err);
+        }
+      }
+    };
+
+    void reportHeartbeat();
+    const interval = window.setInterval(
+      () => void reportHeartbeat(),
+      RECORDING_STATUS_HEARTBEAT_MS,
+    );
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [participantName, sessionId, studioState]);
+
+  useEffect(() => {
+    if (
+      !recordingStream ||
+      studioState !== "connected" ||
+      recorderRef.current ||
+      startingRef.current ||
+      stoppingRef.current
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function catchUpToActiveTake() {
+      try {
+        const state = await getRecordingTakeState(sessionId);
+        if (cancelled) return;
+        if (!state.active || !state.take || !state.sessionStartedAt) {
+          activeTakeCatchupRef.current = null;
+          suppressedActiveTakeCatchupRef.current = null;
+          return;
+        }
+
+        const catchupKey = `${state.take.id}:${state.sessionStartedAt}`;
+        // The host's own stop is detected via the host-stop marker (statuses are
+        // keyed by the literal "host" id, not a LiveKit identity), so a
+        // returning host is handled here.
+        const hostTakeStatus = state.take.participantStatuses.find(
+          (status) => status.participantId === "host",
+        );
+        if (hostTakeStatus && isHostStoppedRoomStatus(hostTakeStatus)) {
+          activeTakeCatchupRef.current = catchupKey;
+          return;
+        }
+        // For guests, statuses are keyed by LiveKit identity, so this matches a
+        // returning guest that already stopped its own segment in this take.
+        const localTakeStatus = state.take.participantStatuses.find(
+          (status) => status.participantId === localParticipantId,
+        );
+        if (
+          localTakeStatus?.recordingStatus &&
+          isParticipantStoppedRecordingStatus(localTakeStatus.recordingStatus)
+        ) {
+          activeTakeCatchupRef.current = catchupKey;
+          return;
+        }
+        if (suppressedActiveTakeCatchupRef.current === catchupKey) return;
+        if (
+          suppressedActiveTakeCatchupRef.current &&
+          suppressedActiveTakeCatchupRef.current !== catchupKey
+        ) {
+          suppressedActiveTakeCatchupRef.current = null;
+        }
+        if (activeTakeCatchupRef.current === catchupKey) return;
+        if (
+          studioStateRef.current !== "connected" ||
+          recorderRef.current ||
+          startingRef.current ||
+          stoppingRef.current
+        ) {
+          return;
+        }
+
+        activeTakeCatchupRef.current = catchupKey;
+        const started = await startRecordingLocal(
+          state.sessionStartedAt,
+          state.take.id,
+        );
+        if (!cancelled && !started) {
+          activeTakeCatchupRef.current = null;
+          showNotification("Couldn't resume active recording - check your mic");
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.error("Failed to catch up to active recording take:", err);
+        }
+      }
+    }
+
+    void catchUpToActiveTake();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    recordingStream,
+    localParticipantId,
+    sessionId,
+    startRecordingLocal,
+    studioState,
+    showNotification,
+  ]);
 
   // Subscribe to remote control messages. LiveKit does not echo the sender's
   // own messages back, but startRecordingLocal/stopRecordingLocal are

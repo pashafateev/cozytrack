@@ -117,13 +117,16 @@ async function ensureLogicalTrackAndSegment(input: {
   if (requestedTakeId) {
     const requestedTake = await db.recordingTake.findUnique({
       where: { id: requestedTakeId },
-      select: { id: true, sessionId: true },
+      select: { id: true, sessionId: true, stoppedAt: true },
     });
     if (!requestedTake) {
       throw new Error("TAKE_NOT_FOUND");
     }
     if (requestedTake.sessionId !== sessionId) {
       throw new Error("TAKE_SESSION_MISMATCH");
+    }
+    if (requestedTake.stoppedAt) {
+      throw new Error("TAKE_STOPPED");
     }
     activeTake = { id: requestedTake.id };
   } else {
@@ -380,6 +383,12 @@ export async function POST(req: NextRequest) {
           return NextResponse.json(
             { error: "Recording take not found" },
             { status: 404 }
+          );
+        }
+        if (error instanceof Error && error.message === "TAKE_STOPPED") {
+          return NextResponse.json(
+            { error: "Recording take is stopped" },
+            { status: 409 }
           );
         }
         throw error;

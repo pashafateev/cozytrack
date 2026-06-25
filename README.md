@@ -245,6 +245,15 @@ npm run test:browser
 
 `npm run test:browser` starts local Docker services, provisions MinIO, pushes the Prisma schema, starts Next.js on port `3101`, signs in as the host with test-only credentials, records with Chromium's fake microphone, and verifies a complete track row plus a non-empty `recording.webm` object in MinIO.
 
+Release-readiness check for recording lifecycle changes:
+
+```bash
+npx playwright install chromium
+npm run release:check
+```
+
+`npm run release:check` starts local Postgres, LiveKit, Redis, and MinIO with test-safe defaults, then runs lint, typecheck, unit tests, Prisma validation, production build, service integration tests, and the browser recording smoke suite.
+
 ## Project Map
 
 ```text
