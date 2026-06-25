@@ -5,6 +5,7 @@ type RecordingTake = {
   sessionId: string;
   startedAt: Date;
   stoppedAt: Date | null;
+  status: string;
   participantStatuses?: RecordingTakeParticipantStatus[];
 };
 
@@ -38,7 +39,7 @@ function cloneTake(take: RecordingTake): RecordingTake {
 function activeTakeFor(sessionId: string): RecordingTake | null {
   return (
     Array.from(mocks.takes.values()).find(
-      (take) => take.sessionId === sessionId && take.stoppedAt === null,
+      (take) => take.sessionId === sessionId && take.status === "recording",
     ) ?? null
   );
 }
@@ -55,10 +56,10 @@ vi.mock("@/lib/db", () => ({
         async ({
           where,
         }: {
-          where: { sessionId: string; stoppedAt?: null };
+          where: { sessionId: string; status?: string; stoppedAt?: null };
         }) => {
           let take: RecordingTake | null = null;
-          if (where.stoppedAt === null) {
+          if (where.status === "recording" || where.stoppedAt === null) {
             take = activeTakeFor(where.sessionId);
           } else {
             take =
@@ -79,13 +80,14 @@ vi.mock("@/lib/db", () => ({
         async ({
           data,
         }: {
-          data: { sessionId: string; startedAt: Date };
+          data: { sessionId: string; startedAt: Date; status?: string };
         }) => {
           const take: RecordingTake = {
             id: `take-${mocks.nextTakeId++}`,
             sessionId: data.sessionId,
             startedAt: data.startedAt,
             stoppedAt: null,
+            status: data.status ?? "recording",
           };
           mocks.takes.set(take.id, take);
           return cloneTake(take);
@@ -97,7 +99,7 @@ vi.mock("@/lib/db", () => ({
           data,
         }: {
           where: { id: string };
-          data: { stoppedAt?: Date | null };
+          data: { stoppedAt?: Date | null; status?: string };
         }) => {
           const take = mocks.takes.get(id);
           if (!take) throw new Error("take not found");
@@ -277,6 +279,7 @@ describe("/api/sessions/[id]/recording-state", () => {
       sessionId: "s1",
       startedAt: new Date("2026-06-01T12:00:00.000Z"),
       stoppedAt: null,
+      status: "recording",
     });
     mocks.resolvePrincipal.mockResolvedValue({
       kind: "guest",
@@ -321,6 +324,7 @@ describe("/api/sessions/[id]/recording-state", () => {
       sessionId: "s1",
       startedAt: new Date("2026-06-01T12:00:00.000Z"),
       stoppedAt: null,
+      status: "recording",
     });
 
     const res = await reportRecordingState(
@@ -333,5 +337,101 @@ describe("/api/sessions/[id]/recording-state", () => {
     );
 
     expect(res.status).toBe(400);
+  });
+
+  it("marks the take stopped (status + timestamp) on host stop", async () => {
+    await setRecordingState(
+      request("POST", {
+        active: true,
+        sessionStartedAt: "2026-06-01T12:00:00.000Z",
+      }),
+      params(),
+    );
+
+    const stop = await setRecordingState(
+      request("POST", { active: false }),
+      params(),
+    );
+    expect(stop.status).toBe(200);
+
+    const stored = mocks.takes.get("take-1");
+    expect(stored?.status).toBe("stopped");
+    expect(stored?.stoppedAt).toEqual(expect.any(Date));
+  });
+
+  it("treats status, not stoppedAt, as the active signal", async () => {
+    // A take whose stop write landed (status stopped) must never read as active,
+    // even though a returning participant might still hold a stale reference.
+    mocks.takes.set("take-done", {
+      id: "take-done",
+      sessionId: "s1",
+      startedAt: new Date("2026-06-01T12:00:00.000Z"),
+      stoppedAt: new Date("2026-06-01T12:05:00.000Z"),
+      status: "stopped",
+    });
+
+    const read = await getRecordingState(request("GET"), params());
+    expect(read.status).toBe(200);
+    await expect(read.json()).resolves.toMatchObject({
+      active: false,
+      sessionStartedAt: null,
+      take: null,
+    });
+  });
+
+  it("is idempotent when stop is retried after it already landed", async () => {
+    await setRecordingState(
+      request("POST", {
+        active: true,
+        sessionStartedAt: "2026-06-01T12:00:00.000Z",
+      }),
+      params(),
+    );
+
+    const first = await setRecordingState(
+      request("POST", { active: false }),
+      params(),
+    );
+    const second = await setRecordingState(
+      request("POST", { active: false }),
+      params(),
+    );
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    await expect(second.json()).resolves.toMatchObject({
+      active: false,
+      take: null,
+    });
+    // The already-stopped take is untouched; no second take is created.
+    expect(mocks.takes).toHaveLength(1);
+    expect(mocks.takes.get("take-1")?.status).toBe("stopped");
+  });
+
+  it("starts a fresh take after the previous one was stopped", async () => {
+    await setRecordingState(
+      request("POST", {
+        active: true,
+        sessionStartedAt: "2026-06-01T12:00:00.000Z",
+      }),
+      params(),
+    );
+    await setRecordingState(request("POST", { active: false }), params());
+
+    const restart = await setRecordingState(
+      request("POST", {
+        active: true,
+        sessionStartedAt: "2026-06-01T12:10:00.000Z",
+      }),
+      params(),
+    );
+
+    expect(restart.status).toBe(200);
+    await expect(restart.json()).resolves.toMatchObject({
+      active: true,
+      sessionStartedAt: "2026-06-01T12:10:00.000Z",
+      take: { id: "take-2", status: "recording" },
+    });
+    expect(mocks.takes).toHaveLength(2);
   });
 });

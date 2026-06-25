@@ -77,7 +77,7 @@ function isUniqueConstraintError(error: unknown): boolean {
 
 async function findActiveTake(sessionId: string): Promise<{ id: string } | null> {
   return await db.recordingTake.findFirst({
-    where: { sessionId, stoppedAt: null },
+    where: { sessionId, status: "recording" },
     orderBy: { startedAt: "desc" },
     select: { id: true },
   });
