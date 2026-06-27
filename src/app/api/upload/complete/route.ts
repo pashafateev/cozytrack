@@ -3,6 +3,10 @@ import { db } from "@/lib/db";
 import { deleteTrackSegmentChunks } from "@/lib/s3";
 import { resolvePrincipal, verifyRecordingUploadToken } from "@/lib/auth";
 import { materializeTrack } from "@/lib/track-materialization";
+import {
+  FINALIZED_SESSION_ERROR,
+  isRecordingSession,
+} from "@/lib/session-status";
 
 export async function POST(req: NextRequest) {
   try {
@@ -35,6 +39,23 @@ export async function POST(req: NextRequest) {
       if (!uploadPrincipal) {
         return NextResponse.json({ error: "unauthorized" }, { status: 401 });
       }
+    }
+
+    const existingSession = await db.session.findUnique({
+      where: { id: sessionId },
+      select: { id: true, status: true },
+    });
+    if (!existingSession) {
+      return NextResponse.json(
+        { error: `Session ${sessionId} was not found` },
+        { status: 404 },
+      );
+    }
+    if (!isRecordingSession(existingSession)) {
+      return NextResponse.json(
+        { error: FINALIZED_SESSION_ERROR },
+        { status: 409 },
+      );
     }
 
     const existingTrack = await db.track.findUnique({

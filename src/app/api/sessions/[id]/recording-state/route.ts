@@ -5,6 +5,10 @@ import {
   resolvePrincipal,
   type Principal,
 } from "@/lib/auth";
+import {
+  FINALIZED_SESSION_ERROR,
+  isRecordingSession,
+} from "@/lib/session-status";
 
 type RecordingTakeWithStatuses = {
   id: string;
@@ -74,7 +78,7 @@ async function requirePrincipal(req: NextRequest, sessionId: string) {
 async function requireSession(sessionId: string) {
   return await db.session.findUnique({
     where: { id: sessionId },
-    select: { id: true },
+    select: { id: true, status: true },
   });
 }
 
@@ -197,6 +201,13 @@ export async function POST(
     const body = await req.json().catch(() => ({}));
     const active = body?.active === true;
 
+    if (active && !isRecordingSession(session)) {
+      return NextResponse.json(
+        { error: FINALIZED_SESSION_ERROR },
+        { status: 409 },
+      );
+    }
+
     if (active) {
       const startedAt = parseStartedAt(body?.sessionStartedAt);
       if (!startedAt) {
@@ -294,6 +305,17 @@ export async function PATCH(
       return NextResponse.json(
         { error: "At least one participant status field is required" },
         { status: 400 },
+      );
+    }
+
+    const session = await requireSession(id);
+    if (!session) {
+      return NextResponse.json({ error: "Session not found" }, { status: 404 });
+    }
+    if (!isRecordingSession(session)) {
+      return NextResponse.json(
+        { error: FINALIZED_SESSION_ERROR },
+        { status: 409 },
       );
     }
 
