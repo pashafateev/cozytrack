@@ -26,6 +26,7 @@ type TrackSegment = {
 
 const mocks = vi.hoisted(() => ({
   sessions: new Set<string>(),
+  readySessions: new Set<string>(),
   tracks: new Map<string, Track>(),
   segments: new Map<string, TrackSegment>(),
   getPresignedPutUrl: vi.fn(async (key: string) => `https://s3.example/${key}`),
@@ -37,7 +38,9 @@ vi.mock("@/lib/db", () => ({
   db: {
     session: {
       findUnique: vi.fn(async ({ where: { id } }: { where: { id: string } }) =>
-        mocks.sessions.has(id) ? { id } : null,
+        mocks.sessions.has(id)
+          ? { id, status: mocks.readySessions.has(id) ? "ready" : "recording" }
+          : null,
       ),
     },
     recordingTake: {
@@ -248,6 +251,7 @@ function postJson(
 beforeEach(() => {
   vi.stubEnv("AUTH_SECRET", "test-secret-for-recording-upload-token-123456");
   mocks.sessions.clear();
+  mocks.readySessions.clear();
   mocks.tracks.clear();
   mocks.segments.clear();
   mocks.sessions.add("s1");
@@ -285,6 +289,31 @@ describe("recording upload auth", () => {
     expect(body.url).toBe("https://s3.example/sessions/s1/tracks/t1/0.webm");
     expect(body.recordingToken).toEqual(expect.any(String));
     expect(mocks.tracks.get("t1")?.participantName).toBe("Alice");
+  });
+
+  it("rejects starting an upload for an already-ready session", async () => {
+    mocks.readySessions.add("s1");
+    mocks.resolvePrincipal.mockResolvedValue({ kind: "host" });
+
+    const res = await presignUpload(
+      postJson(
+        "/api/upload/presign",
+        {
+          sessionId: "s1",
+          trackId: "t1",
+          partNumber: 0,
+          participantName: "Alice",
+        },
+      ),
+    );
+
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toEqual({
+      error: "Session is already finalized",
+    });
+    expect(mocks.tracks.has("t1")).toBe(false);
+    expect(mocks.segments.has("t1")).toBe(false);
+    expect(mocks.getPresignedPutUrl).not.toHaveBeenCalled();
   });
 
   it("stores sync marker metadata on the created track segment", async () => {
@@ -516,6 +545,49 @@ describe("recording upload auth", () => {
       durationMs: 12345,
     });
     expect(mocks.deleteTrackSegmentChunks).toHaveBeenCalledWith("s1", "t1", "t1");
+  });
+
+  it("rejects completing an upload for an already-ready session", async () => {
+    mocks.readySessions.add("s1");
+    mocks.tracks.set("t1", {
+      id: "t1",
+      sessionId: "s1",
+      participantName: "Alice",
+      s3Key: "sessions/s1/tracks/t1/recording.webm",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("t1", {
+      id: "t1",
+      trackId: "t1",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/t1/",
+      status: "recording",
+      durationMs: null,
+    });
+    const recordingToken = await issueRecordingUploadToken("s1", "t1");
+
+    const res = await completeUpload(
+      postJson(
+        "/api/upload/complete",
+        { sessionId: "s1", trackId: "t1", durationMs: 12345 },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toEqual({
+      error: "Session is already finalized",
+    });
+    expect(mocks.segments.get("t1")).toMatchObject({
+      status: "recording",
+      durationMs: null,
+    });
+    expect(mocks.tracks.get("t1")).toMatchObject({
+      status: "recording",
+      durationMs: null,
+    });
+    expect(mocks.deleteTrackSegmentChunks).not.toHaveBeenCalled();
   });
 
   it("forbids completing a track outside the requested session", async () => {

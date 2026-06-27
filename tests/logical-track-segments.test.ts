@@ -49,7 +49,7 @@ vi.mock("@/lib/db", () => ({
   db: {
     session: {
       findUnique: vi.fn(async ({ where: { id } }: { where: { id: string } }) =>
-        mocks.sessions.has(id) ? { id } : null,
+        mocks.sessions.has(id) ? { id, status: "recording" } : null,
       ),
     },
     recordingTake: {

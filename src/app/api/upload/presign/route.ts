@@ -20,6 +20,10 @@ import {
   SYNC_MARKER_VERSION,
   type SyncMarkerMetadata,
 } from "@/lib/sync-marker";
+import {
+  FINALIZED_SESSION_ERROR,
+  isRecordingSession,
+} from "@/lib/session-status";
 
 function getUploadErrorMessage(error: unknown): string {
   if (!(error instanceof Error)) {
@@ -332,13 +336,19 @@ export async function POST(req: NextRequest) {
 
       const existingSession = await db.session.findUnique({
         where: { id: sessionId },
-        select: { id: true },
+        select: { id: true, status: true },
       });
 
       if (!existingSession) {
         return NextResponse.json(
           { error: `Session ${sessionId} was not found` },
           { status: 404 }
+        );
+      }
+      if (!isRecordingSession(existingSession)) {
+        return NextResponse.json(
+          { error: FINALIZED_SESSION_ERROR },
+          { status: 409 },
         );
       }
 
@@ -407,6 +417,23 @@ export async function POST(req: NextRequest) {
         if (!uploadPrincipal) {
           return NextResponse.json({ error: "unauthorized" }, { status: 401 });
         }
+      }
+
+      const existingSession = await db.session.findUnique({
+        where: { id: sessionId },
+        select: { id: true, status: true },
+      });
+      if (!existingSession) {
+        return NextResponse.json(
+          { error: `Session ${sessionId} was not found` },
+          { status: 404 },
+        );
+      }
+      if (!isRecordingSession(existingSession)) {
+        return NextResponse.json(
+          { error: FINALIZED_SESSION_ERROR },
+          { status: 409 },
+        );
       }
 
       // The S3 key below is built from caller-supplied ids, and the PUT

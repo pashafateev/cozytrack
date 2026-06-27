@@ -20,6 +20,7 @@ type RecordingTakeParticipantStatus = {
 
 const mocks = vi.hoisted(() => ({
   sessions: new Set<string>(),
+  readySessions: new Set<string>(),
   takes: new Map<string, RecordingTake>(),
   participantStatuses: new Map<string, RecordingTakeParticipantStatus>(),
   resolvePrincipal: vi.fn(),
@@ -47,7 +48,9 @@ vi.mock("@/lib/db", () => ({
   db: {
     session: {
       findUnique: vi.fn(async ({ where: { id } }: { where: { id: string } }) =>
-        mocks.sessions.has(id) ? { id } : null,
+        mocks.sessions.has(id)
+          ? { id, status: mocks.readySessions.has(id) ? "ready" : "recording" }
+          : null,
       ),
     },
     recordingTake: {
@@ -164,6 +167,7 @@ function request(method: "GET" | "PATCH" | "POST", body?: Record<string, unknown
 
 beforeEach(() => {
   mocks.sessions.clear();
+  mocks.readySessions.clear();
   mocks.takes.clear();
   mocks.participantStatuses.clear();
   mocks.sessions.add("s1");
@@ -221,6 +225,24 @@ describe("/api/sessions/[id]/recording-state", () => {
       sessionStartedAt: null,
       take: null,
     });
+  });
+
+  it("rejects activating a recording take for an already-ready session", async () => {
+    mocks.readySessions.add("s1");
+
+    const res = await setRecordingState(
+      request("POST", {
+        active: true,
+        sessionStartedAt: "2026-06-27T12:00:00.000Z",
+      }),
+      params(),
+    );
+
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toEqual({
+      error: "Session is already finalized",
+    });
+    expect(mocks.takes).toHaveLength(0);
   });
 
   it("reuses the current active take when host start is repeated", async () => {
