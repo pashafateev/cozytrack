@@ -28,7 +28,7 @@ const studioPageHarness = vi.hoisted(() => ({
   completeUpload: vi.fn(async () => undefined),
   recorderConstructedStreams: [] as MediaStream[],
   recorderOnChunkCallbacks: [] as Array<(chunk: Blob, index: number) => void>,
-  recorderStart: vi.fn(async () => undefined),
+  recorderStart: vi.fn(async (_timeSlice?: number) => undefined),
   recorderStop: vi.fn(async () => new Blob([], { type: "audio/webm" })),
   markerStream: null as MediaStream | null,
   createSyncMarkerRecordingStream: vi.fn(),

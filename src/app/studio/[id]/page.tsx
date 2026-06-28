@@ -29,10 +29,6 @@ import { v4 as uuidv4 } from "uuid";
 import { CozyRecorder } from "@/lib/recorder";
 import { forceMonoStream, getTrackChannelCount } from "@/lib/audio-downmix";
 import {
-  createSyncMarkerRecordingStream,
-  type SyncMarkerRecordingStream,
-} from "@/lib/recording-sync-marker";
-import {
   getPresignedUploadTarget,
   getPresignedUploadUrl,
   uploadChunk,
@@ -728,7 +724,6 @@ function RoomContent({
   // `getUserMedia` constraints.
   const streamRef = useRef<MediaStream | null>(null);
   const downmixDisposeRef = useRef<(() => void) | null>(null);
-  const syncMarkerRecordingDisposeRef = useRef<(() => void) | null>(null);
   const [recordingStream, setRecordingStream] = useState<MediaStream | null>(null);
   // Mirror of studioState so callbacks invoked from transport subscriptions
   // (which close over the value at subscription time) can check current state
@@ -1295,16 +1290,6 @@ function RoomContent({
       let trackId = requestedTrackId;
       let segmentId = requestedTrackId;
       recordingUploadTokenRef.current = undefined;
-      let syncMarkerRecording: SyncMarkerRecordingStream | null = null;
-      try {
-        syncMarkerRecording = createSyncMarkerRecordingStream(streamRef.current);
-        await syncMarkerRecording.prepare();
-      } catch (err) {
-        console.error("Recording: sync marker unavailable; recording raw stream.", err);
-        syncMarkerRecording?.dispose();
-        syncMarkerRecording = null;
-        showNotification("Sync marker unavailable - recording raw audio");
-      }
 
       try {
         const initialUpload = await getPresignedUploadTarget(
@@ -1320,7 +1305,6 @@ function RoomContent({
             },
             sessionStartedAt: sessionStartedAtIso,
             takeId: effectiveTakeId ?? undefined,
-            syncMarker: syncMarkerRecording?.marker,
           },
         );
         trackId = initialUpload.trackId ?? requestedTrackId;
@@ -1346,7 +1330,6 @@ function RoomContent({
         }
       } catch (err) {
         console.error("Failed to initialize upload:", err);
-        syncMarkerRecording?.dispose();
         clearRecordingConfirmationState();
         void broadcastRecordingStatus(
           "failed",
@@ -1359,7 +1342,7 @@ function RoomContent({
 
       trackerReset();
 
-      const recorder = new CozyRecorder(syncMarkerRecording?.stream ?? streamRef.current);
+      const recorder = new CozyRecorder(streamRef.current);
 
       recorder.onChunk((chunk, index) => {
         const byteLength = chunk.size;
@@ -1449,7 +1432,6 @@ function RoomContent({
       });
 
       recorderRef.current = recorder;
-      syncMarkerRecordingDisposeRef.current = syncMarkerRecording?.dispose ?? null;
       recordingStartRef.current = Date.now();
 
       if (timingDebug) {
@@ -1462,26 +1444,15 @@ function RoomContent({
             sessionStartedAt: sessionStartedAtIso,
             trackId,
             participant: participantName,
-            syncMarker: syncMarkerRecording?.marker,
           }),
         );
       }
 
-      let recorderStarted = false;
       try {
         await recorder.start(5000);
-        recorderStarted = true;
-        await syncMarkerRecording?.playSyncMarker();
       } catch (err) {
         console.error("Failed to start recorder:", err);
-        if (recorderStarted) {
-          await recorder.stop().catch((stopErr) => {
-            console.error("Failed to stop recorder after sync marker error:", stopErr);
-          });
-        }
         recorderRef.current = null;
-        syncMarkerRecordingDisposeRef.current = null;
-        syncMarkerRecording?.dispose();
         clearRecordingConfirmationState();
         void broadcastRecordingStatus(
           "failed",
@@ -1542,8 +1513,6 @@ function RoomContent({
     clearRecordingConfirmationState(false);
 
     if (!recorderRef.current) {
-      syncMarkerRecordingDisposeRef.current?.();
-      syncMarkerRecordingDisposeRef.current = null;
       setRecordingSessionStartedAtSync(null);
       recordingTakeIdRef.current = null;
       void broadcastRecordingStatus(
@@ -1576,8 +1545,6 @@ function RoomContent({
 
     try {
       const blob = await recorder.stop();
-      syncMarkerRecordingDisposeRef.current?.();
-      syncMarkerRecordingDisposeRef.current = null;
       const durationMs = Date.now() - startedAt;
 
       if (timingDebug) {
@@ -1669,8 +1636,6 @@ function RoomContent({
       }
     } finally {
       recorderRef.current = null;
-      syncMarkerRecordingDisposeRef.current?.();
-      syncMarkerRecordingDisposeRef.current = null;
       segmentIdRef.current = "";
       recordingUploadTokenRef.current = undefined;
       // Hard invariant from issue #61: do not leave `finalizing` until the
@@ -1994,8 +1959,6 @@ function RoomContent({
 
   useEffect(() => {
     return () => {
-      syncMarkerRecordingDisposeRef.current?.();
-      syncMarkerRecordingDisposeRef.current = null;
       downmixDisposeRef.current?.();
       downmixDisposeRef.current = null;
       const rawStream = rawStreamRef.current;
