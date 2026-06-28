@@ -1,7 +1,5 @@
 "use client";
 
-import type { SyncMarkerMetadata } from "@/lib/sync-marker";
-
 export interface DeviceInfo {
   deviceLabel: string | undefined;
   deviceId: string;
@@ -17,7 +15,6 @@ export interface TrackInitInfo {
   // The take this recording was broadcast for. Binds a delayed start to its
   // original take instead of whatever take is active when presign arrives.
   takeId?: string;
-  syncMarker?: SyncMarkerMetadata;
 }
 
 export interface PresignedUploadTarget {
@@ -53,7 +50,6 @@ export async function getPresignedUploadTarget(
       sessionStartedAt: trackInit?.sessionStartedAt,
       segmentId: trackInit?.segmentId,
       takeId: trackInit?.takeId,
-      syncMarker: trackInit?.syncMarker,
     }),
   });
 

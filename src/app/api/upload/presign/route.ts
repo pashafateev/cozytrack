@@ -14,12 +14,6 @@ import {
   type Principal,
   verifyRecordingUploadToken,
 } from "@/lib/auth";
-import {
-  SYNC_MARKER_DURATION_MS,
-  SYNC_MARKER_OFFSET_MS,
-  SYNC_MARKER_VERSION,
-  type SyncMarkerMetadata,
-} from "@/lib/sync-marker";
 
 function getUploadErrorMessage(error: unknown): string {
   if (!(error instanceof Error)) {
@@ -38,32 +32,6 @@ function getUploadErrorMessage(error: unknown): string {
 
 function cleanNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-function cleanSyncMarker(value: unknown): SyncMarkerMetadata | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "object") {
-    throw new Error("SYNC_MARKER_INVALID");
-  }
-
-  const marker = value as {
-    version?: unknown;
-    offsetMs?: unknown;
-    durationMs?: unknown;
-  };
-  if (
-    marker.version !== SYNC_MARKER_VERSION ||
-    marker.offsetMs !== SYNC_MARKER_OFFSET_MS ||
-    marker.durationMs !== SYNC_MARKER_DURATION_MS
-  ) {
-    throw new Error("SYNC_MARKER_INVALID");
-  }
-
-  return {
-    version: SYNC_MARKER_VERSION,
-    offsetMs: SYNC_MARKER_OFFSET_MS,
-    durationMs: SYNC_MARKER_DURATION_MS,
-  };
 }
 
 function isUniqueConstraintError(error: unknown): boolean {
@@ -94,7 +62,6 @@ async function ensureLogicalTrackAndSegment(input: {
   deviceId: unknown;
   isBuiltInMic: unknown;
   sessionStartedAt: unknown;
-  syncMarker?: SyncMarkerMetadata;
 }) {
   const {
     sessionId,
@@ -107,7 +74,6 @@ async function ensureLogicalTrackAndSegment(input: {
     deviceId,
     isBuiltInMic,
     sessionStartedAt,
-    syncMarker,
   } = input;
   const participantId = principalParticipantId(principal);
   // Prefer the take the client was actually recording for. A delayed start
@@ -232,9 +198,6 @@ async function ensureLogicalTrackAndSegment(input: {
               track.id,
               requestedSegmentId,
             ),
-            syncMarkerVersion: syncMarker?.version,
-            syncMarkerOffsetMs: syncMarker?.offsetMs,
-            syncMarkerDurationMs: syncMarker?.durationMs,
           },
         });
       } catch (error) {
@@ -303,22 +266,6 @@ export async function POST(req: NextRequest) {
     let logicalTrackId = trackId;
     let segmentId = cleanNonEmptyString(body?.segmentId) ?? trackId;
     if (isRecordingStart) {
-      let syncMarker: SyncMarkerMetadata | undefined;
-      try {
-        syncMarker = cleanSyncMarker(body?.syncMarker);
-      } catch (error) {
-        if (
-          error instanceof Error &&
-          error.message === "SYNC_MARKER_INVALID"
-        ) {
-          return NextResponse.json(
-            { error: "syncMarker is invalid" },
-            { status: 400 },
-          );
-        }
-        throw error;
-      }
-
       // Starting a recording still requires normal host/guest auth. The
       // returned recording token is scoped to this session+track so later
       // chunks can keep uploading if the login cookie expires mid-take.
@@ -354,7 +301,6 @@ export async function POST(req: NextRequest) {
           deviceId,
           isBuiltInMic,
           sessionStartedAt,
-          syncMarker,
         });
         logicalTrackId = track.id;
         segmentId = segment.id;

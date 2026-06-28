@@ -95,14 +95,6 @@ model TrackSegment {
   s3Prefix             String
   status               String    @default("recording") // recording | uploading | complete | failed
   durationMs           Int?
-  syncMarkerVersion    String?
-  syncMarkerOffsetMs   Int?
-  syncMarkerDurationMs Int?
-  syncMarkerDetectedAtMs      Float?
-  syncMarkerDetectedAtSamples Int?
-  syncMarkerConfidence        Float?
-  syncMarkerDetectionStatus   String?
-  syncMarkerAnalyzedAt        DateTime?
   startedAt            DateTime  @default(now())
   completedAt          DateTime?
   createdAt            DateTime  @default(now())
