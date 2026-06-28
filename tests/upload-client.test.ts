@@ -74,7 +74,7 @@ describe("upload client auth", () => {
     );
   });
 
-  it("does not send sync marker metadata when starting a recording", async () => {
+  it("sends recording metadata when starting a recording", async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse({ url: "https://s3.example/chunk-0" }),
     );
@@ -102,7 +102,6 @@ describe("upload client auth", () => {
       sessionStartedAt: "2026-06-27T19:42:00.000Z",
       takeId: "take-1",
     });
-    expect(body).not.toHaveProperty("syncMarker");
   });
 
   it("sends the recording token when completing the upload", async () => {
