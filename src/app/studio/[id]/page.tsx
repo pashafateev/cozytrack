@@ -1891,6 +1891,7 @@ function RoomContent({
       } catch (err) {
         console.error("Failed to close recording take:", err);
         showNotification("Couldn't update recording state");
+        return;
       }
       try {
         await transport.sendControlMessage({ type: "recording_stop" });

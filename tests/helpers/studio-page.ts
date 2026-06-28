@@ -13,7 +13,7 @@ const studioPageHarness = vi.hoisted(() => ({
     sessionId: "session-guest",
   },
   getToken: vi.fn(async () => "livekit-token"),
-  sendControlMessage: vi.fn(async () => undefined),
+  sendControlMessage: vi.fn(async (_message: { type: string }) => undefined),
   onControlMessage: vi.fn(() => vi.fn()),
   republishAllTracks: vi.fn(async () => undefined),
   getUserMedia: vi.fn(),
