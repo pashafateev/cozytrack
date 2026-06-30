@@ -29,12 +29,17 @@ model RecordingTake {
   session             Session                          @relation(fields: [sessionId], references: [id])
   startedAt           DateTime
   stoppedAt           DateTime?
+  // Authoritative lifecycle state: "recording" while in progress, "stopped"
+  // once the host has terminally stopped it. A stopped take is never resumable.
+  // stoppedAt stays as the timestamp; status is the source of truth for "active".
+  status              String                           @default("recording") // recording | stopped
   createdAt           DateTime                         @default(now())
   updatedAt           DateTime                         @updatedAt
   participantStatuses RecordingTakeParticipantStatus[]
   tracks              Track[]
 
   @@index([sessionId, stoppedAt])
+  @@index([sessionId, status])
 }
 
 model RecordingTakeParticipantStatus {

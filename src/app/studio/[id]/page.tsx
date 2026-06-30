@@ -1849,10 +1849,14 @@ function RoomContent({
     stoppingRef.current = true;
     try {
       try {
+        // stopRecordingTake retries transient failures internally, so reaching
+        // this catch means the stop genuinely could not be persisted after
+        // several attempts (not just a single blip).
         await stopRecordingTake(sessionId);
       } catch (err) {
         console.error("Failed to close recording take:", err);
         showNotification("Couldn't update recording state");
+        return;
       }
       try {
         await transport.sendControlMessage({ type: "recording_stop" });
