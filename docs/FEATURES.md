@@ -1,6 +1,6 @@
 # Cozytrack Roadmap
 
-This roadmap was reconciled against every GitHub issue that was open on June 23, 2026 (44 open issues).
+This roadmap was reconciled against every GitHub issue that was open on June 30, 2026 (47 open issues).
 
 - Every currently open issue appears exactly once as a primary roadmap entry below.
 - No open issues are explicitly excluded right now.
@@ -21,6 +21,10 @@ This roadmap was reconciled against every GitHub issue that was open on June 23,
 - #59 Source-side audio levels over LiveKit data channel: publish each participant's local RMS/peak values as the long-term accurate remote-meter signal, with the current stats-based meter as fallback.
 - #84 Output-device visibility: show the selected playback device alongside the microphone wherever browser support makes that trustworthy, and fall back cleanly when it does not.
 - #106 Host-visible recording-risk alerts: elevate participant or storage failures into obvious in-studio alerts so the host can react before the take ends.
+
+### Session integrity and operator trust
+
+- #151 New-session integrity after finalize: prevent a fresh recording flow from reusing an already-finalized or already-ingested `Session.id`, block finalized/ready sessions from silently accepting new tracks without an explicit reopen path, and add regression coverage around that boundary.
 
 ### Session detail, dashboard, and studio polish
 
@@ -45,6 +49,7 @@ This roadmap was reconciled against every GitHub issue that was open on June 23,
 
 ### Follow the explicit dependency chain
 
+- #148 Harden `RecordingTake` lifecycle with durable stop and authoritative terminal state: land this before reconnect auto-resume follow-up work like `#75` and release-readiness coverage like `#134`, because the issue text makes explicit take state the prerequisite for race-free catch-up and stop behavior.
 - #29 Dashboard session totals and accurate duration: land this after `#25`, because total size depends on persisted `Track.bytes` and duration should move off the current per-track max heuristic.
 - #36 Podflow JWT auth replacement: replace interim host-password auth with podflow-signed JWT verification, JIT user provisioning, and owner-scoped route authorization.
 - #37 Service-token flow for podline: start this after `#36`, because the service principal path should extend the same auth boundary rather than reintroducing a parallel interim model.
@@ -58,6 +63,7 @@ This roadmap was reconciled against every GitHub issue that was open on June 23,
 - #140 Generate aligned stem artifacts for recording takes: do this after `#7` settles the alignment metadata strategy and after the existing logical-track materialization path, because aligned stems need authoritative marker offsets and a stable cross-track export step.
 - #141 Serve aligned stems by default while preserving raw downloads: land this after `#140`, because the UI and download routes need aligned derived artifacts before they can switch user-facing defaults safely.
 - #142 Optional drift analysis and correction for long takes: keep this after `#140`, because the first aligned-export path should ship with fixed-offset alignment before drift measurement and time-stretch logic add more moving parts.
+- #154 Backlog sweeper for abandoned zombie takes: keep this after `#148`, because the cleanup job depends on the lease-based `lastHeartbeatAt` model that `#148` introduces and the issue explicitly frames it as hygiene rather than correctness-critical.
 - #134 Automated release-readiness gate for live reconnect recording: run this after the active reconnect/materialization work is ready to validate, and before merging or shipping that stack, so recording, reconnect, upload, recovery, and materialization all pass in one repeatable command and CI path.
 - #75 Participant reconnect and resume: pursue this after `#111` locks the reconnect-safe recording model and the active materialization path is stable, so reconnect behavior extends a defined logical-track boundary instead of exposing raw browser blobs downstream.
 
