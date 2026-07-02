@@ -1,6 +1,6 @@
 # Cozytrack Roadmap
 
-This roadmap was reconciled against every GitHub issue that was open on June 23, 2026 (44 open issues).
+This roadmap was reconciled against every GitHub issue that was open on July 2, 2026 (47 open issues).
 
 - Every currently open issue appears exactly once as a primary roadmap entry below.
 - No open issues are explicitly excluded right now.
@@ -24,6 +24,7 @@ This roadmap was reconciled against every GitHub issue that was open on June 23,
 
 ### Session detail, dashboard, and studio polish
 
+- #151 Finalized-session reuse guard: ensure a new studio recording always gets a fresh `Session.id`, and block finalized/ready sessions from silently accepting new tracks unless there is an explicit reopen flow.
 - #22 Session notes persistence: store the session-detail notes textarea on `Session` and autosave it with a visible saved state.
 - #24 Real waveform extraction and per-track playback: replace decorative waveform placeholders with real audio-derived peaks and track-level playback controls.
 - #25 Track peak and size metadata: persist `bytes` and `peakDbFS`, capture them during recording/finalization, and expose them in the session UI and dashboard rollups.
@@ -55,11 +56,13 @@ This roadmap was reconciled against every GitHub issue that was open on June 23,
 - #117 Finalize/recovery/completion race integration tests: add a small real-service race suite as another `#108` follow-up for the highest-risk lifecycle ordering cases.
 - #63 Deferred multi-participant browser E2E harness: promote this after the narrower integration coverage and reconnect stack stabilize, or sooner if a real LiveKit/multi-participant regression demands it.
 - #109 Simplify recording and recovery code after the recent safety work: do this after the current safety path and its coverage work stabilize so cleanup is guided by proven invariants instead of guesswork.
+- #148 Durable `RecordingTake` terminal state: land this after `#111`, because reconnect auto-resume and release-readiness coverage need an authoritative stop model before they can safely build on recording-state reads.
 - #140 Generate aligned stem artifacts for recording takes: do this after `#7` settles the alignment metadata strategy and after the existing logical-track materialization path, because aligned stems need authoritative marker offsets and a stable cross-track export step.
 - #141 Serve aligned stems by default while preserving raw downloads: land this after `#140`, because the UI and download routes need aligned derived artifacts before they can switch user-facing defaults safely.
 - #142 Optional drift analysis and correction for long takes: keep this after `#140`, because the first aligned-export path should ship with fixed-offset alignment before drift measurement and time-stretch logic add more moving parts.
 - #134 Automated release-readiness gate for live reconnect recording: run this after the active reconnect/materialization work is ready to validate, and before merging or shipping that stack, so recording, reconnect, upload, recovery, and materialization all pass in one repeatable command and CI path.
 - #75 Participant reconnect and resume: pursue this after `#111` locks the reconnect-safe recording model and the active materialization path is stable, so reconnect behavior extends a defined logical-track boundary instead of exposing raw browser blobs downstream.
+- #154 Expire abandoned recording takes with a sweeper: leave this behind the lease-based reconnect follow-up to `#148`, because correctness is already covered by stale-read semantics and start-time reconciliation while the periodic cleanup is only hygiene.
 
 ## Needs Clarification
 
