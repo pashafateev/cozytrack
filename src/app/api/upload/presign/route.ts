@@ -9,6 +9,8 @@ import {
 } from "@/lib/s3";
 import {
   issueRecordingUploadToken,
+  isLocalTrackSlotId,
+  localTrackSlotParticipantId,
   principalParticipantId,
   resolvePrincipal,
   type Principal,
@@ -56,6 +58,7 @@ async function ensureLogicalTrackAndSegment(input: {
   requestedTrackId: string;
   requestedSegmentId: string;
   requestedTakeId?: string;
+  localTrackSlotId?: string;
   principal: Principal;
   participantName: unknown;
   deviceLabel: unknown;
@@ -68,6 +71,7 @@ async function ensureLogicalTrackAndSegment(input: {
     requestedTrackId,
     requestedSegmentId,
     requestedTakeId,
+    localTrackSlotId,
     principal,
     participantName,
     deviceLabel,
@@ -75,7 +79,21 @@ async function ensureLogicalTrackAndSegment(input: {
     isBuiltInMic,
     sessionStartedAt,
   } = input;
-  const participantId = principalParticipantId(principal);
+  // Local channel slots are host-owned. A guest must never be able to write
+  // into a synthetic host participant id, so reject the slot before deriving
+  // anything from it; an unknown slot id is a client bug, not an auth failure.
+  let participantId: string;
+  if (localTrackSlotId !== undefined) {
+    if (principal.kind !== "host") {
+      throw new Error("LOCAL_SLOT_FORBIDDEN");
+    }
+    if (!isLocalTrackSlotId(localTrackSlotId)) {
+      throw new Error("LOCAL_SLOT_INVALID");
+    }
+    participantId = localTrackSlotParticipantId(localTrackSlotId);
+  } else {
+    participantId = principalParticipantId(principal);
+  }
   // Prefer the take the client was actually recording for. A delayed start
   // must not attach its audio to whichever take happens to be active by the
   // time presign arrives (the host may have moved on to a newer take).
@@ -250,6 +268,8 @@ export async function POST(req: NextRequest) {
       sessionStartedAt,
     } = body;
     const requestedTakeId = cleanNonEmptyString(body?.takeId) ?? undefined;
+    const localTrackSlotId =
+      cleanNonEmptyString(body?.localTrackSlotId) ?? undefined;
 
     if (!sessionId || !trackId || partNumber === undefined) {
       return NextResponse.json(
@@ -295,6 +315,7 @@ export async function POST(req: NextRequest) {
           requestedTrackId: trackId,
           requestedSegmentId: segmentId,
           requestedTakeId,
+          localTrackSlotId,
           principal,
           participantName,
           deviceLabel,
@@ -313,6 +334,15 @@ export async function POST(req: NextRequest) {
             { error: "participantName is required to start an upload" },
             { status: 400 }
           );
+        }
+        if (error instanceof Error && error.message === "LOCAL_SLOT_INVALID") {
+          return NextResponse.json(
+            { error: "Unknown local track slot" },
+            { status: 400 }
+          );
+        }
+        if (error instanceof Error && error.message === "LOCAL_SLOT_FORBIDDEN") {
+          return NextResponse.json({ error: "forbidden" }, { status: 403 });
         }
         if (
           error instanceof Error &&

@@ -142,6 +142,37 @@ export function principalParticipantId(principal: Principal): string {
   return principal.participantId;
 }
 
+// ---------- Host-owned local track slots ----------
+//
+// Two-channel local recording (issue #135) splits one desktop audio interface
+// into two host-owned channels. Each channel records as a normal Track, but
+// they share the host principal — so they need distinct, stable participant ids
+// to coexist under the Track [takeId, participantId] uniqueness constraint. The
+// slot id IS the synthetic participant id: deterministic, host-scoped, and not
+// derivable by a guest (the server rejects guest-supplied slot ids).
+
+export const LOCAL_TRACK_SLOT_IDS = [
+  "host-local-ch-1",
+  "host-local-ch-2",
+] as const;
+export type LocalTrackSlotId = (typeof LOCAL_TRACK_SLOT_IDS)[number];
+
+export function isLocalTrackSlotId(value: unknown): value is LocalTrackSlotId {
+  return (
+    typeof value === "string" &&
+    (LOCAL_TRACK_SLOT_IDS as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * Stable synthetic participant id for a local channel slot. The slot id is
+ * already host-scoped and unique per channel, so it doubles as the participant
+ * id — keeping the two channels distinct without minting extra identifiers.
+ */
+export function localTrackSlotParticipantId(slotId: LocalTrackSlotId): string {
+  return slotId;
+}
+
 // ---------- Recording upload tokens ----------
 
 export async function issueRecordingUploadToken(
