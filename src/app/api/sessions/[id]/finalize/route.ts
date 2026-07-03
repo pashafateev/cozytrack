@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { withSessionLock } from "@/lib/session-lock";
 import { recoverTrack } from "@/lib/recovery";
 
 export async function POST(
@@ -38,29 +39,39 @@ export async function POST(
         }
       }
 
-      const refreshed = stuck.length
-        ? await db.track.findMany({
-            where: { id: { in: stuck.map((t) => t.id) } },
-            select: { id: true, participantName: true, status: true },
-          })
-        : [];
+      // Decide pending-vs-finalize and flip the status under a per-session
+      // advisory lock (issue #151). Re-reading every track inside the lock —
+      // not just the previously-stuck subset — means a track a concurrent
+      // recording start created is seen here and blocks finalize, instead of
+      // being stranded on a session we've just marked `ready`. The lock also
+      // serializes against the start guards, so a start can't create a track
+      // between our read and our status flip.
+      const decision = await withSessionLock(id, async (tx) => {
+        const tracks = await tx.track.findMany({
+          where: { sessionId: id },
+          select: { id: true, participantName: true, status: true },
+        });
 
-      const pending = refreshed
-        .filter((t) => t.status !== "complete" && t.status !== "failed")
-        .map((t) => ({
-          trackId: t.id,
-          participantName: t.participantName,
-          status: t.status,
-        }));
+        const pending = tracks
+          .filter((t) => t.status !== "complete" && t.status !== "failed")
+          .map((t) => ({
+            trackId: t.id,
+            participantName: t.participantName,
+            status: t.status,
+          }));
 
-      if (pending.length > 0) {
-        return NextResponse.json({ pending }, { status: 409 });
-      }
+        if (pending.length > 0) return { pending };
 
-      await db.session.updateMany({
-        where: { id, status: "recording" },
-        data: { status: "ready", finalizedAt: new Date() },
+        await tx.session.updateMany({
+          where: { id, status: "recording" },
+          data: { status: "ready", finalizedAt: new Date() },
+        });
+        return { pending };
       });
+
+      if (decision.pending.length > 0) {
+        return NextResponse.json({ pending: decision.pending }, { status: 409 });
+      }
     }
 
     const updated = await db.session.findUnique({

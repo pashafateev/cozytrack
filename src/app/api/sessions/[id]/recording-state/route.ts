@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { withSessionLock } from "@/lib/session-lock";
 import {
   principalParticipantId,
   resolvePrincipal,
@@ -143,15 +144,6 @@ function serializeParticipantStatus(status: {
   };
 }
 
-function isUniqueActiveTakeConflict(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code?: unknown }).code === "P2002"
-  );
-}
-
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -202,20 +194,6 @@ export async function POST(
     const active = body?.active === true;
 
     if (active) {
-      // A finalized/ready session has already been handed off for ingest.
-      // Starting a new take here would attach fresh audio to an old session
-      // id (issue #151), so the recording never ingests. Reject the start;
-      // the operator must create a new session instead.
-      if (session.status === "ready") {
-        return NextResponse.json(
-          {
-            error:
-              "This session is finalized and can no longer be recorded into. Start a new session.",
-          },
-          { status: 409 },
-        );
-      }
-
       const startedAt = parseStartedAt(body?.sessionStartedAt);
       if (!startedAt) {
         return NextResponse.json(
@@ -224,24 +202,50 @@ export async function POST(
         );
       }
 
-      const existing = await findActiveTake(id);
-      if (existing) {
-        return NextResponse.json(serializeRecordingState(existing, true));
-      }
+      // Re-read status and create the take under a per-session advisory lock so
+      // a concurrent finalize cannot interleave between the status check and the
+      // take creation (issue #151). Without the lock this is a check-then-create
+      // race: finalize could flip the session to `ready` just after we read
+      // `recording`, and we'd attach a new take to an already-ingested session.
+      // Holding the lock also serializes competing starts, so the loser observes
+      // the winner's take instead of colliding on the unique-active-take index.
+      const outcome = await withSessionLock(id, async (tx) => {
+        const fresh = await tx.session.findUnique({
+          where: { id },
+          select: { status: true },
+        });
+        if (!fresh) return { kind: "not_found" as const };
+        if (fresh.status === "ready") return { kind: "finalized" as const };
 
-      try {
-        const created = await db.recordingTake.create({
+        const existing = await tx.recordingTake.findFirst({
+          where: { sessionId: id, status: "recording" },
+          orderBy: { startedAt: "desc" },
+          include: {
+            participantStatuses: { orderBy: { participantName: "asc" } },
+          },
+        });
+        if (existing) return { kind: "existing" as const, take: existing };
+
+        const created = await tx.recordingTake.create({
           data: { sessionId: id, startedAt },
           include: { participantStatuses: true },
         });
-        return NextResponse.json(serializeRecordingState(created, true));
-      } catch (error) {
-        if (isUniqueActiveTakeConflict(error)) {
-          const current = await findActiveTake(id);
-          return NextResponse.json(serializeRecordingState(current, Boolean(current)));
-        }
-        throw error;
+        return { kind: "created" as const, take: created };
+      });
+
+      if (outcome.kind === "not_found") {
+        return NextResponse.json({ error: "Session not found" }, { status: 404 });
       }
+      if (outcome.kind === "finalized") {
+        return NextResponse.json(
+          {
+            error:
+              "This session is finalized and can no longer be recorded into. Start a new session.",
+          },
+          { status: 409 },
+        );
+      }
+      return NextResponse.json(serializeRecordingState(outcome.take, true));
     }
 
     // Stop is idempotent: if there's no recording take (already stopped, or a

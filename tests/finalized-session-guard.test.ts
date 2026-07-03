@@ -5,11 +5,21 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 // an already-ingested session created a fresh take + tracks under the old
 // session id, so the ingest command referenced audio that had already been
 // handed off and could never be ingested.
+//
+// The guard also has to be atomic against a concurrent finalize (the race
+// flagged in review): both the start guards and finalize take a per-session
+// advisory lock via withSessionLock, so a finalize that flips the session to
+// `ready` cannot interleave between a start guard's status read and its
+// track/take creation. These tests drive the real withSessionLock code by
+// mocking db.$transaction to invoke the callback with the same mock client.
 
-type SessionRow = { id: string; status: string };
+type SessionRow = { status: string } | null;
 
 const mocks = vi.hoisted(() => ({
-  sessions: new Map<string, SessionRow>(),
+  // Status returned by session.findUnique. A test may override per-call with
+  // mockResolvedValueOnce to simulate a finalize landing mid-request.
+  sessionStatus: "ready" as string | null,
+  sessionFindUnique: vi.fn(),
   createTake: vi.fn(),
   createTrack: vi.fn(),
   findActiveTake: vi.fn(async () => null),
@@ -18,14 +28,15 @@ const mocks = vi.hoisted(() => ({
   getPresignedPutUrl: vi.fn(async (key: string) => `https://s3.example/${key}`),
 }));
 
-vi.mock("@/lib/db", () => ({
-  db: {
-    session: {
-      findUnique: vi.fn(
-        async ({ where: { id } }: { where: { id: string } }) =>
-          mocks.sessions.get(id) ?? null,
-      ),
-    },
+const SESSION_ID = "finalized-session";
+
+vi.mock("@/lib/db", () => {
+  // The shape shared by both the top-level client and the transaction client
+  // handed to withSessionLock's callback. $transaction just runs the callback
+  // with this same object so tx.* calls hit the same spies.
+  const client = {
+    $executeRaw: vi.fn(async () => 0),
+    session: { findUnique: mocks.sessionFindUnique },
     recordingTake: {
       findFirst: mocks.findActiveTake,
       create: mocks.createTake,
@@ -42,8 +53,15 @@ vi.mock("@/lib/db", () => ({
       create: vi.fn(),
       count: vi.fn(async () => 0),
     },
-  },
-}));
+  };
+  return {
+    db: {
+      ...client,
+      $transaction: async (fn: (tx: typeof client) => Promise<unknown>) =>
+        fn(client),
+    },
+  };
+});
 
 vi.mock("@/lib/s3", async () => {
   const actual = await vi.importActual<typeof import("@/lib/s3")>("@/lib/s3");
@@ -62,8 +80,6 @@ vi.mock("@/lib/auth", async () => {
 import { NextRequest } from "next/server";
 import { POST as setRecordingState } from "@/app/api/sessions/[id]/recording-state/route";
 import { POST as presign } from "@/app/api/upload/presign/route";
-
-const SESSION_ID = "finalized-session";
 
 function recordingStateRequest(body: Record<string, unknown>) {
   return new NextRequest(
@@ -86,8 +102,12 @@ function presignRequest(body: Record<string, unknown>) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.sessions.clear();
-  mocks.sessions.set(SESSION_ID, { id: SESSION_ID, status: "ready" });
+  mocks.sessionStatus = "ready";
+  mocks.sessionFindUnique.mockImplementation(async () =>
+    mocks.sessionStatus === null
+      ? null
+      : ({ id: SESSION_ID, status: mocks.sessionStatus } as SessionRow),
+  );
   mocks.resolvePrincipal.mockResolvedValue({
     kind: "host",
     participantId: "host",
@@ -109,7 +129,6 @@ describe("finalized session recording guard (issue #151)", () => {
     await expect(res.json()).resolves.toMatchObject({
       error: expect.stringContaining("finalized"),
     });
-    // No take may be created on the already-ingested session.
     expect(mocks.createTake).not.toHaveBeenCalled();
   });
 
@@ -127,13 +146,56 @@ describe("finalized session recording guard (issue #151)", () => {
     await expect(res.json()).resolves.toMatchObject({
       error: expect.stringContaining("finalized"),
     });
-    // No track may be materialized, and no writable URL may be issued.
     expect(mocks.createTrack).not.toHaveBeenCalled();
     expect(mocks.getPresignedPutUrl).not.toHaveBeenCalled();
   });
 
+  it("rejects a presign start when finalize lands after the early status read (race)", async () => {
+    // Early existence/status check sees "recording" (finalize hasn't committed
+    // yet), but the re-read inside withSessionLock sees "ready" — the exact
+    // check-then-create window the advisory lock closes. Must still 409 and
+    // must not materialize a track or issue a writable URL.
+    mocks.sessionFindUnique
+      .mockResolvedValueOnce({ id: SESSION_ID, status: "recording" })
+      .mockResolvedValue({ id: SESSION_ID, status: "ready" });
+
+    const res = await presign(
+      presignRequest({
+        sessionId: SESSION_ID,
+        trackId: "new-track",
+        partNumber: 0,
+        participantName: "Marty L",
+      }),
+    );
+
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toMatchObject({
+      error: expect.stringContaining("finalized"),
+    });
+    expect(mocks.createTrack).not.toHaveBeenCalled();
+    expect(mocks.getPresignedPutUrl).not.toHaveBeenCalled();
+  });
+
+  it("rejects a recording-take start when finalize lands after the existence check (race)", async () => {
+    // requireSession sees "recording"; the in-lock re-read sees "ready".
+    mocks.sessionFindUnique
+      .mockResolvedValueOnce({ id: SESSION_ID, status: "recording" })
+      .mockResolvedValue({ id: SESSION_ID, status: "ready" });
+
+    const res = await setRecordingState(
+      recordingStateRequest({
+        active: true,
+        sessionStartedAt: "2026-06-27T12:00:00.000Z",
+      }),
+      { params: Promise.resolve({ id: SESSION_ID }) },
+    );
+
+    expect(res.status).toBe(409);
+    expect(mocks.createTake).not.toHaveBeenCalled();
+  });
+
   it("still allows recording into a session that is still recording", async () => {
-    mocks.sessions.set(SESSION_ID, { id: SESSION_ID, status: "recording" });
+    mocks.sessionStatus = "recording";
     mocks.createTake.mockResolvedValue({
       id: "take-1",
       sessionId: SESSION_ID,

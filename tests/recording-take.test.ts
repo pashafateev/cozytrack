@@ -44,8 +44,11 @@ function activeTakeFor(sessionId: string): RecordingTake | null {
   );
 }
 
-vi.mock("@/lib/db", () => ({
-  db: {
+vi.mock("@/lib/db", () => {
+  const client = {
+    // withSessionLock runs its callback inside db.$transaction and issues a raw
+    // advisory-lock query; the mock just needs these to exist and pass through.
+    $executeRaw: async () => 0,
     session: {
       findUnique: vi.fn(async ({ where: { id } }: { where: { id: string } }) =>
         mocks.sessions.has(id) ? { id } : null,
@@ -132,8 +135,14 @@ vi.mock("@/lib/db", () => ({
         },
       ),
     },
-  },
-}));
+  };
+  return {
+    db: {
+      ...client,
+      $transaction: async (fn: (tx: typeof client) => unknown) => fn(client),
+    },
+  };
+});
 
 vi.mock("@/lib/auth", async () => {
   const actual = await vi.importActual<typeof import("@/lib/auth")>(

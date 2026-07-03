@@ -21,8 +21,11 @@ vi.mock("@/lib/recovery", () => ({
   recoverTrack: vi.fn(async (trackId: string) => ({ trackId })),
 }));
 
-vi.mock("@/lib/db", () => ({
-  db: {
+vi.mock("@/lib/db", () => {
+  const client = {
+    // withSessionLock runs its callback inside db.$transaction and issues a raw
+    // advisory-lock query; the mock just needs these to exist and pass through.
+    $executeRaw: async () => 0,
     session: {
       findUnique: vi.fn(async ({ where: { id } }: { where: { id: string } }) => {
         const s = sessionStore.get(id);
@@ -66,9 +69,14 @@ vi.mock("@/lib/db", () => ({
         async ({
           where,
         }: {
-          where: { id: { in: string[] } };
+          where: { sessionId?: string; id?: { in: string[] } };
         }) => {
-          const ids = new Set(where.id.in);
+          // finalize now re-reads all tracks for a session under the advisory
+          // lock; still support the legacy id-in shape for safety.
+          if (where.sessionId !== undefined) {
+            return tracksFor(where.sessionId).map((t) => structuredClone(t));
+          }
+          const ids = new Set(where.id?.in ?? []);
           const all: Track[] = [];
           for (const s of sessionStore.values()) {
             for (const t of s.tracks) {
@@ -79,8 +87,14 @@ vi.mock("@/lib/db", () => ({
         },
       ),
     },
-  },
-}));
+  };
+  return {
+    db: {
+      ...client,
+      $transaction: async (fn: (tx: typeof client) => unknown) => fn(client),
+    },
+  };
+});
 
 import { POST } from "@/app/api/sessions/[id]/finalize/route";
 import { NextRequest } from "next/server";
