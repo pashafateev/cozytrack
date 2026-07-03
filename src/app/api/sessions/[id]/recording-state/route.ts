@@ -75,7 +75,7 @@ async function requirePrincipal(req: NextRequest, sessionId: string) {
 async function requireSession(sessionId: string) {
   return await db.session.findUnique({
     where: { id: sessionId },
-    select: { id: true },
+    select: { id: true, status: true },
   });
 }
 
@@ -202,6 +202,20 @@ export async function POST(
     const active = body?.active === true;
 
     if (active) {
+      // A finalized/ready session has already been handed off for ingest.
+      // Starting a new take here would attach fresh audio to an old session
+      // id (issue #151), so the recording never ingests. Reject the start;
+      // the operator must create a new session instead.
+      if (session.status === "ready") {
+        return NextResponse.json(
+          {
+            error:
+              "This session is finalized and can no longer be recorded into. Start a new session.",
+          },
+          { status: 409 },
+        );
+      }
+
       const startedAt = parseStartedAt(body?.sessionStartedAt);
       if (!startedAt) {
         return NextResponse.json(

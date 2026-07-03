@@ -299,13 +299,29 @@ export async function POST(req: NextRequest) {
 
       const existingSession = await db.session.findUnique({
         where: { id: sessionId },
-        select: { id: true },
+        select: { id: true, status: true },
       });
 
       if (!existingSession) {
         return NextResponse.json(
           { error: `Session ${sessionId} was not found` },
           { status: 404 }
+        );
+      }
+
+      // Refuse to start a brand-new recording (new track/segment) on a
+      // finalized session. Its id has already been handed to ingest, so
+      // any audio recorded here would attach to an old, already-ingested
+      // session and never make it downstream (issue #151). Late chunk/final
+      // uploads for tracks that started before finalize take the non-start
+      // path below and are unaffected.
+      if (existingSession.status === "ready") {
+        return NextResponse.json(
+          {
+            error:
+              "This session is finalized and can no longer be recorded into. Start a new session.",
+          },
+          { status: 409 }
         );
       }
 

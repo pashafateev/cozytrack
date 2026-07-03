@@ -36,6 +36,7 @@ import {
   completeUpload,
 } from "@/lib/upload";
 import {
+  RecordingStateError,
   reportRecordingTakeParticipantStatus,
   startRecordingTake,
   stopRecordingTake,
@@ -2396,7 +2397,16 @@ function RoomContent({
         recordingTakeIdRef.current = takeId;
       } catch (err) {
         console.error("Failed to activate recording take:", err);
-        showNotification("Couldn't update recording state");
+        // A finalized session rejects new takes (issue #151). Surface the
+        // server's explanation so the host knows to start a fresh session
+        // rather than seeing a generic failure.
+        const finalized =
+          err instanceof RecordingStateError && err.status === 409;
+        showNotification(
+          finalized && err.message
+            ? err.message
+            : "Couldn't update recording state",
+        );
         return;
       }
 
