@@ -9,6 +9,7 @@ type RecordingTake = {
   sessionId: string;
   startedAt: Date;
   stoppedAt: Date | null;
+  status: string;
 };
 
 type Track = {
@@ -61,14 +62,15 @@ vi.mock("@/lib/db", () => ({
       ),
       findFirst: vi.fn(
         async ({
-          where: { sessionId, stoppedAt },
+          where: { sessionId, status },
         }: {
-          where: { sessionId: string; stoppedAt: null };
+          where: { sessionId: string; status?: string };
         }) => {
           return (
             Array.from(mocks.recordingTakes.values()).find(
               (take) =>
-                take.sessionId === sessionId && take.stoppedAt === stoppedAt,
+                take.sessionId === sessionId &&
+                (status === undefined || take.status === status),
             ) ?? null
           );
         },
@@ -339,6 +341,7 @@ describe("logical track segments", () => {
       sessionId: "s1",
       startedAt: new Date("2026-06-11T00:00:00.000Z"),
       stoppedAt: null,
+      status: "recording",
     });
     mocks.resolvePrincipal.mockResolvedValue({
       kind: "guest",
@@ -383,6 +386,7 @@ describe("logical track segments", () => {
       sessionId: "s1",
       startedAt: new Date("2026-06-11T00:00:00.000Z"),
       stoppedAt: null,
+      status: "recording",
     });
     mocks.tracks.set("logical-track", {
       id: "logical-track",
@@ -445,6 +449,7 @@ describe("logical track segments", () => {
       sessionId: "s1",
       startedAt: new Date("2026-06-11T00:00:00.000Z"),
       stoppedAt: null,
+      status: "recording",
     });
     mocks.tracks.set("logical-track", {
       id: "logical-track",
@@ -830,12 +835,14 @@ describe("logical track segments", () => {
       sessionId: "s1",
       startedAt: new Date("2026-06-11T00:00:00.000Z"),
       stoppedAt: new Date("2026-06-11T00:05:00.000Z"),
+      status: "stopped",
     });
     mocks.recordingTakes.set("take-b", {
       id: "take-b",
       sessionId: "s1",
       startedAt: new Date("2026-06-11T00:06:00.000Z"),
       stoppedAt: null,
+      status: "recording",
     });
     mocks.resolvePrincipal.mockResolvedValue({
       kind: "guest",
@@ -866,6 +873,7 @@ describe("logical track segments", () => {
       sessionId: "s2",
       startedAt: new Date("2026-06-11T00:00:00.000Z"),
       stoppedAt: null,
+      status: "recording",
     });
     mocks.resolvePrincipal.mockResolvedValue({
       kind: "guest",
@@ -975,6 +983,7 @@ describe("logical track segments", () => {
       sessionId: "s1",
       startedAt: new Date("2026-06-11T00:00:00.000Z"),
       stoppedAt: null,
+      status: "recording",
     });
     mocks.tracks.set("logical-track", {
       id: "logical-track",
