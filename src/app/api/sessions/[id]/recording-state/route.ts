@@ -15,6 +15,7 @@ type RecordingTakeWithStatuses = {
   sessionId: string;
   startedAt: Date;
   stoppedAt: Date | null;
+  status: string;
   participantStatuses?: Array<{
     participantId: string;
     participantName: string | null;
@@ -82,11 +83,13 @@ async function requireSession(sessionId: string) {
   });
 }
 
+// "Active" is now authoritative on status, not on stoppedAt IS NULL. A take is
+// resumable/active only while its status is "recording".
 async function findActiveTake(
   sessionId: string,
 ): Promise<RecordingTakeWithStatuses | null> {
   return await db.recordingTake.findFirst({
-    where: { sessionId, stoppedAt: null },
+    where: { sessionId, status: "recording" },
     orderBy: { startedAt: "desc" },
     include: {
       participantStatuses: { orderBy: { participantName: "asc" } },
@@ -101,6 +104,7 @@ function serializeTake(take: RecordingTakeWithStatuses | null) {
     sessionId: take.sessionId,
     startedAt: take.startedAt.toISOString(),
     stoppedAt: take.stoppedAt?.toISOString() ?? null,
+    status: take.status,
     participantStatuses: (take.participantStatuses ?? []).map((status) => ({
       participantId: status.participantId,
       participantName: status.participantName,
@@ -237,6 +241,9 @@ export async function POST(
       }
     }
 
+    // Stop is idempotent: if there's no recording take (already stopped, or a
+    // retry after the first stop landed), report inactive instead of erroring,
+    // so a retrying client converges.
     const current = await findActiveTake(id);
     if (!current) {
       return NextResponse.json(serializeRecordingState(null, false));
@@ -244,7 +251,7 @@ export async function POST(
 
     const stopped = await db.recordingTake.update({
       where: { id: current.id },
-      data: { stoppedAt: new Date() },
+      data: { stoppedAt: new Date(), status: "stopped" },
       include: {
         participantStatuses: { orderBy: { participantName: "asc" } },
       },

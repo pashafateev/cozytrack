@@ -262,29 +262,6 @@ export async function getObjectBytes(key: string): Promise<Uint8Array> {
   return await body.transformToByteArray();
 }
 
-/**
- * Reads at most the first `maxBytes` of an object via an HTTP Range request.
- * Used to inspect the start of an upload (e.g. sync-marker detection) without
- * downloading or buffering an arbitrarily large object.
- */
-export async function getObjectBytesRange(
-  key: string,
-  maxBytes: number
-): Promise<Uint8Array> {
-  const response = await s3.send(
-    new GetObjectCommand({
-      Bucket: bucket,
-      Key: key,
-      Range: `bytes=0-${Math.max(0, maxBytes - 1)}`,
-    })
-  );
-  const body = response.Body;
-  if (!body) {
-    throw new Error(`S3 object ${key} returned empty body`);
-  }
-  return await body.transformToByteArray();
-}
-
 export async function putObjectBytes(
   key: string,
   bytes: Uint8Array
