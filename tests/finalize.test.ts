@@ -21,8 +21,11 @@ vi.mock("@/lib/recovery", () => ({
   recoverTrack: vi.fn(async (trackId: string) => ({ trackId })),
 }));
 
-vi.mock("@/lib/db", () => ({
-  db: {
+vi.mock("@/lib/db", () => {
+  const db = {
+    $transaction: vi.fn(async <T>(callback: (tx: typeof db) => Promise<T>) =>
+      callback(db),
+    ),
     session: {
       findUnique: vi.fn(async ({ where: { id } }: { where: { id: string } }) => {
         const s = sessionStore.get(id);
@@ -79,8 +82,9 @@ vi.mock("@/lib/db", () => ({
         },
       ),
     },
-  },
-}));
+  };
+  return { db };
+});
 
 import { POST } from "@/app/api/sessions/[id]/finalize/route";
 import { NextRequest } from "next/server";
@@ -240,7 +244,12 @@ describe("POST /api/sessions/[id]/finalize", () => {
       };
     };
     expect(db.session.update).not.toHaveBeenCalled();
-    expect(db.session.updateMany).not.toHaveBeenCalled();
+    const counts = await Promise.all(
+      db.session.updateMany.mock.results.map(
+        (r) => r.value as Promise<{ count: number }>,
+      ),
+    );
+    expect(counts.every((c) => c.count === 0)).toBe(true);
   });
 
   it("two concurrent finalize calls return the same finalizedAt (only the first stamps)", async () => {
@@ -280,7 +289,7 @@ describe("POST /api/sessions/[id]/finalize", () => {
         new Date(bodyB.finalizedAt!).toISOString(),
       );
 
-      // Exactly one updateMany should have actually flipped the row.
+      // Exactly one updateMany should have actually flipped the row to ready.
       const { db } = (await import("@/lib/db")) as unknown as {
         db: {
           session: {
@@ -288,13 +297,29 @@ describe("POST /api/sessions/[id]/finalize", () => {
           };
         };
       };
+      const readyFlipResultIndexes = db.session.updateMany.mock.calls
+        .map((call, index: number) => {
+          const [{ where, data }] = call as [
+            {
+              where: { id: string; status?: string };
+              data: { status?: string };
+            },
+          ];
+          return where.id === "s4" &&
+            where.status === "recording" &&
+            data.status === "ready"
+            ? index
+            : -1;
+        })
+        .filter((index) => index !== -1);
       const counts = await Promise.all(
-        db.session.updateMany.mock.results.map(
-          (r) => r.value as Promise<{ count: number }>,
+        readyFlipResultIndexes.map(
+          (index) =>
+            db.session.updateMany.mock.results[index]
+              .value as Promise<{ count: number }>,
         ),
       );
-      const flips = counts.filter((c) => c.count === 1).length;
-      expect(flips).toBe(1);
+      expect(counts.filter((c) => c.count === 1)).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }

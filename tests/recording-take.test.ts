@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   participantStatuses: new Map<string, RecordingTakeParticipantStatus>(),
   resolvePrincipal: vi.fn(),
   nextTakeId: 1,
+  finalizeAfterNextSessionRead: false,
 }));
 
 function cloneTake(take: RecordingTake): RecordingTake {
@@ -45,13 +46,47 @@ function activeTakeFor(sessionId: string): RecordingTake | null {
   );
 }
 
-vi.mock("@/lib/db", () => ({
-  db: {
+vi.mock("@/lib/db", () => {
+  const db = {
+    $transaction: vi.fn(async <T>(callback: (tx: typeof db) => Promise<T>) =>
+      callback(db),
+    ),
     session: {
-      findUnique: vi.fn(async ({ where: { id } }: { where: { id: string } }) =>
-        mocks.sessions.has(id)
+      findUnique: vi.fn(async ({ where: { id } }: { where: { id: string } }) => {
+        const session = mocks.sessions.has(id)
           ? { id, status: mocks.readySessions.has(id) ? "ready" : "recording" }
-          : null,
+          : null;
+        if (session && mocks.finalizeAfterNextSessionRead) {
+          mocks.readySessions.add(id);
+          mocks.finalizeAfterNextSessionRead = false;
+        }
+        return session;
+      }),
+      updateMany: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: { id: string; status?: string };
+          data: { status?: string };
+        }) => {
+          if (!mocks.sessions.has(where.id)) return { count: 0 };
+          if (
+            mocks.finalizeAfterNextSessionRead &&
+            where.status === "recording" &&
+            data.status === "recording"
+          ) {
+            mocks.readySessions.add(where.id);
+            mocks.finalizeAfterNextSessionRead = false;
+          }
+          const status = mocks.readySessions.has(where.id)
+            ? "ready"
+            : "recording";
+          if (where.status !== undefined && status !== where.status) {
+            return { count: 0 };
+          }
+          return { count: 1 };
+        },
       ),
     },
     recordingTake: {
@@ -135,8 +170,9 @@ vi.mock("@/lib/db", () => ({
         },
       ),
     },
-  },
-}));
+  };
+  return { db };
+});
 
 vi.mock("@/lib/auth", async () => {
   const actual = await vi.importActual<typeof import("@/lib/auth")>(
@@ -174,6 +210,7 @@ beforeEach(() => {
   mocks.participantStatuses.clear();
   mocks.sessions.add("s1");
   mocks.nextTakeId = 1;
+  mocks.finalizeAfterNextSessionRead = false;
   vi.clearAllMocks();
   mocks.resolvePrincipal.mockResolvedValue({
     kind: "host",
@@ -231,6 +268,24 @@ describe("/api/sessions/[id]/recording-state", () => {
 
   it("rejects activating a recording take for an already-ready session", async () => {
     mocks.readySessions.add("s1");
+
+    const res = await setRecordingState(
+      request("POST", {
+        active: true,
+        sessionStartedAt: "2026-06-27T12:00:00.000Z",
+      }),
+      params(),
+    );
+
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toEqual({
+      error: "Session is already finalized",
+    });
+    expect(mocks.takes).toHaveLength(0);
+  });
+
+  it("rejects activation if the session finalizes before creating the take", async () => {
+    mocks.finalizeAfterNextSessionRead = true;
 
     const res = await setRecordingState(
       request("POST", {
@@ -338,6 +393,56 @@ describe("/api/sessions/[id]/recording-state", () => {
       participantName: "Alice",
     });
     expect(mocks.participantStatuses.has("take-1:host")).toBe(false);
+  });
+
+  it("rejects participant status writes for an already-ready session", async () => {
+    mocks.readySessions.add("s1");
+    mocks.takes.set("take-1", {
+      id: "take-1",
+      sessionId: "s1",
+      startedAt: new Date("2026-06-01T12:00:00.000Z"),
+      stoppedAt: null,
+      status: "recording",
+    });
+
+    const res = await reportRecordingState(
+      request("PATCH", {
+        takeId: "take-1",
+        readinessStatus: "ready",
+      }),
+      params(),
+    );
+
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toEqual({
+      error: "Session is already finalized",
+    });
+    expect(mocks.participantStatuses).toHaveLength(0);
+  });
+
+  it("rejects participant status writes if the session finalizes before upsert", async () => {
+    mocks.finalizeAfterNextSessionRead = true;
+    mocks.takes.set("take-1", {
+      id: "take-1",
+      sessionId: "s1",
+      startedAt: new Date("2026-06-01T12:00:00.000Z"),
+      stoppedAt: null,
+      status: "recording",
+    });
+
+    const res = await reportRecordingState(
+      request("PATCH", {
+        takeId: "take-1",
+        readinessStatus: "ready",
+      }),
+      params(),
+    );
+
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toEqual({
+      error: "Session is already finalized",
+    });
+    expect(mocks.participantStatuses).toHaveLength(0);
   });
 
   it("rejects invalid participant readiness and recording statuses", async () => {

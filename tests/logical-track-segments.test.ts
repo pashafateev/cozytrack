@@ -46,11 +46,28 @@ const mocks = vi.hoisted(() => ({
   resolvePrincipal: vi.fn<() => Promise<Principal | null>>(),
 }));
 
-vi.mock("@/lib/db", () => ({
-  db: {
+vi.mock("@/lib/db", () => {
+  const db = {
+    $transaction: vi.fn(async <T>(callback: (tx: typeof db) => Promise<T>) =>
+      callback(db),
+    ),
     session: {
       findUnique: vi.fn(async ({ where: { id } }: { where: { id: string } }) =>
         mocks.sessions.has(id) ? { id, status: "recording" } : null,
+      ),
+      updateMany: vi.fn(
+        async ({
+          where,
+        }: {
+          where: { id: string; status?: string };
+          data: { status?: string };
+        }) => {
+          if (!mocks.sessions.has(where.id)) return { count: 0 };
+          if (where.status !== undefined && where.status !== "recording") {
+            return { count: 0 };
+          }
+          return { count: 1 };
+        },
       ),
     },
     recordingTake: {
@@ -212,8 +229,9 @@ vi.mock("@/lib/db", () => ({
         },
       ),
     },
-  },
-}));
+  };
+  return { db };
+});
 
 vi.mock("@/lib/s3", () => ({
   getPresignedPutUrl: mocks.getPresignedPutUrl,
@@ -528,7 +546,10 @@ describe("logical track segments", () => {
       status: "complete",
       durationMs: 12345,
     });
-    expect(mocks.materializeTrack).toHaveBeenCalledWith("track-1");
+    expect(mocks.materializeTrack).toHaveBeenCalledWith(
+      "track-1",
+      expect.objectContaining({ dbClient: expect.any(Object) }),
+    );
     expect(mocks.deleteTrackSegmentChunks).toHaveBeenCalledWith(
       "s1",
       "track-1",
@@ -589,7 +610,10 @@ describe("logical track segments", () => {
       s3Key: "sessions/s1/tracks/logical-track/recording.webm",
       durationMs: 6000,
     });
-    expect(mocks.materializeTrack).toHaveBeenCalledWith("logical-track");
+    expect(mocks.materializeTrack).toHaveBeenCalledWith(
+      "logical-track",
+      expect.objectContaining({ dbClient: expect.any(Object) }),
+    );
     expect(mocks.deleteTrackSegmentChunks).toHaveBeenCalledWith(
       "s1",
       "logical-track",
@@ -663,7 +687,10 @@ describe("logical track segments", () => {
       s3Key: "sessions/s1/tracks/logical-track/recording.webm",
       durationMs: 6000,
     });
-    expect(mocks.materializeTrack).toHaveBeenCalledWith("logical-track");
+    expect(mocks.materializeTrack).toHaveBeenCalledWith(
+      "logical-track",
+      expect.objectContaining({ dbClient: expect.any(Object) }),
+    );
   });
 
   it("rejects a segment-scoped token presigning a different segment of the track", async () => {

@@ -4,9 +4,27 @@ import { deleteTrackSegmentChunks } from "@/lib/s3";
 import { resolvePrincipal, verifyRecordingUploadToken } from "@/lib/auth";
 import { materializeTrack } from "@/lib/track-materialization";
 import {
+  claimRecordingSessionForWrite,
   FINALIZED_SESSION_ERROR,
-  isRecordingSession,
+  type RecordingSessionWriteClaim,
 } from "@/lib/session-status";
+
+function recordingSessionWriteErrorResponse(
+  claim: RecordingSessionWriteClaim,
+  sessionId: string,
+) {
+  if (claim.ok) return null;
+  if (claim.reason === "missing") {
+    return NextResponse.json(
+      { error: `Session ${sessionId} was not found` },
+      { status: 404 },
+    );
+  }
+  return NextResponse.json(
+    { error: FINALIZED_SESSION_ERROR },
+    { status: 409 },
+  );
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -41,88 +59,85 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const existingSession = await db.session.findUnique({
-      where: { id: sessionId },
-      select: { id: true, status: true },
-    });
-    if (!existingSession) {
-      return NextResponse.json(
-        { error: `Session ${sessionId} was not found` },
-        { status: 404 },
-      );
-    }
-    if (!isRecordingSession(existingSession)) {
-      return NextResponse.json(
-        { error: FINALIZED_SESSION_ERROR },
-        { status: 409 },
-      );
-    }
+    return await db.$transaction(async (tx) => {
+      const claim = await claimRecordingSessionForWrite(tx, sessionId);
+      const claimError = recordingSessionWriteErrorResponse(claim, sessionId);
+      if (claimError) return claimError;
 
-    const existingTrack = await db.track.findUnique({
-      where: { id: trackId },
-      select: { sessionId: true },
-    });
-    if (!existingTrack) {
-      return NextResponse.json({ error: "Track not found" }, { status: 404 });
-    }
-    if (existingTrack.sessionId !== sessionId) {
-      return NextResponse.json({ error: "forbidden" }, { status: 403 });
-    }
-
-    const existingSegment = await db.trackSegment.findUnique({
-      where: { id: segmentId },
-      select: { trackId: true },
-    });
-    if (!existingSegment) {
-      return NextResponse.json({ error: "Track segment not found" }, { status: 404 });
-    }
-    if (existingSegment.trackId !== trackId) {
-      return NextResponse.json({ error: "forbidden" }, { status: 403 });
-    }
-
-    await db.trackSegment.update({
-      where: { id: segmentId },
-      data: {
-        status: "complete",
-        durationMs: durationMs ?? null,
-        completedAt: new Date(),
-      },
-    });
-
-    const segments = await db.trackSegment.findMany({
-      where: { trackId },
-      orderBy: { segmentIndex: "asc" },
-      select: { id: true, status: true, durationMs: true, segmentIndex: true },
-    });
-    // The logical track is complete only after materialization creates the
-    // downstream-facing artifact at the logical track key. Older incomplete
-    // segments are superseded attempts and do not block a newer complete
-    // segment, but a newer in-flight segment keeps the logical track pending.
-    const latestSegment = segments[segments.length - 1];
-    const latestSegmentComplete = latestSegment.status === "complete";
-
-    let track;
-    if (latestSegmentComplete) {
-      await materializeTrack(trackId);
-      track = await db.track.findUnique({ where: { id: trackId } });
-    } else {
-      // Conditional write: an older segment's completion can read the
-      // segment list before a concurrent newest-segment completion commits.
-      // It must not demote the track that completion already promoted —
-      // that would strand a fully-complete track in uploading.
-      await db.track.updateMany({
-        where: { id: trackId, status: { not: "complete" } },
-        data: { status: "uploading" },
+      const existingTrack = await tx.track.findUnique({
+        where: { id: trackId },
+        select: { sessionId: true },
       });
-      track = await db.track.findUnique({ where: { id: trackId } });
-    }
+      if (!existingTrack) {
+        return NextResponse.json({ error: "Track not found" }, { status: 404 });
+      }
+      if (existingTrack.sessionId !== sessionId) {
+        return NextResponse.json({ error: "forbidden" }, { status: 403 });
+      }
 
-    // After segment completion, recording.webm is the authoritative artifact
-    // for that segment. Chunk files are temporary crash-safety uploads and can
-    // be discarded.
-    await deleteTrackSegmentChunks(sessionId, trackId, segmentId);
+      const existingSegment = await tx.trackSegment.findUnique({
+        where: { id: segmentId },
+        select: { trackId: true },
+      });
+      if (!existingSegment) {
+        return NextResponse.json(
+          { error: "Track segment not found" },
+          { status: 404 },
+        );
+      }
+      if (existingSegment.trackId !== trackId) {
+        return NextResponse.json({ error: "forbidden" }, { status: 403 });
+      }
 
-    return NextResponse.json(track);
+      await tx.trackSegment.update({
+        where: { id: segmentId },
+        data: {
+          status: "complete",
+          durationMs: durationMs ?? null,
+          completedAt: new Date(),
+        },
+      });
+
+      const segments = await tx.trackSegment.findMany({
+        where: { trackId },
+        orderBy: { segmentIndex: "asc" },
+        select: {
+          id: true,
+          status: true,
+          durationMs: true,
+          segmentIndex: true,
+        },
+      });
+      // The logical track is complete only after materialization creates the
+      // downstream-facing artifact at the logical track key. Older incomplete
+      // segments are superseded attempts and do not block a newer complete
+      // segment, but a newer in-flight segment keeps the logical track pending.
+      const latestSegment = segments[segments.length - 1];
+      const latestSegmentComplete = latestSegment.status === "complete";
+
+      let track;
+      if (latestSegmentComplete) {
+        await materializeTrack(trackId, { dbClient: tx });
+        track = await tx.track.findUnique({ where: { id: trackId } });
+      } else {
+        // Conditional write: an older segment's completion can read the
+        // segment list before a concurrent newest-segment completion commits.
+        // It must not demote the track that completion already promoted —
+        // that would strand a fully-complete track in uploading.
+        await tx.track.updateMany({
+          where: { id: trackId, status: { not: "complete" } },
+          data: { status: "uploading" },
+        });
+        track = await tx.track.findUnique({ where: { id: trackId } });
+      }
+
+      // After segment completion, recording.webm is the authoritative artifact
+      // for that segment. Chunk files are temporary crash-safety uploads and can
+      // be discarded.
+      await deleteTrackSegmentChunks(sessionId, trackId, segmentId);
+
+      return NextResponse.json(track);
+    });
   } catch (error) {
     console.error("Failed to complete upload:", error);
     return NextResponse.json(

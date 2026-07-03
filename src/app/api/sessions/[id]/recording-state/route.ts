@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import {
   principalParticipantId,
@@ -6,8 +7,9 @@ import {
   type Principal,
 } from "@/lib/auth";
 import {
+  claimRecordingSessionForWrite,
   FINALIZED_SESSION_ERROR,
-  isRecordingSession,
+  type RecordingSessionWriteClaim,
 } from "@/lib/session-status";
 
 type RecordingTakeWithStatuses = {
@@ -87,8 +89,9 @@ async function requireSession(sessionId: string) {
 // resumable/active only while its status is "recording".
 async function findActiveTake(
   sessionId: string,
+  client: Pick<Prisma.TransactionClient, "recordingTake"> = db,
 ): Promise<RecordingTakeWithStatuses | null> {
-  return await db.recordingTake.findFirst({
+  return await client.recordingTake.findFirst({
     where: { sessionId, status: "recording" },
     orderBy: { startedAt: "desc" },
     include: {
@@ -156,6 +159,19 @@ function isUniqueActiveTakeConflict(error: unknown): boolean {
   );
 }
 
+function recordingSessionWriteErrorResponse(
+  claim: RecordingSessionWriteClaim,
+) {
+  if (claim.ok) return null;
+  if (claim.reason === "missing") {
+    return NextResponse.json({ error: "Session not found" }, { status: 404 });
+  }
+  return NextResponse.json(
+    { error: FINALIZED_SESSION_ERROR },
+    { status: 409 },
+  );
+}
+
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -197,20 +213,8 @@ export async function POST(
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
 
-    const session = await requireSession(id);
-    if (!session) {
-      return NextResponse.json({ error: "Session not found" }, { status: 404 });
-    }
-
     const body = await req.json().catch(() => ({}));
     const active = body?.active === true;
-
-    if (active && !isRecordingSession(session)) {
-      return NextResponse.json(
-        { error: FINALIZED_SESSION_ERROR },
-        { status: 409 },
-      );
-    }
 
     if (active) {
       const startedAt = parseStartedAt(body?.sessionStartedAt);
@@ -221,24 +225,37 @@ export async function POST(
         );
       }
 
-      const existing = await findActiveTake(id);
-      if (existing) {
-        return NextResponse.json(serializeRecordingState(existing, true));
-      }
+      return await db.$transaction(async (tx) => {
+        const claim = await claimRecordingSessionForWrite(tx, id);
+        const claimError = recordingSessionWriteErrorResponse(claim);
+        if (claimError) return claimError;
 
-      try {
-        const created = await db.recordingTake.create({
-          data: { sessionId: id, startedAt },
-          include: { participantStatuses: true },
-        });
-        return NextResponse.json(serializeRecordingState(created, true));
-      } catch (error) {
-        if (isUniqueActiveTakeConflict(error)) {
-          const current = await findActiveTake(id);
-          return NextResponse.json(serializeRecordingState(current, Boolean(current)));
+        const existing = await findActiveTake(id, tx);
+        if (existing) {
+          return NextResponse.json(serializeRecordingState(existing, true));
         }
-        throw error;
-      }
+
+        try {
+          const created = await tx.recordingTake.create({
+            data: { sessionId: id, startedAt },
+            include: { participantStatuses: true },
+          });
+          return NextResponse.json(serializeRecordingState(created, true));
+        } catch (error) {
+          if (isUniqueActiveTakeConflict(error)) {
+            const current = await findActiveTake(id, tx);
+            return NextResponse.json(
+              serializeRecordingState(current, Boolean(current)),
+            );
+          }
+          throw error;
+        }
+      });
+    }
+
+    const session = await requireSession(id);
+    if (!session) {
+      return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
     // Stop is idempotent: if there's no recording take (already stopped, or a
@@ -315,67 +332,63 @@ export async function PATCH(
       );
     }
 
-    const session = await requireSession(id);
-    if (!session) {
-      return NextResponse.json({ error: "Session not found" }, { status: 404 });
-    }
-    if (!isRecordingSession(session)) {
-      return NextResponse.json(
-        { error: FINALIZED_SESSION_ERROR },
-        { status: 409 },
+    return await db.$transaction(async (tx) => {
+      const claim = await claimRecordingSessionForWrite(tx, id);
+      const claimError = recordingSessionWriteErrorResponse(claim);
+      if (claimError) return claimError;
+
+      const requestedTakeId =
+        typeof body?.takeId === "string" ? body.takeId : null;
+      const take = requestedTakeId
+        ? await tx.recordingTake.findUnique({
+            where: { id: requestedTakeId },
+            include: { participantStatuses: true },
+          })
+        : await findActiveTake(id, tx);
+
+      if (!take) {
+        return NextResponse.json(
+          { error: "Recording take not found" },
+          { status: 404 },
+        );
+      }
+      if (take.sessionId !== id) {
+        return NextResponse.json({ error: "forbidden" }, { status: 403 });
+      }
+
+      const participantId = principalParticipantId(auth.principal);
+      const participantName = participantNameFor(
+        auth.principal,
+        body?.participantName,
       );
-    }
+      const update = {
+        participantName,
+        ...(readinessStatus !== undefined ? { readinessStatus } : {}),
+        ...(recordingStatus !== undefined ? { recordingStatus } : {}),
+        ...(statusReason !== undefined ? { statusReason } : {}),
+      };
 
-    const requestedTakeId = typeof body?.takeId === "string" ? body.takeId : null;
-    const take = requestedTakeId
-      ? await db.recordingTake.findUnique({
-          where: { id: requestedTakeId },
-          include: { participantStatuses: true },
-        })
-      : await findActiveTake(id);
-
-    if (!take) {
-      return NextResponse.json(
-        { error: "Recording take not found" },
-        { status: 404 },
-      );
-    }
-    if (take.sessionId !== id) {
-      return NextResponse.json({ error: "forbidden" }, { status: 403 });
-    }
-
-    const participantId = principalParticipantId(auth.principal);
-    const participantName = participantNameFor(
-      auth.principal,
-      body?.participantName,
-    );
-    const update = {
-      participantName,
-      ...(readinessStatus !== undefined ? { readinessStatus } : {}),
-      ...(recordingStatus !== undefined ? { recordingStatus } : {}),
-      ...(statusReason !== undefined ? { statusReason } : {}),
-    };
-
-    const status = await db.recordingTakeParticipantStatus.upsert({
-      where: {
-        takeId_participantId: {
+      const status = await tx.recordingTakeParticipantStatus.upsert({
+        where: {
+          takeId_participantId: {
+            takeId: take.id,
+            participantId,
+          },
+        },
+        create: {
           takeId: take.id,
           participantId,
+          participantName,
+          readinessStatus: readinessStatus ?? null,
+          recordingStatus: recordingStatus ?? null,
+          statusReason: statusReason ?? null,
         },
-      },
-      create: {
-        takeId: take.id,
-        participantId,
-        participantName,
-        readinessStatus: readinessStatus ?? null,
-        recordingStatus: recordingStatus ?? null,
-        statusReason: statusReason ?? null,
-      },
-      update,
-    });
+        update,
+      });
 
-    return NextResponse.json({
-      participantStatus: serializeParticipantStatus(status),
+      return NextResponse.json({
+        participantStatus: serializeParticipantStatus(status),
+      });
     });
   } catch (error) {
     console.error("Failed to report recording participant status:", error);

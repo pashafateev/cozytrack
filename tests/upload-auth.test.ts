@@ -29,15 +29,50 @@ const mocks = vi.hoisted(() => ({
   getPresignedPutUrl: vi.fn(async (key: string) => `https://s3.example/${key}`),
   deleteTrackSegmentChunks: vi.fn(async () => undefined),
   resolvePrincipal: vi.fn(),
+  finalizeAfterNextSessionRead: false,
 }));
 
-vi.mock("@/lib/db", () => ({
-  db: {
+vi.mock("@/lib/db", () => {
+  const db = {
+    $transaction: vi.fn(async <T>(callback: (tx: typeof db) => Promise<T>) =>
+      callback(db),
+    ),
     session: {
-      findUnique: vi.fn(async ({ where: { id } }: { where: { id: string } }) =>
-        mocks.sessions.has(id)
+      findUnique: vi.fn(async ({ where: { id } }: { where: { id: string } }) => {
+        const session = mocks.sessions.has(id)
           ? { id, status: mocks.readySessions.has(id) ? "ready" : "recording" }
-          : null,
+          : null;
+        if (session && mocks.finalizeAfterNextSessionRead) {
+          mocks.readySessions.add(id);
+          mocks.finalizeAfterNextSessionRead = false;
+        }
+        return session;
+      }),
+      updateMany: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: { id: string; status?: string };
+          data: { status?: string };
+        }) => {
+          if (!mocks.sessions.has(where.id)) return { count: 0 };
+          if (
+            mocks.finalizeAfterNextSessionRead &&
+            where.status === "recording" &&
+            data.status === "recording"
+          ) {
+            mocks.readySessions.add(where.id);
+            mocks.finalizeAfterNextSessionRead = false;
+          }
+          const status = mocks.readySessions.has(where.id)
+            ? "ready"
+            : "recording";
+          if (where.status !== undefined && status !== where.status) {
+            return { count: 0 };
+          }
+          return { count: 1 };
+        },
       ),
     },
     recordingTake: {
@@ -179,8 +214,9 @@ vi.mock("@/lib/db", () => ({
         },
       ),
     },
-  },
-}));
+  };
+  return { db };
+});
 
 vi.mock("@/lib/s3", () => ({
   getPresignedPutUrl: mocks.getPresignedPutUrl,
@@ -247,6 +283,7 @@ beforeEach(() => {
   mocks.tracks.clear();
   mocks.segments.clear();
   mocks.sessions.add("s1");
+  mocks.finalizeAfterNextSessionRead = false;
   vi.clearAllMocks();
   mocks.resolvePrincipal.mockResolvedValue(null);
 });
@@ -285,6 +322,31 @@ describe("recording upload auth", () => {
 
   it("rejects starting an upload for an already-ready session", async () => {
     mocks.readySessions.add("s1");
+    mocks.resolvePrincipal.mockResolvedValue({ kind: "host" });
+
+    const res = await presignUpload(
+      postJson(
+        "/api/upload/presign",
+        {
+          sessionId: "s1",
+          trackId: "t1",
+          partNumber: 0,
+          participantName: "Alice",
+        },
+      ),
+    );
+
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toEqual({
+      error: "Session is already finalized",
+    });
+    expect(mocks.tracks.has("t1")).toBe(false);
+    expect(mocks.segments.has("t1")).toBe(false);
+    expect(mocks.getPresignedPutUrl).not.toHaveBeenCalled();
+  });
+
+  it("rejects starting an upload if the session finalizes before track creation", async () => {
+    mocks.finalizeAfterNextSessionRead = true;
     mocks.resolvePrincipal.mockResolvedValue({ kind: "host" });
 
     const res = await presignUpload(
@@ -365,6 +427,41 @@ describe("recording upload auth", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { key: string; url: string };
     expect(body.key).toBe("sessions/s1/tracks/t1/47.webm");
+  });
+
+  it("rejects chunk presign if the session finalizes before URL issuance", async () => {
+    mocks.resolvePrincipal.mockResolvedValueOnce({ kind: "host" });
+
+    const start = await presignUpload(
+      postJson(
+        "/api/upload/presign",
+        {
+          sessionId: "s1",
+          trackId: "t1",
+          partNumber: 0,
+          participantName: "Alice",
+        },
+      ),
+    );
+    const { recordingToken } = (await start.json()) as {
+      recordingToken: string;
+    };
+    mocks.getPresignedPutUrl.mockClear();
+    mocks.finalizeAfterNextSessionRead = true;
+
+    const res = await presignUpload(
+      postJson(
+        "/api/upload/presign",
+        { sessionId: "s1", trackId: "t1", partNumber: 47 },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toEqual({
+      error: "Session is already finalized",
+    });
+    expect(mocks.getPresignedPutUrl).not.toHaveBeenCalled();
   });
 
   it("keeps presigning the first recorded chunk with the recording token after cookies expire", async () => {
@@ -502,6 +599,49 @@ describe("recording upload auth", () => {
       durationMs: null,
     });
     const recordingToken = await issueRecordingUploadToken("s1", "t1");
+
+    const res = await completeUpload(
+      postJson(
+        "/api/upload/complete",
+        { sessionId: "s1", trackId: "t1", durationMs: 12345 },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toEqual({
+      error: "Session is already finalized",
+    });
+    expect(mocks.segments.get("t1")).toMatchObject({
+      status: "recording",
+      durationMs: null,
+    });
+    expect(mocks.tracks.get("t1")).toMatchObject({
+      status: "recording",
+      durationMs: null,
+    });
+    expect(mocks.deleteTrackSegmentChunks).not.toHaveBeenCalled();
+  });
+
+  it("rejects completing an upload if the session finalizes before segment update", async () => {
+    mocks.tracks.set("t1", {
+      id: "t1",
+      sessionId: "s1",
+      participantName: "Alice",
+      s3Key: "sessions/s1/tracks/t1/recording.webm",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("t1", {
+      id: "t1",
+      trackId: "t1",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/t1/",
+      status: "recording",
+      durationMs: null,
+    });
+    const recordingToken = await issueRecordingUploadToken("s1", "t1");
+    mocks.finalizeAfterNextSessionRead = true;
 
     const res = await completeUpload(
       postJson(

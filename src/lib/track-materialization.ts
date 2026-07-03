@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import type { Prisma } from "@prisma/client";
 import ffmpegStaticPath from "ffmpeg-static";
 import { db } from "@/lib/db";
 import {
@@ -38,6 +39,11 @@ export type MaterializationResult = {
   durationMs: number | null;
 };
 
+type TrackMaterializationDb = Pick<
+  Prisma.TransactionClient,
+  "track" | "trackSegment"
+>;
+
 export type RemuxSegmentsInput = {
   sourceKeys: string[];
   outputKey: string;
@@ -47,6 +53,7 @@ export type MaterializeTrackDeps = {
   readObjectBytes?: (key: string) => Promise<Uint8Array>;
   writeObjectBytes?: (key: string, bytes: Uint8Array) => Promise<void>;
   remuxSegments?: (input: RemuxSegmentsInput) => Promise<void>;
+  dbClient?: TrackMaterializationDb;
   partial?: boolean;
   allowIncompleteLatest?: boolean;
   skipMissingSegments?: boolean;
@@ -147,15 +154,22 @@ async function remuxWebmSegments(
 }
 
 async function markTrackFailed(input: {
+  client: TrackMaterializationDb;
   trackId: string;
   currentS3Key: string;
   finalKey: string;
   segmentCount: number;
   latestSegmentIndex: number;
 }): Promise<MaterializationResult> {
-  const { trackId, currentS3Key, finalKey, segmentCount, latestSegmentIndex } =
-    input;
-  const updated = await db.track.updateMany({
+  const {
+    client,
+    trackId,
+    currentS3Key,
+    finalKey,
+    segmentCount,
+    latestSegmentIndex,
+  } = input;
+  const updated = await client.track.updateMany({
     where: {
       id: trackId,
       status: { not: "complete" },
@@ -186,12 +200,14 @@ async function markTrackFailed(input: {
 }
 
 async function markTrackFailedIfNoSegments(
+  client: TrackMaterializationDb,
   trackId: string,
   currentS3Key: string,
   finalKey: string,
   latestSegmentIndex: number,
 ): Promise<MaterializationResult> {
   return await markTrackFailed({
+    client,
     trackId,
     currentS3Key,
     finalKey,
@@ -204,7 +220,8 @@ export async function materializeTrack(
   trackId: string,
   deps: MaterializeTrackDeps = {},
 ): Promise<MaterializationResult> {
-  const track = await db.track.findUnique({
+  const client = deps.dbClient ?? db;
+  const track = await client.track.findUnique({
     where: { id: trackId },
     select: {
       id: true,
@@ -217,7 +234,7 @@ export async function materializeTrack(
     throw new Error(`Track ${trackId} not found`);
   }
 
-  const segments = await db.trackSegment.findMany({
+  const segments = await client.trackSegment.findMany({
     where: { trackId },
     orderBy: { segmentIndex: "asc" },
     select: {
@@ -238,7 +255,7 @@ export async function materializeTrack(
     !latestSegment ||
     (latestSegment.status !== "complete" && !deps.allowIncompleteLatest)
   ) {
-    await db.track.updateMany({
+    await client.track.updateMany({
       where: { id: trackId, status: { not: "complete" } },
       data: { status: "uploading" },
     });
@@ -269,6 +286,7 @@ export async function materializeTrack(
 
   if (sourceSegments.length === 0) {
     return await markTrackFailedIfNoSegments(
+      client,
       trackId,
       track.s3Key,
       finalKey,
@@ -319,6 +337,7 @@ export async function materializeTrack(
   } catch (error) {
     console.error(`[materialize] track=${trackId} failed:`, error);
     return await markTrackFailed({
+      client,
       trackId,
       currentS3Key: track.s3Key,
       finalKey,
@@ -329,7 +348,7 @@ export async function materializeTrack(
 
   const durationMs = totalDurationMs(sourceSegments);
   const partial = deps.partial || skippedMissingSegment;
-  const updated = await db.track.updateMany({
+  const updated = await client.track.updateMany({
     where: {
       id: trackId,
       segments: {

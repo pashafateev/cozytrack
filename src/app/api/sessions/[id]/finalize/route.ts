@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { recoverTrack } from "@/lib/recovery";
+import { claimRecordingSessionForWrite } from "@/lib/session-status";
 
 export async function POST(
   _req: NextRequest,
@@ -9,21 +10,39 @@ export async function POST(
   try {
     const { id } = await params;
 
-    const session = await db.session.findUnique({
-      where: { id },
-      include: {
-        tracks: { orderBy: { createdAt: "asc" } },
-      },
-    });
+    return await db.$transaction(async (tx) => {
+      const claim = await claimRecordingSessionForWrite(tx, id);
+      if (!claim.ok) {
+        if (claim.reason === "missing") {
+          return NextResponse.json(
+            { error: "Session not found" },
+            { status: 404 }
+          );
+        }
 
-    if (!session) {
-      return NextResponse.json(
-        { error: "Session not found" },
-        { status: 404 }
-      );
-    }
+        const readySession = await tx.session.findUnique({
+          where: { id },
+          include: {
+            tracks: { orderBy: { createdAt: "asc" } },
+          },
+        });
+        return NextResponse.json(readySession, { status: 200 });
+      }
 
-    if (session.status !== "ready") {
+      const session = await tx.session.findUnique({
+        where: { id },
+        include: {
+          tracks: { orderBy: { createdAt: "asc" } },
+        },
+      });
+
+      if (!session) {
+        return NextResponse.json(
+          { error: "Session not found" },
+          { status: 404 }
+        );
+      }
+
       const stuck = session.tracks.filter((t) => t.status !== "complete");
 
       // Layer B (issue #56): before reporting pending tracks back to the
@@ -57,27 +76,27 @@ export async function POST(
         return NextResponse.json({ pending }, { status: 409 });
       }
 
-      await db.session.updateMany({
+      await tx.session.updateMany({
         where: { id, status: "recording" },
         data: { status: "ready", finalizedAt: new Date() },
       });
-    }
 
-    const updated = await db.session.findUnique({
-      where: { id },
-      include: {
-        tracks: { orderBy: { createdAt: "asc" } },
-      },
+      const updated = await tx.session.findUnique({
+        where: { id },
+        include: {
+          tracks: { orderBy: { createdAt: "asc" } },
+        },
+      });
+
+      if (!updated) {
+        return NextResponse.json(
+          { error: "Session not found" },
+          { status: 404 }
+        );
+      }
+
+      return NextResponse.json(updated, { status: 200 });
     });
-
-    if (!updated) {
-      return NextResponse.json(
-        { error: "Session not found" },
-        { status: 404 }
-      );
-    }
-
-    return NextResponse.json(updated, { status: 200 });
   } catch (error) {
     console.error("Failed to finalize session:", error);
     return NextResponse.json(
