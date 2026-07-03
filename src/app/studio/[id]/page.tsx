@@ -28,6 +28,7 @@ import {
 import { v4 as uuidv4 } from "uuid";
 import { CozyRecorder } from "@/lib/recorder";
 import { forceMonoStream, getTrackChannelCount } from "@/lib/audio-downmix";
+import { splitStereoStream } from "@/lib/audio-splitter";
 import {
   getPresignedUploadTarget,
   getPresignedUploadUrl,
@@ -112,6 +113,36 @@ const BANDWIDTH_SAVING_PUBLISH = {
 } as const;
 
 const RECORDING_CONFIRMATION_TIMEOUT_MS = 4000;
+
+// Host-owned local channel slots (issue #135). The slot ids are the contract
+// values the upload presign endpoint accepts and derives stable synthetic
+// participant ids from — they are duplicated here (rather than imported from
+// @/lib/auth, which pulls server-only deps) because this is a client bundle.
+const LOCAL_TRACK_SLOTS = [
+  { slotId: "host-local-ch-1", label: "Local Ch 1" },
+  { slotId: "host-local-ch-2", label: "Local Ch 2" },
+] as const;
+type LocalTrackSlotId = (typeof LOCAL_TRACK_SLOTS)[number]["slotId"];
+
+type TwoChannelStatus = "idle" | "ok" | "unsupported" | "missing-channels";
+
+// One split desktop channel wired up for capture and metering.
+type SlotCapture = {
+  slotId: LocalTrackSlotId;
+  label: string;
+  stream: MediaStream;
+};
+
+// A slot with an active recorder + upload identity mid-take.
+type ActiveSlot = {
+  slotId: LocalTrackSlotId;
+  label: string;
+  recorder: CozyRecorder;
+  trackId: string;
+  segmentId: string;
+  uploadToken?: string;
+  backupId: string | null;
+};
 
 // ---------- Helpers ----------
 
@@ -725,6 +756,27 @@ function RoomContent({
   const streamRef = useRef<MediaStream | null>(null);
   const downmixDisposeRef = useRef<(() => void) | null>(null);
   const [recordingStream, setRecordingStream] = useState<MediaStream | null>(null);
+
+  // ---- Two-channel local mode (issue #135) ----
+  // An additive, host-only capture path. When off, the single-track machinery
+  // above is the sole recorder and behaves exactly as before. When on, one
+  // desktop interface is split into two mono channels, each recorded as its
+  // own logical track slot. The slot array *is* the "small array of local
+  // recording slots" — single-track mode is the degenerate 1-recorder case
+  // served by the untouched path above.
+  const [twoChannelMode, setTwoChannelMode] = useState(false);
+  const [twoChannelStatus, setTwoChannelStatus] =
+    useState<TwoChannelStatus>("idle");
+  const [slotCaptures, setSlotCaptures] = useState<SlotCapture[]>([]);
+  const slotCapturesRef = useRef<SlotCapture[]>([]);
+  const slotRecordersRef = useRef<ActiveSlot[]>([]);
+  const [slotLevels, setSlotLevels] = useState<Map<string, number>>(new Map());
+  const splitterDisposeRef = useRef<(() => void) | null>(null);
+  const splitRawStreamRef = useRef<MediaStream | null>(null);
+  const setSlotCapturesSync = useCallback((next: SlotCapture[]) => {
+    slotCapturesRef.current = next;
+    setSlotCaptures(next);
+  }, []);
   // Mirror of studioState so callbacks invoked from transport subscriptions
   // (which close over the value at subscription time) can check current state
   // without re-subscribing on every render.
@@ -1140,6 +1192,121 @@ function RoomContent({
       audioCtx.close();
     };
   }, [participantName, recordingStream]);
+
+  // Acquire and split the selected interface into two mono channels whenever
+  // two-channel mode is enabled. Fails closed via splitStereoStream: if the
+  // device can't prove 2-channel capture we surface a status instead of two
+  // silent/duplicated slots. Host-only.
+  useEffect(() => {
+    if (!isHost || !twoChannelMode) return;
+
+    let cancelled = false;
+    async function acquireSplit() {
+      try {
+        const rawStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            deviceId: selectedMic ? { exact: selectedMic } : undefined,
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 48000,
+            channelCount: 2,
+          },
+        });
+        if (cancelled) {
+          rawStream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+
+        const result = splitStereoStream(rawStream);
+        if (result.state !== "ok") {
+          rawStream.getTracks().forEach((track) => track.stop());
+          setTwoChannelStatus(result.state);
+          setSlotCapturesSync([]);
+          return;
+        }
+
+        splitRawStreamRef.current = rawStream;
+        splitterDisposeRef.current = result.dispose;
+        setSlotCapturesSync(
+          LOCAL_TRACK_SLOTS.map((slot, i) => ({
+            slotId: slot.slotId,
+            label: slot.label,
+            stream: result.channels[i],
+          })),
+        );
+        setTwoChannelStatus("ok");
+      } catch (err) {
+        console.error("Failed to acquire two-channel stream:", err);
+        if (!cancelled) {
+          setTwoChannelStatus("unsupported");
+          setSlotCapturesSync([]);
+        }
+      }
+    }
+
+    void acquireSplit();
+
+    return () => {
+      cancelled = true;
+      splitterDisposeRef.current?.();
+      splitterDisposeRef.current = null;
+      splitRawStreamRef.current?.getTracks().forEach((track) => track.stop());
+      splitRawStreamRef.current = null;
+      setSlotCapturesSync([]);
+      setTwoChannelStatus("idle");
+    };
+  }, [isHost, twoChannelMode, selectedMic, setSlotCapturesSync]);
+
+  // Per-slot level meters. One analyser per split channel, feeding slotLevels
+  // keyed by slot id (kept separate from the shared audioLevels map, whose
+  // remote-merge effect would otherwise wipe these keys).
+  useEffect(() => {
+    if (slotCaptures.length === 0) {
+      setSlotLevels(new Map());
+      return;
+    }
+
+    const cleanups: Array<() => void> = [];
+    for (const capture of slotCaptures) {
+      const audioCtx = new AudioContext();
+      const source = audioCtx.createMediaStreamSource(capture.stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0.85;
+      source.connect(analyser);
+      const dataArray = new Uint8Array(analyser.fftSize);
+      let raf = 0;
+      let level = 0;
+
+      const tick = () => {
+        analyser.getByteTimeDomainData(dataArray);
+        let sumSquares = 0;
+        for (const value of dataArray) {
+          const centered = (value - 128) / 128;
+          sumSquares += centered * centered;
+        }
+        const rms = Math.sqrt(sumSquares / dataArray.length);
+        const normalized = Math.min(1, Math.max(0, (rms - 0.01) / 0.12));
+        const target = Math.round(shapeLevel(normalized) * 255);
+        level = Math.round(smoothLevel(level, target));
+        setSlotLevels((prev) => {
+          const next = new Map(prev);
+          next.set(capture.slotId, level);
+          return next;
+        });
+        raf = requestAnimationFrame(tick);
+      };
+      tick();
+
+      cleanups.push(() => {
+        cancelAnimationFrame(raf);
+        audioCtx.close();
+      });
+    }
+
+    return () => cleanups.forEach((fn) => fn());
+  }, [slotCaptures]);
 
   // Track remote audio levels via getStats() polling on each remote audio
   // track's RTCRtpReceiver. Replaces the prior `useSpeakingParticipants`
@@ -1676,6 +1843,347 @@ function RoomContent({
     timingDebug,
   ]);
 
+  // ---- Two-channel slot recorders ----
+  // Set up one recorder for a single split channel: presign a slot-scoped
+  // track, wire chunk uploads (with crash-safe local backup) through the shared
+  // upload tracker, and start capturing. Throws on failure so the caller can
+  // roll back the whole two-channel start.
+  const beginSlotRecorder = useCallback(
+    async (
+      capture: SlotCapture,
+      sessionStartedAtIso: string,
+      takeId: string | null,
+    ): Promise<ActiveSlot> => {
+      const requestedTrackId = uuidv4();
+      const initialUpload = await getPresignedUploadTarget(
+        sessionId,
+        requestedTrackId,
+        0,
+        capture.label,
+        {
+          deviceInfo: {
+            deviceLabel: selectedMicLabel
+              ? `${capture.label} · ${selectedMicLabel}`
+              : capture.label,
+            deviceId: selectedMic,
+            isBuiltInMic: selectedMicIsBuiltIn,
+          },
+          sessionStartedAt: sessionStartedAtIso,
+          takeId: takeId ?? undefined,
+          localTrackSlotId: capture.slotId,
+        },
+      );
+      const trackId = initialUpload.trackId ?? requestedTrackId;
+      const segmentId = initialUpload.segmentId ?? requestedTrackId;
+      const uploadToken = initialUpload.recordingToken;
+
+      let backupId: string | null = null;
+      try {
+        await browserRecordingBackupStore.startBackup({
+          sessionId,
+          trackId,
+          segmentId,
+          participantName: capture.label,
+          recordingToken: uploadToken,
+        });
+        backupId = recordingBackupId(sessionId, segmentId);
+      } catch (backupErr) {
+        console.error("Failed to init local slot backup:", backupErr);
+      }
+
+      const recorder = new CozyRecorder(capture.stream);
+      recorder.onChunk((chunk, index) => {
+        const byteLength = chunk.size;
+        trackerOnChunkRecorded(byteLength);
+        const capturedAt = new Date();
+        const backupSave = backupId
+          ? browserRecordingBackupStore
+              .saveChunk({
+                sessionId,
+                trackId,
+                segmentId,
+                chunkIndex: index,
+                chunk,
+                capturedAt,
+              })
+              .catch((backupErr) => {
+                console.error("Failed to write local slot backup:", backupErr);
+                return null;
+              })
+          : Promise.resolve(null);
+
+        const uploadPromise = (async () => {
+          await backupSave;
+          const url = await getPresignedUploadUrl(
+            sessionId,
+            trackId,
+            index,
+            undefined,
+            { segmentId },
+            uploadToken,
+          );
+          await uploadChunk(url, chunk);
+          if (backupId) {
+            try {
+              await browserRecordingBackupStore.markChunkUploaded(
+                sessionId,
+                trackId,
+                index,
+                segmentId,
+              );
+            } catch (backupErr) {
+              console.error("Failed to mark slot chunk uploaded:", backupErr);
+            }
+          }
+        })();
+
+        void trackerTrackUpload(byteLength, uploadPromise);
+      });
+
+      await recorder.start(5000);
+      return {
+        slotId: capture.slotId,
+        label: capture.label,
+        recorder,
+        trackId,
+        segmentId,
+        uploadToken,
+        backupId,
+      };
+    },
+    [
+      sessionId,
+      selectedMic,
+      selectedMicLabel,
+      selectedMicIsBuiltIn,
+      trackerOnChunkRecorded,
+      trackerTrackUpload,
+    ],
+  );
+
+  // Start both channel recorders as a single logical "start". Mirrors the
+  // orchestration in startRecordingLocal (state, confirmation, broadcast,
+  // preview-quality switch) but drives the slot array instead of one recorder.
+  const startLocalSlots = useCallback(
+    async (
+      sessionStartedAtIso: string,
+      takeId?: string | null,
+    ): Promise<boolean> => {
+      const effectiveTakeId = takeId ?? recordingTakeIdRef.current;
+      if (effectiveTakeId) recordingTakeIdRef.current = effectiveTakeId;
+      if (studioStateRef.current === "finalizing") {
+        void broadcastRecordingStatus(
+          "failed",
+          sessionStartedAtIso,
+          "still finalizing previous recording",
+          effectiveTakeId,
+        );
+        return false;
+      }
+      if (
+        studioStateRef.current === "recording" ||
+        slotRecordersRef.current.length > 0
+      ) {
+        void broadcastRecordingStatus(
+          "recording",
+          recordingSessionStartedAtRef.current ?? sessionStartedAtIso,
+          undefined,
+          effectiveTakeId,
+        );
+        return true;
+      }
+
+      const captures = slotCapturesRef.current;
+      if (captures.length !== LOCAL_TRACK_SLOTS.length) {
+        clearRecordingConfirmationState();
+        void broadcastRecordingStatus(
+          "failed",
+          sessionStartedAtIso,
+          "two-channel capture unavailable",
+          effectiveTakeId,
+        );
+        return false;
+      }
+
+      trackerReset();
+      recordingStartRef.current = Date.now();
+
+      const started: ActiveSlot[] = [];
+      try {
+        for (const capture of captures) {
+          started.push(
+            await beginSlotRecorder(capture, sessionStartedAtIso, effectiveTakeId),
+          );
+        }
+      } catch (err) {
+        console.error("Failed to start two-channel recorders:", err);
+        await Promise.all(
+          started.map(async (slot) => {
+            try {
+              await slot.recorder.stop();
+            } catch {
+              // Best-effort teardown of partially-started recorders.
+            }
+          }),
+        );
+        slotRecordersRef.current = [];
+        clearRecordingConfirmationState();
+        void broadcastRecordingStatus(
+          "failed",
+          sessionStartedAtIso,
+          "recorder failed to start",
+          effectiveTakeId,
+        );
+        return false;
+      }
+
+      slotRecordersRef.current = started;
+      setRecordingSessionStartedAtSync(sessionStartedAtIso);
+      scheduleRecordingConfirmationCheck(sessionStartedAtIso);
+      setStudioStateSync("recording");
+      void broadcastRecordingStatus(
+        "recording",
+        sessionStartedAtIso,
+        undefined,
+        effectiveTakeId,
+      );
+
+      const switched = await switchAudioQuality("bandwidth-saving");
+      if (switched) {
+        showNotification("Preview quality reduced — local recording is unaffected");
+      } else {
+        showNotification("Couldn't switch audio quality — check console");
+      }
+      return true;
+    },
+    [
+      beginSlotRecorder,
+      broadcastRecordingStatus,
+      clearRecordingConfirmationState,
+      scheduleRecordingConfirmationCheck,
+      setRecordingSessionStartedAtSync,
+      setStudioStateSync,
+      showNotification,
+      switchAudioQuality,
+      trackerReset,
+    ],
+  );
+
+  // Stop both channel recorders, finalize each track, then return to connected.
+  const stopLocalSlots = useCallback(async () => {
+    const sessionStartedAtForStatus =
+      recordingSessionStartedAtRef.current ?? undefined;
+    const takeIdForStatus = recordingTakeIdRef.current;
+    if (studioStateRef.current === "finalizing") return;
+    clearRecordingConfirmationState(false);
+
+    const slots = slotRecordersRef.current;
+    if (slots.length === 0) {
+      setRecordingSessionStartedAtSync(null);
+      recordingTakeIdRef.current = null;
+      void broadcastRecordingStatus(
+        "connected",
+        sessionStartedAtForStatus,
+        undefined,
+        takeIdForStatus,
+      );
+      return;
+    }
+
+    slotRecordersRef.current = [];
+    const startedAt = recordingStartRef.current;
+    setStudioStateSync("finalizing");
+    void broadcastRecordingStatus(
+      "finalizing",
+      sessionStartedAtForStatus,
+      undefined,
+      takeIdForStatus,
+    );
+
+    try {
+      const stopped = await Promise.all(
+        slots.map(async (slot) => ({ slot, blob: await slot.recorder.stop() })),
+      );
+      const durationMs = Date.now() - startedAt;
+      trackerFreezeRecorded();
+
+      // Each channel's final recording.webm is critical — rethrow so a failure
+      // surfaces and we skip completeUpload for that channel rather than let
+      // the server discard chunks for a track that never finalized.
+      for (const { slot, blob } of stopped) {
+        const finalBytes = blob.size;
+        trackerOnChunkRecorded(finalBytes);
+        const finalUpload = (async () => {
+          const url = await getPresignedUploadUrl(
+            sessionId,
+            slot.trackId,
+            9999,
+            undefined,
+            { segmentId: slot.segmentId },
+            slot.uploadToken,
+          );
+          await uploadChunk(url, blob);
+        })();
+        await trackerTrackUpload(finalBytes, finalUpload, { rethrow: true });
+      }
+
+      await trackerWaitForUploads();
+
+      for (const { slot } of stopped) {
+        await completeUpload(
+          sessionId,
+          slot.trackId,
+          durationMs,
+          slot.uploadToken,
+          slot.segmentId,
+        );
+        if (slot.backupId) {
+          try {
+            await browserRecordingBackupStore.clearBackup(
+              slot.backupId,
+              "verified-upload",
+            );
+          } catch (backupErr) {
+            console.error("Failed to clear slot backup:", backupErr);
+          }
+        }
+      }
+
+      setHasRecorded(true);
+    } catch (err) {
+      console.error("Failed to stop two-channel recording:", err);
+    } finally {
+      try {
+        await trackerWaitForUploads();
+      } catch (drainErr) {
+        console.error("Failed while draining slot uploads:", drainErr);
+      }
+      setStudioStateSync("connected");
+      setRecordingSessionStartedAtSync(null);
+      recordingTakeIdRef.current = null;
+      void broadcastRecordingStatus(
+        "connected",
+        sessionStartedAtForStatus,
+        undefined,
+        takeIdForStatus,
+      );
+      void switchAudioQuality("full").catch((err) => {
+        console.error("Failed to restore audio quality:", err);
+      });
+    }
+  }, [
+    broadcastRecordingStatus,
+    clearRecordingConfirmationState,
+    sessionId,
+    setRecordingSessionStartedAtSync,
+    setStudioStateSync,
+    switchAudioQuality,
+    trackerFreezeRecorded,
+    trackerOnChunkRecorded,
+    trackerTrackUpload,
+    trackerWaitForUploads,
+  ]);
+
   const handleRetryLocalBackupUpload = useCallback(async () => {
     if (backupAction !== "idle") return;
     if (studioStateRef.current !== "connected") return;
@@ -1780,7 +2288,8 @@ function RoomContent({
       startingRef.current ||
       studioStateRef.current === "recording" ||
       studioStateRef.current === "finalizing" ||
-      recorderRef.current
+      recorderRef.current ||
+      slotRecordersRef.current.length > 0
     ) {
       return;
     }
@@ -1823,7 +2332,9 @@ function RoomContent({
         return;
       }
 
-      const started = await startRecordingLocal(sessionStartedAt, takeId);
+      const started = twoChannelMode
+        ? await startLocalSlots(sessionStartedAt, takeId)
+        : await startRecordingLocal(sessionStartedAt, takeId);
       if (!started) {
         showNotification("Couldn't start your recorder — stopping the room");
         try {
@@ -1841,7 +2352,15 @@ function RoomContent({
     } finally {
       startingRef.current = false;
     }
-  }, [isHost, sessionId, transport, startRecordingLocal, showNotification]);
+  }, [
+    isHost,
+    sessionId,
+    transport,
+    startRecordingLocal,
+    startLocalSlots,
+    twoChannelMode,
+    showNotification,
+  ]);
 
   const handleStopRecording = useCallback(async () => {
     if (!isHost) return;
@@ -1864,11 +2383,23 @@ function RoomContent({
         console.error("Failed to broadcast recording_stop:", err);
         showNotification("Couldn't tell the room to stop recording");
       }
-      await stopRecordingLocal();
+      if (twoChannelMode) {
+        await stopLocalSlots();
+      } else {
+        await stopRecordingLocal();
+      }
     } finally {
       stoppingRef.current = false;
     }
-  }, [isHost, sessionId, transport, stopRecordingLocal, showNotification]);
+  }, [
+    isHost,
+    sessionId,
+    transport,
+    stopRecordingLocal,
+    stopLocalSlots,
+    twoChannelMode,
+    showNotification,
+  ]);
 
   // Subscribe to remote control messages. LiveKit does not echo the sender's
   // own messages back, but startRecordingLocal/stopRecordingLocal are
@@ -1975,6 +2506,11 @@ function RoomContent({
       if (monoStream && monoStream !== rawStream) {
         monoStream.getTracks().forEach((t) => t.stop());
       }
+      // Two-channel split teardown.
+      splitterDisposeRef.current?.();
+      splitterDisposeRef.current = null;
+      splitRawStreamRef.current?.getTracks().forEach((t) => t.stop());
+      splitRawStreamRef.current = null;
     };
   }, []);
 
@@ -2123,15 +2659,84 @@ function RoomContent({
       {/* Main layout: strips + right sidebar */}
       <div className="flex flex-1 min-h-0">
         <div className="flex-1 p-5 flex flex-col gap-2.5 overflow-y-auto">
-          <ParticipantStrip
-            name={participantName}
-            role={isHost ? "host" : "guest"}
-            micLabel={selectedMicLabel ?? "Unknown mic"}
-            isBuiltIn={selectedMicIsBuiltIn}
-            level={audioLevels.get(participantName) ?? 0}
-            status={localStatus}
-            clipping={localClipping}
-          />
+          {/* Host-only two-channel toggle. Disabled mid-take so the capture
+              graph can't be swapped out from under an active recording. */}
+          {isHost && (
+            <div
+              className="flex items-center gap-2.5 rounded-lg px-4 py-2.5 border select-none"
+              style={{ background: "var(--card)", borderColor: "var(--border)" }}
+            >
+              {/* Standalone input (not wrapped in a <label>) — a wrapping
+                  label re-forwards the click to its control, which recurses
+                  under happy-dom. aria-label carries the accessible name. */}
+              <input
+                id="two-channel-toggle"
+                type="checkbox"
+                aria-label="Two-channel local mode"
+                checked={twoChannelMode}
+                disabled={studioState !== "connected"}
+                onChange={(e) => setTwoChannelMode(e.target.checked)}
+                className="accent-[var(--amber)] cursor-pointer"
+              />
+              <label
+                htmlFor="two-channel-toggle"
+                className="text-[12px] text-text-2 cursor-pointer"
+              >
+                Two-channel local mode
+              </label>
+              {twoChannelMode && twoChannelStatus === "ok" && (
+                <span className="ml-auto font-mono text-[10px] text-text-3 truncate max-w-[45%]">
+                  {selectedMicLabel ?? "selected interface"} → 2 channels
+                </span>
+              )}
+            </div>
+          )}
+
+          {isHost && twoChannelMode ? (
+            slotCaptures.length === LOCAL_TRACK_SLOTS.length ? (
+              LOCAL_TRACK_SLOTS.map((slot) => (
+                <ParticipantStrip
+                  key={slot.slotId}
+                  name={slot.label}
+                  role="host"
+                  micLabel={selectedMicLabel ?? "Interface"}
+                  isBuiltIn={false}
+                  level={slotLevels.get(slot.slotId) ?? 0}
+                  status={localStatus}
+                />
+              ))
+            ) : (
+              <div
+                role="status"
+                className="rounded-lg px-4 py-3.5 border flex items-start gap-2.5"
+                style={{
+                  background: "rgba(232,168,48,0.08)",
+                  borderColor: "rgba(232,168,48,0.28)",
+                }}
+              >
+                <span className="mt-0.5 flex-shrink-0">
+                  <IcoAlert size={14} color="var(--warn)" />
+                </span>
+                <span className="text-[12px] leading-5 text-warn">
+                  {twoChannelStatus === "missing-channels"
+                    ? "Selected interface reports a single channel — pick a 2-channel input to split into Local Ch 1 and Ch 2."
+                    : twoChannelStatus === "unsupported"
+                    ? "This browser or device can't prove 2-channel capture, so two-channel recording is unavailable."
+                    : "Preparing two channels…"}
+                </span>
+              </div>
+            )
+          ) : (
+            <ParticipantStrip
+              name={participantName}
+              role={isHost ? "host" : "guest"}
+              micLabel={selectedMicLabel ?? "Unknown mic"}
+              isBuiltIn={selectedMicIsBuiltIn}
+              level={audioLevels.get(participantName) ?? 0}
+              status={localStatus}
+              clipping={localClipping}
+            />
+          )}
 
           {remoteParticipants.map((p) => (
             <ParticipantStrip

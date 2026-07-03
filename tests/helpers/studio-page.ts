@@ -36,6 +36,8 @@ const studioPageHarness = vi.hoisted(() => ({
   syncMarkerPrepare: vi.fn(async () => undefined),
   syncMarkerPlay: vi.fn(async () => undefined),
   syncMarkerDispose: vi.fn(),
+  splitStereoStream: vi.fn(),
+  splitterDispose: vi.fn(),
 }));
 
 vi.mock("next/navigation", () => ({
@@ -43,31 +45,43 @@ vi.mock("next/navigation", () => ({
   usePathname: () => `/studio/${studioPageHarness.route.sessionId}`,
 }));
 
-vi.mock("@livekit/components-react", () => ({
-  LiveKitRoom: ({ children }: { children: ReactNode }) =>
-    React.createElement("div", { "data-testid": "livekit-room" }, children),
-  RoomAudioRenderer: () => null,
-  useRemoteParticipants: () => [],
-  useLocalParticipant: () => ({
+vi.mock("@livekit/components-react", () => {
+  // Stable identities defined inside the factory (which runs once, when the
+  // mocked module first loads). The real LiveKit hooks memoize these, and
+  // studio effects depend on them — returning fresh objects/arrays each render
+  // turns those effects into re-render loops once any synchronous setState
+  // fires.
+  const remoteParticipants: unknown[] = [];
+  const localParticipant = {
     localParticipant: {
       republishAllTracks: studioPageHarness.republishAllTracks,
     },
-  }),
-}));
+  };
+  return {
+    LiveKitRoom: ({ children }: { children: ReactNode }) =>
+      React.createElement("div", { "data-testid": "livekit-room" }, children),
+    RoomAudioRenderer: () => null,
+    useRemoteParticipants: () => remoteParticipants,
+    useLocalParticipant: () => localParticipant,
+  };
+});
 
 vi.mock("@/lib/livekit", () => ({
   LIVEKIT_URL: "ws://livekit.test",
   getToken: studioPageHarness.getToken,
 }));
 
-vi.mock("@/lib/transport", () => ({
-  useTransport: () => ({
+vi.mock("@/lib/transport", () => {
+  const transport = {
     sendControlMessage: studioPageHarness.sendControlMessage,
     onControlMessage: studioPageHarness.onControlMessage,
-  }),
-  isHostSender: () => false,
-  parseParticipantMetadata: () => null,
-}));
+  };
+  return {
+    useTransport: () => transport,
+    isHostSender: () => false,
+    parseParticipantMetadata: () => null,
+  };
+});
 
 vi.mock("@/lib/recording-state", () => ({
   startRecordingTake: studioPageHarness.startRecordingTake,
@@ -111,6 +125,10 @@ vi.mock("@/lib/audio-downmix", () => ({
   getTrackChannelCount: () => undefined,
 }));
 
+vi.mock("@/lib/audio-splitter", () => ({
+  splitStereoStream: studioPageHarness.splitStereoStream,
+}));
+
 vi.mock("@/lib/recording-backup", () => ({
   browserRecordingBackupStore: {
     listBackups: studioPageHarness.listBackups,
@@ -136,12 +154,17 @@ vi.mock("@/hooks/useMicMonitor", () => ({
   useMicMonitor: vi.fn(),
 }));
 
-vi.mock("@/hooks/useRemoteAudioLevels", () => ({
-  useRemoteAudioLevels: () => ({
+vi.mock("@/hooks/useRemoteAudioLevels", () => {
+  // Return a *stable* result object. The real hook memoizes its return value;
+  // a fresh object each call makes remoteAudio.levels a new identity every
+  // render, which turns the studio's remote-levels merge effect into an
+  // infinite re-render loop the moment any synchronous setState occurs.
+  const stable = {
     levels: new Map<string, number>(),
     clipping: new Set<string>(),
-  }),
-}));
+  };
+  return { useRemoteAudioLevels: () => stable };
+});
 
 vi.mock("@/hooks/useTimingDiagnostics", () => ({
   useTimingDiagnostics: vi.fn(),
@@ -255,6 +278,15 @@ beforeEach(() => {
   studioPageHarness.syncMarkerPrepare.mockReset().mockResolvedValue(undefined);
   studioPageHarness.syncMarkerPlay.mockReset().mockResolvedValue(undefined);
   studioPageHarness.syncMarkerDispose.mockReset();
+  studioPageHarness.splitterDispose.mockReset();
+  // Default: the split succeeds with two distinct mono channel streams so the
+  // two named local slots render and record. Tests that need failure states
+  // override this.
+  studioPageHarness.splitStereoStream.mockReset().mockImplementation(() => ({
+    state: "ok",
+    channels: [mediaStream(), mediaStream()],
+    dispose: studioPageHarness.splitterDispose,
+  }));
 
   vi.stubGlobal("AudioContext", FakeAudioContext);
   vi.stubGlobal(
