@@ -35,6 +35,7 @@ import {
   completeUpload,
 } from "@/lib/upload";
 import {
+  getRecordingTakeState,
   RecordingStateError,
   reportRecordingTakeParticipantStatus,
   startRecordingTake,
@@ -837,6 +838,11 @@ function RoomContent({
     useState<string | null>(null);
   const recordingSessionStartedAtRef = useRef<string | null>(null);
   const recordingTakeIdRef = useRef<string | null>(null);
+  // Reconnect catch-up: the id of the active take we've already attempted to
+  // resume on this client, so a participant returning mid-recording rejoins a
+  // given take at most once. Cleared back to null if the resume fails so a
+  // later connect can retry.
+  const caughtUpTakeIdRef = useRef<string | null>(null);
   const setRecordingSessionStartedAtSync = useCallback((next: string | null) => {
     recordingSessionStartedAtRef.current = next;
     setRecordingSessionStartedAt(next);
@@ -2004,6 +2010,60 @@ function RoomContent({
     remoteParticipantName,
     updateRemoteRecordingStatus,
   ]);
+
+  // Reconnect catch-up (stack 5). A participant who (re)joins after the host
+  // pressed record missed the live `recording_start` control message, so on
+  // reaching `connected` we ask the server for the authoritative active take.
+  // Because RecordingTake.status is the source of truth (a host stop durably
+  // flips it to "stopped" before the room tears down — see #148/#150), a take
+  // that still reads `recording` here is genuinely ongoing: we resume it by
+  // starting a fresh segment under the same logical track (presign re-links via
+  // the take id). A stopped take reports active:false and nothing happens — no
+  // host-stop marker needed. startRecordingLocal is idempotent, so this can't
+  // race a live start/stop into a double recorder.
+  useEffect(() => {
+    if (studioState !== "connected") return;
+    let cancelled = false;
+
+    void (async () => {
+      let state;
+      try {
+        state = await getRecordingTakeState(sessionId);
+      } catch (err) {
+        // GET is side-effect-free; skip catch-up this time and let a later
+        // connect retry rather than surfacing noise to the user.
+        console.error("Failed to check for an active recording take:", err);
+        return;
+      }
+      if (cancelled) return;
+      if (
+        !state.active ||
+        !state.take ||
+        state.take.status !== "recording" ||
+        !state.sessionStartedAt
+      ) {
+        return;
+      }
+      // Resume each active take at most once, and only while we're still idle —
+      // a start/stop the user triggered in the meantime takes precedence.
+      if (caughtUpTakeIdRef.current === state.take.id) return;
+      if (studioStateRef.current !== "connected") return;
+      caughtUpTakeIdRef.current = state.take.id;
+
+      const started = await startRecordingLocal(
+        state.sessionStartedAt,
+        state.take.id,
+      );
+      if (!started && !cancelled) {
+        caughtUpTakeIdRef.current = null;
+        showNotification("Couldn't resume the active recording — check your mic");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [studioState, sessionId, startRecordingLocal, showNotification]);
 
 
   // Block accidental navigation while recording, finalizing, or uploading.

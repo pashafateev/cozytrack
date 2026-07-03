@@ -22,6 +22,7 @@ const studioPageHarness = vi.hoisted(() => ({
   audioContexts: [] as unknown[],
   startRecordingTake: vi.fn(),
   stopRecordingTake: vi.fn(),
+  getRecordingTakeState: vi.fn(),
   reportRecordingTakeParticipantStatus: vi.fn(async () => undefined),
   getPresignedUploadTarget: vi.fn(),
   getPresignedUploadUrl: vi.fn(async () => "https://s3.example/recording.webm"),
@@ -97,6 +98,7 @@ vi.mock("@/lib/transport", () => {
 vi.mock("@/lib/recording-state", () => ({
   startRecordingTake: studioPageHarness.startRecordingTake,
   stopRecordingTake: studioPageHarness.stopRecordingTake,
+  getRecordingTakeState: studioPageHarness.getRecordingTakeState,
   reportRecordingTakeParticipantStatus:
     studioPageHarness.reportRecordingTakeParticipantStatus,
 }));
@@ -255,6 +257,13 @@ beforeEach(() => {
       stoppedAt: "2026-06-27T12:01:00.000Z",
     },
   });
+  // Default: no active take, so the reconnect catch-up effect is a no-op for
+  // tests that don't opt in. Reconnect tests override this per case.
+  studioPageHarness.getRecordingTakeState.mockReset().mockResolvedValue({
+    active: false,
+    sessionStartedAt: null,
+    take: null,
+  });
   studioPageHarness.reportRecordingTakeParticipantStatus
     .mockReset()
     .mockResolvedValue(undefined);
@@ -351,6 +360,7 @@ export function renderGuestStudioPage({
       });
     },
     screen,
+    harness: studioPageHarness,
   };
 }
 
