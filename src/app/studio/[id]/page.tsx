@@ -1961,6 +1961,60 @@ function RoomContent({
     ],
   );
 
+  // Finalize one slot's track: upload the final recording.webm, mark the track
+  // complete, and clear its backup. Each slot is independent — a failure here
+  // is contained (backup kept + marked failed) so it can never prevent a
+  // sibling channel from finalizing. Returns true iff the track completed.
+  const finalizeSlot = useCallback(
+    async (slot: ActiveSlot, blob: Blob, durationMs: number): Promise<boolean> => {
+      const finalBytes = blob.size;
+      trackerOnChunkRecorded(finalBytes);
+      const finalUpload = (async () => {
+        const url = await getPresignedUploadUrl(
+          sessionId,
+          slot.trackId,
+          9999,
+          undefined,
+          { segmentId: slot.segmentId },
+          slot.uploadToken,
+        );
+        await uploadChunk(url, blob);
+      })();
+      try {
+        await trackerTrackUpload(finalBytes, finalUpload, { rethrow: true });
+        await completeUpload(
+          sessionId,
+          slot.trackId,
+          durationMs,
+          slot.uploadToken,
+          slot.segmentId,
+        );
+        if (slot.backupId) {
+          try {
+            await browserRecordingBackupStore.clearBackup(
+              slot.backupId,
+              "verified-upload",
+            );
+          } catch (backupErr) {
+            console.error("Failed to clear slot backup:", backupErr);
+          }
+        }
+        return true;
+      } catch (err) {
+        console.error(`Failed to finalize slot ${slot.slotId}:`, err);
+        if (slot.backupId) {
+          try {
+            await browserRecordingBackupStore.markBackupFailed(slot.backupId, err);
+          } catch (backupErr) {
+            console.error("Failed to mark slot backup failed:", backupErr);
+          }
+        }
+        return false;
+      }
+    },
+    [sessionId, trackerOnChunkRecorded, trackerTrackUpload],
+  );
+
   // Start both channel recorders as a single logical "start". Mirrors the
   // orchestration in startRecordingLocal (state, confirmation, broadcast,
   // preview-quality switch) but drives the slot array instead of one recorder.
@@ -2017,15 +2071,28 @@ function RoomContent({
         }
       } catch (err) {
         console.error("Failed to start two-channel recorders:", err);
+        // Two-channel start is all-or-nothing. Any slot that DID start already
+        // created a server track/segment — finalize it through the normal path
+        // so it doesn't linger in `recording` waiting on recovery. Best-effort:
+        // stop the recorder, then run finalizeSlot with whatever it captured.
+        const durationMs = Date.now() - recordingStartRef.current;
+        trackerFreezeRecorded();
         await Promise.all(
           started.map(async (slot) => {
+            let blob: Blob | null = null;
             try {
-              await slot.recorder.stop();
-            } catch {
-              // Best-effort teardown of partially-started recorders.
+              blob = await slot.recorder.stop();
+            } catch (stopErr) {
+              console.error("Failed to stop partial slot recorder:", stopErr);
             }
+            if (blob) await finalizeSlot(slot, blob, durationMs);
           }),
         );
+        try {
+          await trackerWaitForUploads();
+        } catch (drainErr) {
+          console.error("Failed while draining partial slot uploads:", drainErr);
+        }
         slotRecordersRef.current = [];
         clearRecordingConfirmationState();
         void broadcastRecordingStatus(
@@ -2060,12 +2127,15 @@ function RoomContent({
       beginSlotRecorder,
       broadcastRecordingStatus,
       clearRecordingConfirmationState,
+      finalizeSlot,
       scheduleRecordingConfirmationCheck,
       setRecordingSessionStartedAtSync,
       setStudioStateSync,
       showNotification,
       switchAudioQuality,
+      trackerFreezeRecorded,
       trackerReset,
+      trackerWaitForUploads,
     ],
   );
 
@@ -2107,49 +2177,15 @@ function RoomContent({
       const durationMs = Date.now() - startedAt;
       trackerFreezeRecorded();
 
-      // Each channel's final recording.webm is critical — rethrow so a failure
-      // surfaces and we skip completeUpload for that channel rather than let
-      // the server discard chunks for a track that never finalized.
-      for (const { slot, blob } of stopped) {
-        const finalBytes = blob.size;
-        trackerOnChunkRecorded(finalBytes);
-        const finalUpload = (async () => {
-          const url = await getPresignedUploadUrl(
-            sessionId,
-            slot.trackId,
-            9999,
-            undefined,
-            { segmentId: slot.segmentId },
-            slot.uploadToken,
-          );
-          await uploadChunk(url, blob);
-        })();
-        await trackerTrackUpload(finalBytes, finalUpload, { rethrow: true });
-      }
-
+      // Finalize channels independently: each slot's final upload + complete is
+      // self-contained, so one channel failing (kept + marked failed in its
+      // backup) can never strand a sibling channel that finalized cleanly.
+      const outcomes = await Promise.all(
+        stopped.map(({ slot, blob }) => finalizeSlot(slot, blob, durationMs)),
+      );
       await trackerWaitForUploads();
 
-      for (const { slot } of stopped) {
-        await completeUpload(
-          sessionId,
-          slot.trackId,
-          durationMs,
-          slot.uploadToken,
-          slot.segmentId,
-        );
-        if (slot.backupId) {
-          try {
-            await browserRecordingBackupStore.clearBackup(
-              slot.backupId,
-              "verified-upload",
-            );
-          } catch (backupErr) {
-            console.error("Failed to clear slot backup:", backupErr);
-          }
-        }
-      }
-
-      setHasRecorded(true);
+      if (outcomes.some(Boolean)) setHasRecorded(true);
     } catch (err) {
       console.error("Failed to stop two-channel recording:", err);
     } finally {
@@ -2174,13 +2210,11 @@ function RoomContent({
   }, [
     broadcastRecordingStatus,
     clearRecordingConfirmationState,
-    sessionId,
+    finalizeSlot,
     setRecordingSessionStartedAtSync,
     setStudioStateSync,
     switchAudioQuality,
     trackerFreezeRecorded,
-    trackerOnChunkRecorded,
-    trackerTrackUpload,
     trackerWaitForUploads,
   ]);
 
@@ -2291,6 +2325,19 @@ function RoomContent({
       recorderRef.current ||
       slotRecordersRef.current.length > 0
     ) {
+      return;
+    }
+
+    // In two-channel mode, refuse to start a take / broadcast to the room until
+    // the split capture is proven ready — otherwise we'd blip remote
+    // participants and create a throwaway take that startLocalSlots then has to
+    // roll back. The REC button is also disabled in this state; this guards the
+    // programmatic/devtools path.
+    if (
+      twoChannelMode &&
+      slotCapturesRef.current.length !== LOCAL_TRACK_SLOTS.length
+    ) {
+      showNotification("Two-channel capture isn't ready yet");
       return;
     }
 
@@ -2522,6 +2569,11 @@ function RoomContent({
 
   const isRecording = studioState === "recording";
   const isFinalizing = studioState === "finalizing";
+  // In two-channel mode the host can't start until both split channels are
+  // captured; block the REC button so a click can't create a bad take.
+  const twoChannelNotReady =
+    twoChannelMode && slotCaptures.length !== LOCAL_TRACK_SLOTS.length;
+  const startDisabled = isFinalizing || (!isRecording && twoChannelNotReady);
 
   const localStatus: Status = isFinalizing
     ? "uploading"
@@ -2803,14 +2855,14 @@ function RoomContent({
                 <button
                   type="button"
                   onClick={() => (isRecording ? handleStopRecording() : handleStartRecording())}
-                  disabled={isFinalizing}
+                  disabled={startDisabled}
                   className={`w-[60px] h-[60px] rounded-full flex items-center justify-center border-2 ${
                     isRecording ? "rec-ring" : ""
-                  } ${isFinalizing ? "cursor-not-allowed" : "cursor-pointer"}`}
+                  } ${startDisabled ? "cursor-not-allowed" : "cursor-pointer"}`}
                   style={{
                     background: isRecording ? "rgba(232,80,80,0.1)" : "var(--card)",
                     borderColor: isRecording ? "var(--rec)" : "var(--border-hi)",
-                    opacity: isFinalizing ? 0.5 : 1,
+                    opacity: startDisabled ? 0.5 : 1,
                     transition: "all 200ms ease",
                   }}
                   aria-label={
@@ -2821,7 +2873,11 @@ function RoomContent({
                       : "Start recording"
                   }
                   title={
-                    isFinalizing ? "Finalizing previous recording…" : undefined
+                    isFinalizing
+                      ? "Finalizing previous recording…"
+                      : twoChannelNotReady
+                      ? "Waiting for two-channel capture…"
+                      : undefined
                   }
                 >
                   {isRecording ? (

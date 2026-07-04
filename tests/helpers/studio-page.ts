@@ -38,6 +38,17 @@ const studioPageHarness = vi.hoisted(() => ({
   syncMarkerDispose: vi.fn(),
   splitStereoStream: vi.fn(),
   splitterDispose: vi.fn(),
+  recordingBackupStore: {
+    startBackup: vi.fn(),
+    saveChunk: vi.fn(),
+    markChunkFailed: vi.fn(),
+    markChunkUploaded: vi.fn(),
+    markBackupAvailable: vi.fn(),
+    markBackupFailed: vi.fn(),
+    clearBackup: vi.fn(),
+    getBackup: vi.fn(),
+    buildRecordingBlob: vi.fn(),
+  },
 }));
 
 vi.mock("next/navigation", () => ({
@@ -132,15 +143,7 @@ vi.mock("@/lib/audio-splitter", () => ({
 vi.mock("@/lib/recording-backup", () => ({
   browserRecordingBackupStore: {
     listBackups: studioPageHarness.listBackups,
-    startBackup: vi.fn(),
-    saveChunk: vi.fn(),
-    markChunkFailed: vi.fn(),
-    markChunkUploaded: vi.fn(),
-    markBackupAvailable: vi.fn(),
-    markBackupFailed: vi.fn(),
-    clearBackup: vi.fn(),
-    getBackup: vi.fn(),
-    buildRecordingBlob: vi.fn(),
+    ...studioPageHarness.recordingBackupStore,
   },
   recordingBackupId: (sessionId: string, trackId: string) =>
     `${sessionId}:${trackId}`,
@@ -279,6 +282,9 @@ beforeEach(() => {
   studioPageHarness.syncMarkerPlay.mockReset().mockResolvedValue(undefined);
   studioPageHarness.syncMarkerDispose.mockReset();
   studioPageHarness.splitterDispose.mockReset();
+  for (const fn of Object.values(studioPageHarness.recordingBackupStore)) {
+    fn.mockReset();
+  }
   // Default: the split succeeds with two distinct mono channel streams so the
   // two named local slots render and record. Tests that need failure states
   // override this.
