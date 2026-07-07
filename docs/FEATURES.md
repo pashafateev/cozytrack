@@ -1,6 +1,6 @@
 # Cozytrack Roadmap
 
-This roadmap was reconciled against every GitHub issue that was open on July 2, 2026 (47 open issues).
+This roadmap was reconciled against every GitHub issue that was open on July 7, 2026 (46 open issues).
 
 - Every currently open issue appears exactly once as a primary roadmap entry below.
 - No open issues are explicitly excluded right now.
@@ -56,7 +56,6 @@ This roadmap was reconciled against every GitHub issue that was open on July 2, 
 - #117 Finalize/recovery/completion race integration tests: add a small real-service race suite as another `#108` follow-up for the highest-risk lifecycle ordering cases.
 - #63 Deferred multi-participant browser E2E harness: promote this after the narrower integration coverage and reconnect stack stabilize, or sooner if a real LiveKit/multi-participant regression demands it.
 - #109 Simplify recording and recovery code after the recent safety work: do this after the current safety path and its coverage work stabilize so cleanup is guided by proven invariants instead of guesswork.
-- #148 Durable `RecordingTake` terminal state: land this after `#111`, because reconnect auto-resume and release-readiness coverage need an authoritative stop model before they can safely build on recording-state reads.
 - #140 Generate aligned stem artifacts for recording takes: do this after `#7` settles the alignment metadata strategy and after the existing logical-track materialization path, because aligned stems need authoritative marker offsets and a stable cross-track export step.
 - #141 Serve aligned stems by default while preserving raw downloads: land this after `#140`, because the UI and download routes need aligned derived artifacts before they can switch user-facing defaults safely.
 - #142 Optional drift analysis and correction for long takes: keep this after `#140`, because the first aligned-export path should ship with fixed-offset alignment before drift measurement and time-stretch logic add more moving parts.
