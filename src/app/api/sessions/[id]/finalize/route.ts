@@ -47,6 +47,17 @@ export async function POST(
       // serializes against the start guards, so a start can't create a track
       // between our read and our status flip.
       const decision = await withSessionLock(id, async (tx) => {
+        // A recording start is two-phase: /recording-state creates the take,
+        // then presign creates the first track. Checking only tracks would let
+        // finalize slip through the window after the take exists but before any
+        // track does — it would mark the session `ready`, then presign 409s and
+        // the in-progress recording is stranded. Block on an active take too so
+        // that whole start is atomic w.r.t. finalize.
+        const activeTake = await tx.recordingTake.findFirst({
+          where: { sessionId: id, status: "recording" },
+          select: { id: true },
+        });
+
         const tracks = await tx.track.findMany({
           where: { sessionId: id },
           select: { id: true, participantName: true, status: true },
@@ -60,16 +71,18 @@ export async function POST(
             status: t.status,
           }));
 
-        if (pending.length > 0) return { pending };
+        if (activeTake || pending.length > 0) {
+          return { blocked: true as const, pending };
+        }
 
         await tx.session.updateMany({
           where: { id, status: "recording" },
           data: { status: "ready", finalizedAt: new Date() },
         });
-        return { pending };
+        return { blocked: false as const, pending };
       });
 
-      if (decision.pending.length > 0) {
+      if (decision.blocked) {
         return NextResponse.json({ pending: decision.pending }, { status: 409 });
       }
     }

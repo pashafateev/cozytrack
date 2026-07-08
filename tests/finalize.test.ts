@@ -10,6 +10,8 @@ type Session = {
 };
 
 const sessionStore = new Map<string, Session>();
+// Session ids that currently have an active (status "recording") RecordingTake.
+const activeTakeSessions = new Set<string>();
 
 function tracksFor(sessionId: string): Track[] {
   return sessionStore.get(sessionId)?.tracks ?? [];
@@ -64,6 +66,18 @@ vi.mock("@/lib/db", () => {
         },
       ),
     },
+    recordingTake: {
+      findFirst: vi.fn(
+        async ({
+          where: { sessionId, status },
+        }: {
+          where: { sessionId: string; status?: string };
+        }) =>
+          status === "recording" && activeTakeSessions.has(sessionId)
+            ? { id: `take-${sessionId}` }
+            : null,
+      ),
+    },
     track: {
       findMany: vi.fn(
         async ({
@@ -107,6 +121,7 @@ function req(): NextRequest {
 
 beforeEach(() => {
   sessionStore.clear();
+  activeTakeSessions.clear();
   vi.clearAllMocks();
 });
 
@@ -143,6 +158,25 @@ describe("POST /api/sessions/[id]/finalize", () => {
       "t2",
       expect.objectContaining({ chunkStitchMinAgeMs: expect.any(Number) }),
     );
+  });
+
+  it("returns 409 while a recording take is active even before any track exists", async () => {
+    // Race window (issue #151): /recording-state created the take but presign
+    // hasn't created the first track yet. Finalize must not slip through and
+    // mark the session ready — that would strand the in-progress recording.
+    sessionStore.set("s1", {
+      id: "s1",
+      name: "demo",
+      status: "recording",
+      finalizedAt: null,
+      tracks: [],
+    });
+    activeTakeSessions.add("s1");
+
+    const res = await POST(req(), { params: Promise.resolve({ id: "s1" }) });
+    expect(res.status).toBe(409);
+    expect(sessionStore.get("s1")?.status).toBe("recording");
+    expect(sessionStore.get("s1")?.finalizedAt).toBeNull();
   });
 
   it("finalizes when recovery flips a stuck track to complete", async () => {
