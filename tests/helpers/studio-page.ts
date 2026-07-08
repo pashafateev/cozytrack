@@ -283,7 +283,9 @@ beforeEach(() => {
   studioPageHarness.syncMarkerDispose.mockReset();
   studioPageHarness.splitterDispose.mockReset();
   for (const fn of Object.values(studioPageHarness.recordingBackupStore)) {
-    fn.mockReset();
+    // These store methods are async in the real implementation; resolve so
+    // chunk-pipeline code that chains .then/.catch on them behaves.
+    fn.mockReset().mockResolvedValue(undefined);
   }
   // Default: the split succeeds with two distinct mono channel streams so the
   // two named local slots render and record. Tests that need failure states

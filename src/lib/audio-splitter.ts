@@ -74,18 +74,44 @@ export function splitStereoStream(
     };
   }
 
-  const ctx = new Ctor();
-  const sourceNode = ctx.createMediaStreamSource(source);
-  const splitter = ctx.createChannelSplitter(2);
-  sourceNode.connect(splitter);
+  // Build the graph inside a try so construction failures (e.g. a browser
+  // without MediaStreamAudioDestinationNode, or one that rejects the options)
+  // fail closed rather than throwing. On failure we tear down whatever context
+  // we created and return an explicit state — the caller still owns and stops
+  // the source stream. Failing closed here keeps every caller's cleanup path
+  // simple: a non-"ok" result is the single signal to stop the input stream.
+  let ctx: AudioContext | undefined;
+  let sourceNode: MediaStreamAudioSourceNode;
+  let splitter: ChannelSplitterNode;
+  let dest1: MediaStreamAudioDestinationNode;
+  let dest2: MediaStreamAudioDestinationNode;
+  try {
+    ctx = new Ctor();
+    sourceNode = ctx.createMediaStreamSource(source);
+    splitter = ctx.createChannelSplitter(2);
+    sourceNode.connect(splitter);
 
-  const dest1 = new MediaStreamAudioDestinationNode(ctx, { channelCount: 1 });
-  const dest2 = new MediaStreamAudioDestinationNode(ctx, { channelCount: 1 });
-  // Splitter output N carries source channel N. Wire each to its own mono
-  // destination so the two channels never bleed into one another.
-  splitter.connect(dest1, 0);
-  splitter.connect(dest2, 1);
+    dest1 = new MediaStreamAudioDestinationNode(ctx, { channelCount: 1 });
+    dest2 = new MediaStreamAudioDestinationNode(ctx, { channelCount: 1 });
+    // Splitter output N carries source channel N. Wire each to its own mono
+    // destination so the two channels never bleed into one another.
+    splitter.connect(dest1, 0);
+    splitter.connect(dest2, 1);
+  } catch (err) {
+    try {
+      void ctx?.close();
+    } catch {
+      // Ignore teardown failures on the partially-built context.
+    }
+    return {
+      state: "unsupported",
+      reason: `failed to construct split audio graph: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    };
+  }
 
+  const activeCtx = ctx;
   let disposed = false;
   const dispose = () => {
     if (disposed) return;
@@ -114,7 +140,7 @@ export function splitStereoStream(
     }
     // close() can reject on already-closed/suspended contexts. Swallow so
     // dispose stays best-effort and silent.
-    void ctx.close().catch(() => {
+    void activeCtx?.close().catch(() => {
       // Ignore close failures.
     });
   };

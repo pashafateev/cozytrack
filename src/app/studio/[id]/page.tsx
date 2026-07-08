@@ -1202,8 +1202,12 @@ function RoomContent({
 
     let cancelled = false;
     async function acquireSplit() {
+      // Hoisted so every failure/cancel path can stop the captured device — an
+      // orphaned 2-channel input stream would otherwise hold the mic open until
+      // page teardown.
+      let rawStream: MediaStream | null = null;
       try {
-        const rawStream = await navigator.mediaDevices.getUserMedia({
+        rawStream = await navigator.mediaDevices.getUserMedia({
           audio: {
             deviceId: selectedMic ? { exact: selectedMic } : undefined,
             echoCancellation: false,
@@ -1218,6 +1222,8 @@ function RoomContent({
           return;
         }
 
+        // splitStereoStream fails closed (never throws), so a non-"ok" result
+        // is the single signal to release the input stream.
         const result = splitStereoStream(rawStream);
         if (result.state !== "ok") {
           rawStream.getTracks().forEach((track) => track.stop());
@@ -1238,6 +1244,11 @@ function RoomContent({
         setTwoChannelStatus("ok");
       } catch (err) {
         console.error("Failed to acquire two-channel stream:", err);
+        // Defense in depth: if anything after acquisition throws, the stream we
+        // opened isn't owned by splitRawStreamRef yet, so stop it here.
+        if (rawStream && splitRawStreamRef.current !== rawStream) {
+          rawStream.getTracks().forEach((track) => track.stop());
+        }
         if (!cancelled) {
           setTwoChannelStatus("unsupported");
           setSlotCapturesSync([]);
@@ -1982,6 +1993,11 @@ function RoomContent({
       })();
       try {
         await trackerTrackUpload(finalBytes, finalUpload, { rethrow: true });
+        // Drain every in-flight upload (both channels' background chunk PUTs
+        // and final blobs) before completing. /complete deletes the temporary
+        // chunk objects, so a slow chunk PUT that lands afterwards would leave
+        // stale objects — the single-track path waits here for the same reason.
+        await trackerWaitForUploads();
         await completeUpload(
           sessionId,
           slot.trackId,
@@ -2012,7 +2028,12 @@ function RoomContent({
         return false;
       }
     },
-    [sessionId, trackerOnChunkRecorded, trackerTrackUpload],
+    [
+      sessionId,
+      trackerOnChunkRecorded,
+      trackerTrackUpload,
+      trackerWaitForUploads,
+    ],
   );
 
   // Start both channel recorders as a single logical "start". Mirrors the

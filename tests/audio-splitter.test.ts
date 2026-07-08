@@ -183,4 +183,21 @@ describe("splitStereoStream", () => {
     expect(result.state).not.toBe("ok");
     expect(captured.destinationCalls).toHaveLength(0);
   });
+
+  it("fails closed (does not throw) when audio-graph construction fails", () => {
+    // A browser where MediaStreamAudioDestinationNode construction throws must
+    // not leak an exception to the caller — the acquire path relies on a
+    // non-"ok" result to release the input stream.
+    (
+      globalThis as { MediaStreamAudioDestinationNode: unknown }
+    ).MediaStreamAudioDestinationNode = function () {
+      throw new Error("no destination node in this browser");
+    };
+
+    let result: ReturnType<typeof splitStereoStream>;
+    expect(() => {
+      result = splitStereoStream(stereoStream(2), captured.Ctor);
+    }).not.toThrow();
+    expect(result!.state).toBe("unsupported");
+  });
 });
