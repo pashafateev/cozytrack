@@ -1,10 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { stopRecordingTake } from "@/lib/recording-state";
+
+interface ActiveTake {
+  id: string;
+  startedAt: string;
+}
 
 type FinishState =
   | { kind: "idle" }
   | { kind: "polling"; pendingName?: string }
+  | { kind: "active_take"; activeTake: ActiveTake; message: string }
   | { kind: "ready" }
   | { kind: "timeout" }
   | { kind: "error"; message: string };
@@ -91,13 +98,29 @@ export function FinishRecordingButton({
 
       if (res.status === 409) {
         let pendingName: string | undefined;
+        let activeTake: ActiveTake | undefined;
+        let error: string | undefined;
         try {
-          const data = (await res.json()) as { pending?: PendingTrack[] };
+          const data = (await res.json()) as {
+            pending?: PendingTrack[];
+            activeTake?: ActiveTake;
+            error?: string;
+          };
           pendingName = data.pending?.[0]?.participantName;
+          activeTake = data.activeTake;
+          error = data.error;
         } catch {
           // ignore parse errors
         }
         if (controller.signal.aborted || !isMountedRef.current) return;
+        if (activeTake) {
+          safeSetState({
+            kind: "active_take",
+            activeTake,
+            message: error ?? "An unfinished recording take is still active.",
+          });
+          return;
+        }
         safeSetState({ kind: "polling", pendingName });
         await sleep(POLL_INTERVAL_MS, controller.signal);
         continue;
@@ -110,6 +133,28 @@ export function FinishRecordingButton({
 
     safeSetState({ kind: "timeout" });
   }, [sessionId, waitForUploads, onReady, safeSetState]);
+
+  const recoverActiveTake = useCallback(async () => {
+    if (state.kind !== "active_take") return;
+
+    const confirmed = window.confirm(
+      "End this unfinished recording take and continue finalizing?",
+    );
+    if (!confirmed) return;
+
+    safeSetState({ kind: "polling" });
+    try {
+      await stopRecordingTake(sessionId, { takeId: state.activeTake.id });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to end unfinished take";
+      safeSetState({ kind: "error", message });
+      return;
+    }
+
+    if (!isMountedRef.current) return;
+    await runFinalize();
+  }, [runFinalize, safeSetState, sessionId, state]);
 
   const copyId = useCallback(async () => {
     try {
@@ -172,6 +217,23 @@ export function FinishRecordingButton({
           className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium"
         >
           Retry
+        </button>
+      </div>
+    );
+  }
+
+  if (state.kind === "active_take") {
+    return (
+      <div className="flex flex-col items-center gap-3 p-4 rounded-xl bg-cozy-900 border border-yellow-700">
+        <p className="text-yellow-400 text-sm text-center">{state.message}</p>
+        <p className="text-gray-400 text-xs">
+          Started {new Date(state.activeTake.startedAt).toLocaleString()}
+        </p>
+        <button
+          onClick={recoverActiveTake}
+          className="px-4 py-2 rounded-lg bg-yellow-600 hover:bg-yellow-700 text-white text-sm font-medium"
+        >
+          End unfinished take and continue
         </button>
       </div>
     );

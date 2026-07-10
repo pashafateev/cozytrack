@@ -248,9 +248,54 @@ export async function POST(
       return NextResponse.json(serializeRecordingState(outcome.take, true));
     }
 
-    // Stop is idempotent: if there's no recording take (already stopped, or a
-    // retry after the first stop landed), report inactive instead of erroring,
-    // so a retrying client converges.
+    const requestedTakeId =
+      typeof body?.takeId === "string" && body.takeId.length > 0
+        ? body.takeId
+        : null;
+
+    if (requestedTakeId) {
+      const target = await db.recordingTake.findUnique({
+        where: { id: requestedTakeId },
+        include: {
+          participantStatuses: { orderBy: { participantName: "asc" } },
+        },
+      });
+      if (target && target.sessionId !== id) {
+        return NextResponse.json({ error: "forbidden" }, { status: 403 });
+      }
+
+      // Recovery stops only the take finalize reported. A delayed confirmation
+      // must never stop a newer active take that appeared in the meantime.
+      if (target?.status === "recording") {
+        await db.recordingTake.updateMany({
+          where: { id: requestedTakeId, sessionId: id, status: "recording" },
+          data: { stoppedAt: new Date(), status: "stopped" },
+        });
+      }
+
+      const remainingActive = await findActiveTake(id);
+      if (remainingActive) {
+        return NextResponse.json(
+          serializeRecordingState(remainingActive, true),
+        );
+      }
+
+      const stoppedTarget = target
+        ? await db.recordingTake.findUnique({
+            where: { id: requestedTakeId },
+            include: {
+              participantStatuses: { orderBy: { participantName: "asc" } },
+            },
+          })
+        : null;
+      return NextResponse.json(
+        serializeRecordingState(stoppedTarget, false),
+      );
+    }
+
+    // Untargeted stop keeps its existing idempotent behavior: if there's no
+    // active take (already stopped, or a retry after the first stop landed),
+    // report inactive so a retrying client converges.
     const current = await findActiveTake(id);
     if (!current) {
       return NextResponse.json(serializeRecordingState(null, false));

@@ -55,7 +55,8 @@ export async function POST(
         // that whole start is atomic w.r.t. finalize.
         const activeTake = await tx.recordingTake.findFirst({
           where: { sessionId: id, status: "recording" },
-          select: { id: true },
+          orderBy: { startedAt: "desc" },
+          select: { id: true, startedAt: true },
         });
 
         const tracks = await tx.track.findMany({
@@ -71,19 +72,35 @@ export async function POST(
             status: t.status,
           }));
 
-        if (activeTake || pending.length > 0) {
-          return { blocked: true as const, pending };
+        if (pending.length > 0) {
+          return { kind: "pending" as const, pending };
+        }
+
+        if (activeTake) {
+          return { kind: "active_take" as const, activeTake };
         }
 
         await tx.session.updateMany({
           where: { id, status: "recording" },
           data: { status: "ready", finalizedAt: new Date() },
         });
-        return { blocked: false as const, pending };
+        return { kind: "ready" as const };
       });
 
-      if (decision.blocked) {
+      if (decision.kind === "pending") {
         return NextResponse.json({ pending: decision.pending }, { status: 409 });
+      }
+      if (decision.kind === "active_take") {
+        return NextResponse.json(
+          {
+            error: "An unfinished recording take is still active.",
+            activeTake: {
+              id: decision.activeTake.id,
+              startedAt: decision.activeTake.startedAt.toISOString(),
+            },
+          },
+          { status: 409 },
+        );
       }
     }
 
