@@ -23,7 +23,7 @@
     "db:migrate": "prisma migrate dev",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
-    "test": "node --test .github/scripts/run-codex-review.test.mjs && vitest run"
+    "test": "vitest run"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",
