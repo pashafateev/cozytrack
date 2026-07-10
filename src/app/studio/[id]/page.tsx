@@ -1589,6 +1589,15 @@ function RoomContent({
         return false;
       }
 
+      if (result.stopPending || !recordingLifecycle.recording) {
+        // A stop arrived while the recorders were still starting. It is
+        // already waiting inside the controller and will finalize the started
+        // slots; the stop path owns studio state from here, so flipping to
+        // `recording` now would resurrect the UI/status after the room
+        // stopped. The recorders did start, so this is not a start failure.
+        return true;
+      }
+
       setRecordingSessionStartedAtSync(sessionStartedAtIso);
       scheduleRecordingConfirmationCheck(sessionStartedAtIso);
       setStudioStateSync("recording");
@@ -1646,7 +1655,10 @@ function RoomContent({
     // even if the upload pipeline hangs. The controller snapshots its own
     // per-slot state, so a hypothetical concurrent re-record (blocked by the
     // finalizing-state gate, but defended in depth there) cannot corrupt the
-    // finalize.
+    // finalize. If the take is still starting, controller.stop() waits for
+    // startup to settle and then stops whatever started — the paired
+    // stopPending signal keeps the start path from flipping back to
+    // `recording`.
     setStudioStateSync("finalizing");
     void broadcastRecordingStatus(
       "finalizing",

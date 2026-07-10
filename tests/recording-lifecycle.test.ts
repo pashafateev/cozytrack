@@ -91,9 +91,12 @@ function manifest(
   };
 }
 
-function makeHarness(options: { failRecorderStartAt?: number } = {}) {
+function makeHarness(
+  options: { failRecorderStartAt?: number; gateRecorderStartAt?: number } = {},
+) {
   const log: string[] = [];
   const recorders: FakeRecorder[] = [];
+  const recorderStartGate = deferred<void>();
   const events = {
     recovery: [] as (RecordingBackupManifest | null)[],
     errors: [] as (string | null)[],
@@ -252,6 +255,9 @@ function makeHarness(options: { failRecorderStartAt?: number } = {}) {
       if (recorders.length === options.failRecorderStartAt) {
         recorder.startError = new Error("recorder start failed");
       }
+      if (recorders.length === options.gateRecorderStartAt) {
+        recorder.startGate = recorderStartGate.promise;
+      }
       recorders.push(recorder);
       return recorder;
     },
@@ -276,6 +282,7 @@ function makeHarness(options: { failRecorderStartAt?: number } = {}) {
     advance: (ms: number) => {
       clock += ms;
     },
+    releaseRecorderStart: () => recorderStartGate.resolve(),
   };
 }
 
@@ -880,25 +887,17 @@ describe("RecordingLifecycleController stop", () => {
   });
 
   it("holds a stop that lands while a recorder is still starting", async () => {
-    const h = makeHarness();
-    const startGate = deferred<void>();
     // Slot 2's recorder blocks in start(); slot 1 is already capturing.
-    const armGate = setInterval(() => {
-      if (h.recorders.length === 2 && !h.recorders[1].started) {
-        h.recorders[1].startGate = startGate.promise;
-        clearInterval(armGate);
-      }
-    }, 0);
+    const h = makeHarness({ gateRecorderStartAt: 1 });
 
     const startPromise = h.controller.start([slotSpec(1), slotSpec(2)], START_OPTS);
     await settle();
-    clearInterval(armGate);
 
     const stopPromise = h.controller.stop();
     await settle();
     expect(h.recorders[0].stopped).toBe(false);
 
-    startGate.resolve();
+    h.releaseRecorderStart();
     const [startResult, stopResult] = await Promise.all([
       startPromise,
       stopPromise,

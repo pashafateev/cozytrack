@@ -177,7 +177,15 @@ export type RecordingStartFailureStage =
   | "recorder-start";
 
 export type RecordingStartResult =
-  | { ok: true }
+  | {
+      ok: true;
+      /**
+       * A stop() arrived while the slots were still starting. It is already
+       * waiting inside the controller and will finalize the take; the caller
+       * must NOT treat the studio as recording.
+       */
+      stopPending?: boolean;
+    }
   | { ok: false; stage: RecordingStartFailureStage };
 
 export interface RecordingStopResult {
@@ -218,6 +226,10 @@ function backupErrorMessage(error: unknown): string {
 export class RecordingLifecycleController {
   private phase: "idle" | "starting" | "recording" | "stopping" = "idle";
   private slots: SlotState[] = [];
+  // The in-flight start attempt (never rejects), so a stop() that lands
+  // mid-start can wait for startup to settle instead of being dropped.
+  private startAttempt: Promise<unknown> | null = null;
+  private stopRequestedWhileStarting = false;
   // Monotonic sequence for backup surfacing so aggregation can order state
   // changes without trusting manifest timestamps.
   private surfaceSeq = 0;
@@ -234,6 +246,11 @@ export class RecordingLifecycleController {
     return this.phase !== "idle";
   }
 
+  /** True only while slots are actually capturing (start settled, stop not begun). */
+  get recording(): boolean {
+    return this.phase === "recording";
+  }
+
   async start(
     specs: RecordingSlotSpec[],
     options: RecordingStartOptions,
@@ -241,6 +258,34 @@ export class RecordingLifecycleController {
     if (this.phase !== "idle") return { ok: false, stage: "already-active" };
     if (specs.length === 0) return { ok: false, stage: "no-slots" };
     this.phase = "starting";
+    this.stopRequestedWhileStarting = false;
+
+    const attempt = this.beginAllSlots(specs, options);
+    // Held for stop(): a stop that lands mid-start waits on this (the derived
+    // promise never rejects) and then stops whatever actually started.
+    this.startAttempt = attempt.then(
+      () => undefined,
+      () => undefined,
+    );
+    try {
+      const result = await attempt;
+      if (result.ok && this.stopRequestedWhileStarting) {
+        // Deterministic signal regardless of microtask ordering: the stop was
+        // requested before startup settled, so the caller must not flip into
+        // the recording state — the waiting stop() finalizes the take.
+        return { ok: true, stopPending: true };
+      }
+      return result;
+    } finally {
+      this.startAttempt = null;
+      this.stopRequestedWhileStarting = false;
+    }
+  }
+
+  private async beginAllSlots(
+    specs: RecordingSlotSpec[],
+    options: RecordingStartOptions,
+  ): Promise<RecordingStartResult> {
     this.deps.tracker.reset();
     this.slotManifests.clear();
     this.slotErrors.clear();
@@ -264,12 +309,21 @@ export class RecordingLifecycleController {
       };
     }
 
+    // The phase must flip before this promise resolves so a stop() waiting on
+    // the attempt observes "recording" and proceeds.
     this.slots = started;
     this.phase = "recording";
     return { ok: true };
   }
 
   async stop(): Promise<RecordingStopResult> {
+    // A stop that lands while the take is still starting must not be dropped:
+    // wait for startup to settle, then stop whatever actually started. The
+    // start() caller is told via stopPending that this stop owns the take.
+    if (this.phase === "starting") {
+      this.stopRequestedWhileStarting = true;
+      if (this.startAttempt) await this.startAttempt;
+    }
     if (this.phase !== "recording") {
       return { stopped: false, anyCompleted: false };
     }
