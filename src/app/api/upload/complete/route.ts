@@ -39,7 +39,6 @@ export async function POST(req: NextRequest) {
 
     const existingTrack = await db.track.findUnique({
       where: { id: trackId },
-      select: { sessionId: true },
     });
     if (!existingTrack) {
       return NextResponse.json({ error: "Track not found" }, { status: 404 });
@@ -58,9 +57,11 @@ export async function POST(req: NextRequest) {
     if (existingSegment.trackId !== trackId) {
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
-    if (existingSegment.status === "complete") {
-      const track = await db.track.findUnique({ where: { id: trackId } });
-      return NextResponse.json(track);
+    if (
+      existingSegment.status === "complete" &&
+      existingTrack.status === "complete"
+    ) {
+      return NextResponse.json(existingTrack);
     }
     if (existingSegment.status === "failed") {
       return NextResponse.json(
@@ -69,14 +70,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    await db.trackSegment.update({
-      where: { id: segmentId },
-      data: {
-        status: "complete",
-        durationMs: durationMs ?? null,
-        completedAt: new Date(),
-      },
-    });
+    if (existingSegment.status !== "complete") {
+      await db.trackSegment.update({
+        where: { id: segmentId },
+        data: {
+          status: "complete",
+          durationMs: durationMs ?? null,
+          completedAt: new Date(),
+        },
+      });
+    }
 
     const segments = await db.trackSegment.findMany({
       where: { trackId },
