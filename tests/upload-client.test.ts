@@ -3,6 +3,7 @@ import {
   completeUpload,
   getPresignedUploadTarget,
   getPresignedUploadUrl,
+  uploadChunk,
 } from "@/lib/upload";
 
 const fetchMock = vi.fn();
@@ -115,6 +116,27 @@ describe("upload client auth", () => {
         headers: {
           "Content-Type": "application/json",
           "X-Cozytrack-Recording-Token": "recording-token",
+        },
+      }),
+    );
+  });
+
+  it("sends create-only protection when the presigned URL requires it", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 200 }));
+    const chunk = new Blob(["recording"], { type: "audio/webm" });
+
+    await uploadChunk(
+      "https://s3.example/recording.webm?X-Amz-SignedHeaders=host%3Bif-none-match",
+      chunk,
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("recording.webm"),
+      expect.objectContaining({
+        method: "PUT",
+        headers: {
+          "Content-Type": "audio/webm",
+          "If-None-Match": "*",
         },
       }),
     );

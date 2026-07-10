@@ -486,6 +486,51 @@ describe("/api/sessions/[id]/recording-state", () => {
     expect(mocks.takes.get("take-reported")?.status).toBe("stopped");
   });
 
+  it("waits for the session lock before applying an untargeted stop", async () => {
+    mocks.takes.set("take-active", {
+      id: "take-active",
+      sessionId: "s1",
+      startedAt: new Date("2026-07-08T12:00:00.000Z"),
+      stoppedAt: null,
+      status: "recording",
+    });
+
+    let enterCriticalSection: () => void = () => {};
+    const criticalSectionEntered = new Promise<void>((resolve) => {
+      enterCriticalSection = resolve;
+    });
+    let releaseCriticalSection: () => void = () => {};
+    const holdCriticalSection = new Promise<void>((resolve) => {
+      releaseCriticalSection = resolve;
+    });
+    const presignCriticalSection = withSessionLock("s1", async () => {
+      enterCriticalSection();
+      await holdCriticalSection;
+    });
+    await criticalSectionEntered;
+
+    let stopSettled = false;
+    const stopPromise = setRecordingState(
+      request("POST", { active: false }),
+      params(),
+    ).then((response) => {
+      stopSettled = true;
+      return response;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const stopSettledWhileLocked = stopSettled;
+    const statusWhileLocked = mocks.takes.get("take-active")?.status;
+    releaseCriticalSection();
+    await presignCriticalSection;
+    const stop = await stopPromise;
+
+    expect(stopSettledWhileLocked).toBe(false);
+    expect(statusWhileLocked).toBe("recording");
+    expect(stop.status).toBe(200);
+    expect(mocks.takes.get("take-active")?.status).toBe("stopped");
+  });
+
   it("treats status, not stoppedAt, as the active signal", async () => {
     // A take whose stop write landed (status stopped) must never read as active,
     // even though a returning participant might still hold a stale reference.

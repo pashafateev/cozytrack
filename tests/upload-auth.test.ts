@@ -400,6 +400,7 @@ describe("recording upload auth", () => {
     const { recordingToken } = (await start.json()) as {
       recordingToken: string;
     };
+    mocks.getPresignedPutUrl.mockClear();
 
     const res = await presignUpload(
       postJson(
@@ -412,6 +413,10 @@ describe("recording upload auth", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { key: string; url: string };
     expect(body.key).toBe("sessions/s1/tracks/t1/recording.webm");
+    expect(mocks.getPresignedPutUrl).toHaveBeenCalledWith(
+      "sessions/s1/tracks/t1/recording.webm",
+      { createOnly: true },
+    );
   });
 
   it("rejects a recording token for a different track", async () => {
@@ -461,6 +466,16 @@ describe("recording upload auth", () => {
       durationMs: 12345,
     });
     expect(mocks.deleteTrackSegmentChunks).toHaveBeenCalledWith("s1", "t1", "t1");
+
+    const retry = await completeUpload(
+      postJson(
+        "/api/upload/complete",
+        { sessionId: "s1", trackId: "t1", durationMs: 12345 },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+    expect(retry.status).toBe(200);
+    expect(mocks.deleteTrackSegmentChunks).toHaveBeenCalledTimes(1);
   });
 
   it("allows authorized chunk presign and completion for a track created before finalization", async () => {

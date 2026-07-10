@@ -151,14 +151,30 @@ function postJson(
   });
 }
 
-async function putPresignedBytes(url: string, bytes: Uint8Array) {
+function presignedPutHeaders(url: string): Record<string, string> {
+  const signedHeaders = new URL(url).searchParams
+    .get("X-Amz-SignedHeaders")
+    ?.split(";");
+  return {
+    "content-type": "audio/webm",
+    ...(signedHeaders?.includes("if-none-match")
+      ? { "if-none-match": "*" }
+      : {}),
+  };
+}
+
+async function putPresignedBytesResponse(url: string, bytes: Uint8Array) {
   const body = new ArrayBuffer(bytes.byteLength);
   new Uint8Array(body).set(bytes);
-  const response = await fetch(url, {
+  return await fetch(url, {
     method: "PUT",
-    headers: { "content-type": "audio/webm" },
+    headers: presignedPutHeaders(url),
     body: new Blob([body], { type: "audio/webm" }),
   });
+}
+
+async function putPresignedBytes(url: string, bytes: Uint8Array) {
+  const response = await putPresignedBytesResponse(url, bytes);
 
   expect(response.ok).toBe(true);
 }
@@ -394,7 +410,8 @@ describe("recording upload service integration", () => {
     );
     expect(finalUpload.status).toBe(200);
     const finalBody = (await finalUpload.json()) as { url: string };
-    await putPresignedBytes(finalBody.url, await makeTinyWebm(880));
+    const originalRecording = await makeTinyWebm(880);
+    await putPresignedBytes(finalBody.url, originalRecording);
 
     const complete = await modules.completeUpload(
       postJson(
@@ -422,6 +439,26 @@ describe("recording upload service integration", () => {
     await expect(overwrite.json()).resolves.toMatchObject({
       error: expect.stringContaining("already complete"),
     });
+
+    const heldUrlOverwrite = await putPresignedBytesResponse(
+      finalBody.url,
+      await makeTinyWebm(990),
+    );
+    expect(heldUrlOverwrite.status).toBe(412);
+
+    const repeatedComplete = await modules.completeUpload(
+      postJson(
+        "/api/upload/complete",
+        { sessionId, trackId, durationMs: 999 },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+    expect(repeatedComplete.status).toBe(200);
+    await expect(
+      modules.s3.getObjectBytes(
+        modules.s3.trackRecordingKey(sessionId, trackId),
+      ),
+    ).resolves.toEqual(originalRecording);
   });
 
   it("rejects a delayed initial presign after targeted recovery stops its take", async () => {
