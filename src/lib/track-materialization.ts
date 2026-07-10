@@ -302,6 +302,30 @@ export async function materializeTrack(
 
     if (sourceKeys.length === 1) {
       const [sourceKey] = sourceKeys;
+      // A segment can complete with no artifact ever uploaded — e.g. a slot
+      // concluded after its recorder failed to start. The default segment
+      // shares the logical output key, so the no-copy fast path below would
+      // otherwise mark the track complete with a nonexistent recording
+      // (phantom-complete). The multi-segment path self-checks: a missing
+      // source makes the remux read throw into the failure handler.
+      if (
+        !(await trackSegmentRecordingExists(
+          track.sessionId,
+          trackId,
+          sourceSegments[0]!.id,
+        ))
+      ) {
+        console.error(
+          `[materialize] track=${trackId} lone segment has no uploaded artifact; marking failed`,
+        );
+        return await markTrackFailed({
+          trackId,
+          currentS3Key: track.s3Key,
+          finalKey,
+          segmentCount: sourceSegments.length,
+          latestSegmentIndex: latestSegment.segmentIndex,
+        });
+      }
       if (sourceKey !== finalKey) {
         const readObjectBytes = deps.readObjectBytes ?? getObjectBytes;
         const writeObjectBytes = deps.writeObjectBytes ?? putObjectBytes;

@@ -25,7 +25,6 @@ import {
   useRemoteParticipants,
   useLocalParticipant,
 } from "@livekit/components-react";
-import { v4 as uuidv4 } from "uuid";
 import { CozyRecorder } from "@/lib/recorder";
 import { forceMonoStream, getTrackChannelCount } from "@/lib/audio-downmix";
 import { splitStereoStream } from "@/lib/audio-splitter";
@@ -42,9 +41,12 @@ import {
 } from "@/lib/recording-state";
 import {
   browserRecordingBackupStore,
-  recordingBackupId,
   type RecordingBackupManifest,
 } from "@/lib/recording-backup";
+import {
+  RecordingLifecycleController,
+  type RecordingSlotSpec,
+} from "@/lib/recording-lifecycle";
 import { retryLocalRecordingBackupUpload } from "@/lib/recording-backup-upload";
 import { getToken, LIVEKIT_URL } from "@/lib/livekit";
 import {
@@ -131,17 +133,6 @@ type SlotCapture = {
   slotId: LocalTrackSlotId;
   label: string;
   stream: MediaStream;
-};
-
-// A slot with an active recorder + upload identity mid-take.
-type ActiveSlot = {
-  slotId: LocalTrackSlotId;
-  label: string;
-  recorder: CozyRecorder;
-  trackId: string;
-  segmentId: string;
-  uploadToken?: string;
-  backupId: string | null;
 };
 
 // ---------- Helpers ----------
@@ -742,10 +733,6 @@ function RoomContent({
     (identity: string) => remoteParticipantNames.get(identity) ?? identity,
     [remoteParticipantNames],
   );
-  const recorderRef = useRef<CozyRecorder | null>(null);
-  const trackIdRef = useRef<string>("");
-  const segmentIdRef = useRef<string>("");
-  const recordingUploadTokenRef = useRef<string | undefined>(undefined);
   // Raw stream straight from getUserMedia — retained so we can stop the
   // underlying device tracks on teardown.
   const rawStreamRef = useRef<MediaStream | null>(null);
@@ -769,7 +756,6 @@ function RoomContent({
     useState<TwoChannelStatus>("idle");
   const [slotCaptures, setSlotCaptures] = useState<SlotCapture[]>([]);
   const slotCapturesRef = useRef<SlotCapture[]>([]);
-  const slotRecordersRef = useRef<ActiveSlot[]>([]);
   const [slotLevels, setSlotLevels] = useState<Map<string, number>>(new Map());
   const splitterDisposeRef = useRef<(() => void) | null>(null);
   const splitRawStreamRef = useRef<MediaStream | null>(null);
@@ -805,7 +791,6 @@ function RoomContent({
   const [localClipping, setLocalClipping] = useState(false);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animFrameRef = useRef<number>(0);
-  const recordingStartRef = useRef<number>(0);
   const localLevelRef = useRef(0);
   // Tracks consecutive clip frames + remaining hold ticks for the local meter,
   // so a transient peak still flashes instead of vanishing in one rAF.
@@ -1420,18 +1405,131 @@ function RoomContent({
     };
   }, [studioState]);
 
+  // ---- Unified slot recording lifecycle (issue #135 refactor) ----
+  // One controller drives every local recording, whatever the mode: the
+  // single-track mic is the degenerate 1-slot case, two-channel local mode
+  // passes 2 slots. The controller owns the per-slot pipeline (presign →
+  // recorder → chunked upload → crash-safe local backup → finalize); the
+  // studio keeps orchestration — takes, control messages, confirmation,
+  // timer, preview quality, and UI state. It is a plain object rather than a
+  // hook so the pipeline stays unit-testable despite the meters' rAF loops
+  // keeping React perpetually busy (see tests/recording-lifecycle.test.ts).
+  const recordingLifecycle = useMemo(
+    () =>
+      new RecordingLifecycleController({
+        sessionId,
+        uploadApi: {
+          getPresignedUploadTarget,
+          getPresignedUploadUrl,
+          uploadChunk,
+          completeUpload,
+        },
+        backupStore: browserRecordingBackupStore,
+        tracker: {
+          reset: trackerReset,
+          onChunkRecorded: trackerOnChunkRecorded,
+          trackUpload: trackerTrackUpload,
+          freezeRecorded: trackerFreezeRecorded,
+          waitForUploads: trackerWaitForUploads,
+        },
+        createRecorder: (stream) => new CozyRecorder(stream),
+        callbacks: {
+          onRecoveryBackup: setRecoveryBackupSync,
+          onBackupError: setBackupError,
+          onBackupUnavailable: () =>
+            showNotification("Local backup unavailable - remote upload only"),
+          onTiming: (event) => {
+            if (!timingDebug) return;
+            console.log(
+              "[TIMING]",
+              JSON.stringify({ ...event, perfNow: performance.now() }),
+            );
+          },
+        },
+      }),
+    [
+      sessionId,
+      setRecoveryBackupSync,
+      showNotification,
+      timingDebug,
+      trackerFreezeRecorded,
+      trackerOnChunkRecorded,
+      trackerReset,
+      trackerTrackUpload,
+      trackerWaitForUploads,
+    ],
+  );
+
+  // Which channels the next take records. Two-channel mode maps each split
+  // capture to its named host slot; otherwise the primary mic stream is the
+  // single slot.
+  const buildRecordingSlotSpecs = useCallback(():
+    | { ok: true; specs: RecordingSlotSpec[] }
+    | { ok: false; reason: string } => {
+    if (isHost && twoChannelMode) {
+      const captures = slotCapturesRef.current;
+      if (captures.length !== LOCAL_TRACK_SLOTS.length) {
+        return { ok: false, reason: "two-channel capture unavailable" };
+      }
+      return {
+        ok: true,
+        specs: captures.map((capture) => ({
+          localTrackSlotId: capture.slotId,
+          participantName: capture.label,
+          stream: capture.stream,
+          deviceInfo: {
+            deviceLabel: selectedMicLabel
+              ? `${capture.label} · ${selectedMicLabel}`
+              : capture.label,
+            deviceId: selectedMic,
+            isBuiltInMic: selectedMicIsBuiltIn,
+          },
+        })),
+      };
+    }
+    if (!streamRef.current) {
+      return { ok: false, reason: "microphone stream unavailable" };
+    }
+    return {
+      ok: true,
+      specs: [
+        {
+          participantName,
+          stream: streamRef.current,
+          deviceInfo: {
+            deviceLabel: selectedMicLabel,
+            deviceId: selectedMic,
+            isBuiltInMic: selectedMicIsBuiltIn,
+          },
+        },
+      ],
+    };
+  }, [
+    isHost,
+    participantName,
+    selectedMic,
+    selectedMicIsBuiltIn,
+    selectedMicLabel,
+    twoChannelMode,
+  ]);
+
   // Core recording start. Idempotent against double-invocation: if we're
   // already recording (our own click echoed via a later remote message, or the
   // button pressed twice), this is a no-op.
   const startRecordingLocal = useCallback(
-    async (sessionStartedAtIso: string, takeId?: string | null) => {
+    async (
+      sessionStartedAtIso: string,
+      takeId?: string | null,
+    ): Promise<boolean> => {
       const effectiveTakeId = takeId ?? recordingTakeIdRef.current;
       if (effectiveTakeId) recordingTakeIdRef.current = effectiveTakeId;
       // Hard invariant from issue #61: cannot start a new recording while a
       // previous one is finalizing. Enforced here so both local and remote
       // (control-message) start paths honor the invariant.
       if (studioStateRef.current === "finalizing") {
-        console.warn("Ignoring recording_start: currently finalizing previous recording");
+        console.warn(
+          "Ignoring recording_start: currently finalizing previous recording",
+        );
         void broadcastRecordingStatus(
           "failed",
           sessionStartedAtIso,
@@ -1440,7 +1538,7 @@ function RoomContent({
         );
         return false;
       }
-      if (studioStateRef.current === "recording" || recorderRef.current) {
+      if (studioStateRef.current === "recording" || recordingLifecycle.active) {
         void broadcastRecordingStatus(
           "recording",
           recordingSessionStartedAtRef.current ?? sessionStartedAtIso,
@@ -1450,195 +1548,54 @@ function RoomContent({
         return true;
       }
 
-      if (!streamRef.current) {
-        console.warn("Cannot start recording: microphone stream unavailable");
+      const slotSpecs = buildRecordingSlotSpecs();
+      if (!slotSpecs.ok) {
+        console.warn(`Cannot start recording: ${slotSpecs.reason}`);
         clearRecordingConfirmationState();
         void broadcastRecordingStatus(
           "failed",
           sessionStartedAtIso,
-          "microphone stream unavailable",
+          slotSpecs.reason,
           effectiveTakeId,
         );
         return false;
       }
 
-      const requestedTrackId = uuidv4();
-      trackIdRef.current = requestedTrackId;
-      segmentIdRef.current = requestedTrackId;
-      let trackId = requestedTrackId;
-      let segmentId = requestedTrackId;
-      recordingUploadTokenRef.current = undefined;
-
-      try {
-        const initialUpload = await getPresignedUploadTarget(
-          sessionId,
-          requestedTrackId,
-          0,
-          participantName,
-          {
-            deviceInfo: {
-              deviceLabel: selectedMicLabel,
-              deviceId: selectedMic,
-              isBuiltInMic: selectedMicIsBuiltIn,
-            },
-            sessionStartedAt: sessionStartedAtIso,
-            takeId: effectiveTakeId ?? undefined,
-          },
-        );
-        trackId = initialUpload.trackId ?? requestedTrackId;
-        segmentId = initialUpload.segmentId ?? requestedTrackId;
-        trackIdRef.current = trackId;
-        segmentIdRef.current = segmentId;
-        recordingUploadTokenRef.current = initialUpload.recordingToken;
-        try {
-          const backup = await browserRecordingBackupStore.startBackup({
-            sessionId,
-            trackId,
-            segmentId,
-            participantName,
-            recordingToken: initialUpload.recordingToken,
-          });
-          setRecoveryBackupSync(backup);
-          setBackupError(null);
-        } catch (backupErr) {
-          console.error("Failed to initialize local recording backup:", backupErr);
-          setRecoveryBackupSync(null);
-          setBackupError(backupErrorMessage(backupErr));
-          showNotification("Local backup unavailable - remote upload only");
-        }
-      } catch (err) {
-        console.error("Failed to initialize upload:", err);
-        clearRecordingConfirmationState();
-        void broadcastRecordingStatus(
-          "failed",
-          sessionStartedAtIso,
-          "upload initialization failed",
-          effectiveTakeId,
-        );
-        return false;
-      }
-
-      trackerReset();
-
-      const recorder = new CozyRecorder(streamRef.current);
-
-      recorder.onChunk((chunk, index) => {
-        const byteLength = chunk.size;
-        trackerOnChunkRecorded(byteLength);
-
-        if (timingDebug) {
-          console.log(
-            "[TIMING]",
-            JSON.stringify({
-              event: "chunk",
-              t: Date.now(),
-              perfNow: performance.now(),
-              trackId,
-              chunkIndex: index,
-              chunkBytes: byteLength,
-            }),
-          );
-        }
-
-        const capturedAt = new Date();
-        const backupSave = browserRecordingBackupStore
-          .saveChunk({
-            sessionId,
-            trackId,
-            segmentId,
-            chunkIndex: index,
-            chunk,
-            capturedAt,
-          })
-          .then((backup) => {
-            setRecoveryBackupSync(backup);
-            setBackupError(null);
-            return backup;
-          })
-          .catch((backupErr) => {
-            console.error("Failed to write local recording backup:", backupErr);
-            setBackupError(backupErrorMessage(backupErr));
-            return null;
-          });
-
-        const uploadPromise = (async () => {
-          const savedBackup = await backupSave;
-          try {
-            const url = await getPresignedUploadUrl(
-              sessionId,
-              trackId,
-              index,
-              undefined,
-              { segmentId },
-              recordingUploadTokenRef.current,
-            );
-            await uploadChunk(url, chunk);
-          } catch (uploadErr) {
-            if (savedBackup) {
-              try {
-                const backup = await browserRecordingBackupStore.markChunkFailed(
-                  sessionId,
-                  trackId,
-                  index,
-                  uploadErr,
-                  segmentId,
-                );
-                setRecoveryBackupSync(backup);
-              } catch (backupErr) {
-                console.error("Failed to mark local backup chunk failed:", backupErr);
-              }
-            }
-            throw uploadErr;
-          }
-          if (savedBackup) {
-            try {
-              const backup = await browserRecordingBackupStore.markChunkUploaded(
-                sessionId,
-                trackId,
-                index,
-                segmentId,
-              );
-              setRecoveryBackupSync(backup);
-            } catch (backupErr) {
-              console.error("Failed to mark local backup chunk uploaded:", backupErr);
-              setBackupError(backupErrorMessage(backupErr));
-            }
-          }
-        })();
-
-        void trackerTrackUpload(byteLength, uploadPromise);
+      const result = await recordingLifecycle.start(slotSpecs.specs, {
+        sessionStartedAt: sessionStartedAtIso,
+        takeId: effectiveTakeId,
       });
-
-      recorderRef.current = recorder;
-      recordingStartRef.current = Date.now();
-
-      if (timingDebug) {
-        console.log(
-          "[TIMING]",
-          JSON.stringify({
-            event: "record-start",
-            t: recordingStartRef.current,
-            perfNow: performance.now(),
-            sessionStartedAt: sessionStartedAtIso,
-            trackId,
-            participant: participantName,
-          }),
-        );
-      }
-
-      try {
-        await recorder.start(5000);
-      } catch (err) {
-        console.error("Failed to start recorder:", err);
-        recorderRef.current = null;
+      if (!result.ok) {
+        if (result.stage === "already-active") {
+          // Lost a race against a concurrent start path — treat it like the
+          // idempotent early-return above.
+          void broadcastRecordingStatus(
+            "recording",
+            recordingSessionStartedAtRef.current ?? sessionStartedAtIso,
+            undefined,
+            effectiveTakeId,
+          );
+          return true;
+        }
         clearRecordingConfirmationState();
         void broadcastRecordingStatus(
           "failed",
           sessionStartedAtIso,
-          "recorder failed to start",
+          result.stage === "presign"
+            ? "upload initialization failed"
+            : "recorder failed to start",
           effectiveTakeId,
         );
         return false;
+      }
+
+      if (result.stopPending || !recordingLifecycle.recording) {
+        // A stop arrived while the recorders were still starting. It is
+        // already waiting inside the controller and will finalize the started
+        // slots; the stop path owns studio state from here, so flipping to
+        // `recording` now would resurrect the UI/status after the room
+        // stopped. The recorders did start, so this is not a start failure.
+        return true;
       }
 
       setRecordingSessionStartedAtSync(sessionStartedAtIso);
@@ -1662,26 +1619,18 @@ function RoomContent({
     },
     [
       broadcastRecordingStatus,
+      buildRecordingSlotSpecs,
       clearRecordingConfirmationState,
-      participantName,
+      recordingLifecycle,
       scheduleRecordingConfirmationCheck,
-      selectedMic,
-      selectedMicIsBuiltIn,
-      selectedMicLabel,
-      sessionId,
       setRecordingSessionStartedAtSync,
-      setRecoveryBackupSync,
       setStudioStateSync,
       showNotification,
       switchAudioQuality,
-      trackerOnChunkRecorded,
-      trackerReset,
-      trackerTrackUpload,
-      timingDebug,
     ],
   );
 
-  // Core recording stop. Idempotent: no-op when we have no active recorder or
+  // Core recording stop. Idempotent: no-op when we have no active recording or
   // we're already finalizing.
   const stopRecordingLocal = useCallback(async () => {
     const sessionStartedAtForStatus =
@@ -1690,7 +1639,7 @@ function RoomContent({
     if (studioStateRef.current === "finalizing") return;
     clearRecordingConfirmationState(false);
 
-    if (!recorderRef.current) {
+    if (!recordingLifecycle.active) {
       setRecordingSessionStartedAtSync(null);
       recordingTakeIdRef.current = null;
       void broadcastRecordingStatus(
@@ -1702,17 +1651,14 @@ function RoomContent({
       return;
     }
 
-    // Snapshot per-recording state into local consts BEFORE any await so a
-    // hypothetical concurrent attempt to re-record (blocked by the
-    // finalizing-state gate, but defended in depth here) cannot overwrite the
-    // values mid-finalize. Also transition synchronously so the elapsed timer
-    // tears down immediately — even if the upload pipeline below hangs.
-    const recorder = recorderRef.current;
-    const trackId = trackIdRef.current;
-    const segmentId = segmentIdRef.current || trackId;
-    const backupId = segmentId ? recordingBackupId(sessionId, segmentId) : null;
-    const recordingUploadToken = recordingUploadTokenRef.current;
-    const startedAt = recordingStartRef.current;
+    // Transition synchronously so the elapsed timer tears down immediately —
+    // even if the upload pipeline hangs. The controller snapshots its own
+    // per-slot state, so a hypothetical concurrent re-record (blocked by the
+    // finalizing-state gate, but defended in depth there) cannot corrupt the
+    // finalize. If the take is still starting, controller.stop() waits for
+    // startup to settle and then stops whatever started — the paired
+    // stopPending signal keeps the start path from flipping back to
+    // `recording`.
     setStudioStateSync("finalizing");
     void broadcastRecordingStatus(
       "finalizing",
@@ -1722,108 +1668,12 @@ function RoomContent({
     );
 
     try {
-      const blob = await recorder.stop();
-      const durationMs = Date.now() - startedAt;
-
-      if (timingDebug) {
-        console.log(
-          "[TIMING]",
-          JSON.stringify({
-            event: "record-stop",
-            t: Date.now(),
-            perfNow: performance.now(),
-            trackId,
-            startedAt,
-            durationMs,
-            finalBlobBytes: blob.size,
-          }),
-        );
-      }
-
-      // Freeze denominator — recording is done, no more chunks will arrive.
-      trackerFreezeRecorded();
-      if (backupId) {
-        try {
-          const backup = await browserRecordingBackupStore.markBackupAvailable(
-            backupId,
-            durationMs,
-          );
-          setRecoveryBackupSync(backup);
-        } catch (backupErr) {
-          console.error("Failed to mark local backup available:", backupErr);
-        }
-      }
-
-      // The final recording.webm upload is critical: if it fails, we must
-      // NOT call completeUpload (which marks the track complete and lets
-      // the server delete chunk files). Use rethrow so a failure surfaces
-      // here, lastError is set in the tracker (visible in the UI), and
-      // completeUpload is skipped.
-      const finalBytes = blob.size;
-      trackerOnChunkRecorded(finalBytes);
-      const finalUpload = (async () => {
-        const url = await getPresignedUploadUrl(
-          sessionId,
-          trackId,
-          9999,
-          undefined,
-          { segmentId },
-          recordingUploadToken,
-        );
-        await uploadChunk(url, blob);
-      })();
-      await trackerTrackUpload(finalBytes, finalUpload, { rethrow: true });
-
-      // Wait for any background chunk uploads still settling.
-      await trackerWaitForUploads();
-      await completeUpload(
-        sessionId,
-        trackId,
-        durationMs,
-        recordingUploadToken,
-        segmentId,
-      );
-
-      setHasRecorded(true);
-      if (backupId) {
-        try {
-          await browserRecordingBackupStore.clearBackup(backupId, "verified-upload");
-          setRecoveryBackupSync(null);
-          setBackupError(null);
-        } catch (backupErr) {
-          console.error("Failed to clear uploaded local backup:", backupErr);
-          setBackupError(backupErrorMessage(backupErr));
-        }
-      }
-    } catch (err) {
-      // Final upload (or stop()) failed. lastError is already populated by
-      // trackUpload's rethrow path; the recording stays incomplete.
-      console.error("Failed to stop recording:", err);
-      if (backupId) {
-        try {
-          const backup = await browserRecordingBackupStore.markBackupFailed(
-            backupId,
-            err,
-          );
-          setRecoveryBackupSync(backup);
-          setBackupError(null);
-        } catch (backupErr) {
-          console.error("Failed to mark local backup failed:", backupErr);
-          setBackupError(backupErrorMessage(backupErr));
-        }
-      }
+      const result = await recordingLifecycle.stop();
+      if (result.anyCompleted) setHasRecorded(true);
     } finally {
-      recorderRef.current = null;
-      segmentIdRef.current = "";
-      recordingUploadTokenRef.current = undefined;
-      // Hard invariant from issue #61: do not leave `finalizing` until the
-      // chunk-upload promise set is drained, regardless of error path. If the
-      // happy path above already drained, this is effectively a no-op.
-      try {
-        await trackerWaitForUploads();
-      } catch (drainErr) {
-        console.error("Failed while draining chunk uploads:", drainErr);
-      }
+      // The controller does not resolve until the chunk-upload promise set is
+      // drained (issue #61's finalizing invariant), so leaving `finalizing`
+      // here is safe on every path.
       setStudioStateSync("connected");
       setRecordingSessionStartedAtSync(null);
       recordingTakeIdRef.current = null;
@@ -1842,419 +1692,10 @@ function RoomContent({
   }, [
     broadcastRecordingStatus,
     clearRecordingConfirmationState,
-    sessionId,
-    setRecordingSessionStartedAtSync,
-    setRecoveryBackupSync,
-    setStudioStateSync,
-    switchAudioQuality,
-    trackerFreezeRecorded,
-    trackerOnChunkRecorded,
-    trackerTrackUpload,
-    trackerWaitForUploads,
-    timingDebug,
-  ]);
-
-  // ---- Two-channel slot recorders ----
-  // Set up one recorder for a single split channel: presign a slot-scoped
-  // track, wire chunk uploads (with crash-safe local backup) through the shared
-  // upload tracker, and start capturing. Throws on failure so the caller can
-  // roll back the whole two-channel start.
-  const beginSlotRecorder = useCallback(
-    async (
-      capture: SlotCapture,
-      sessionStartedAtIso: string,
-      takeId: string | null,
-    ): Promise<ActiveSlot> => {
-      const requestedTrackId = uuidv4();
-      const initialUpload = await getPresignedUploadTarget(
-        sessionId,
-        requestedTrackId,
-        0,
-        capture.label,
-        {
-          deviceInfo: {
-            deviceLabel: selectedMicLabel
-              ? `${capture.label} · ${selectedMicLabel}`
-              : capture.label,
-            deviceId: selectedMic,
-            isBuiltInMic: selectedMicIsBuiltIn,
-          },
-          sessionStartedAt: sessionStartedAtIso,
-          takeId: takeId ?? undefined,
-          localTrackSlotId: capture.slotId,
-        },
-      );
-      const trackId = initialUpload.trackId ?? requestedTrackId;
-      const segmentId = initialUpload.segmentId ?? requestedTrackId;
-      const uploadToken = initialUpload.recordingToken;
-
-      let backupId: string | null = null;
-      try {
-        await browserRecordingBackupStore.startBackup({
-          sessionId,
-          trackId,
-          segmentId,
-          participantName: capture.label,
-          recordingToken: uploadToken,
-        });
-        backupId = recordingBackupId(sessionId, segmentId);
-      } catch (backupErr) {
-        console.error("Failed to init local slot backup:", backupErr);
-      }
-
-      const recorder = new CozyRecorder(capture.stream);
-      recorder.onChunk((chunk, index) => {
-        const byteLength = chunk.size;
-        trackerOnChunkRecorded(byteLength);
-        const capturedAt = new Date();
-        const backupSave = backupId
-          ? browserRecordingBackupStore
-              .saveChunk({
-                sessionId,
-                trackId,
-                segmentId,
-                chunkIndex: index,
-                chunk,
-                capturedAt,
-              })
-              .catch((backupErr) => {
-                console.error("Failed to write local slot backup:", backupErr);
-                return null;
-              })
-          : Promise.resolve(null);
-
-        const uploadPromise = (async () => {
-          await backupSave;
-          const url = await getPresignedUploadUrl(
-            sessionId,
-            trackId,
-            index,
-            undefined,
-            { segmentId },
-            uploadToken,
-          );
-          await uploadChunk(url, chunk);
-          if (backupId) {
-            try {
-              await browserRecordingBackupStore.markChunkUploaded(
-                sessionId,
-                trackId,
-                index,
-                segmentId,
-              );
-            } catch (backupErr) {
-              console.error("Failed to mark slot chunk uploaded:", backupErr);
-            }
-          }
-        })();
-
-        void trackerTrackUpload(byteLength, uploadPromise);
-      });
-
-      await recorder.start(5000);
-      return {
-        slotId: capture.slotId,
-        label: capture.label,
-        recorder,
-        trackId,
-        segmentId,
-        uploadToken,
-        backupId,
-      };
-    },
-    [
-      sessionId,
-      selectedMic,
-      selectedMicLabel,
-      selectedMicIsBuiltIn,
-      trackerOnChunkRecorded,
-      trackerTrackUpload,
-    ],
-  );
-
-  // Finalize one slot's track: upload the final recording.webm, mark the track
-  // complete, and clear its backup. Each slot is independent — a failure here
-  // is contained (backup kept + marked failed) so it can never prevent a
-  // sibling channel from finalizing. Returns true iff the track completed.
-  const finalizeSlot = useCallback(
-    async (slot: ActiveSlot, blob: Blob, durationMs: number): Promise<boolean> => {
-      const finalBytes = blob.size;
-      trackerOnChunkRecorded(finalBytes);
-      const finalUpload = (async () => {
-        const url = await getPresignedUploadUrl(
-          sessionId,
-          slot.trackId,
-          9999,
-          undefined,
-          { segmentId: slot.segmentId },
-          slot.uploadToken,
-        );
-        await uploadChunk(url, blob);
-      })();
-      try {
-        await trackerTrackUpload(finalBytes, finalUpload, { rethrow: true });
-        // Drain every in-flight upload (both channels' background chunk PUTs
-        // and final blobs) before completing. /complete deletes the temporary
-        // chunk objects, so a slow chunk PUT that lands afterwards would leave
-        // stale objects — the single-track path waits here for the same reason.
-        await trackerWaitForUploads();
-        await completeUpload(
-          sessionId,
-          slot.trackId,
-          durationMs,
-          slot.uploadToken,
-          slot.segmentId,
-        );
-        if (slot.backupId) {
-          try {
-            await browserRecordingBackupStore.clearBackup(
-              slot.backupId,
-              "verified-upload",
-            );
-          } catch (backupErr) {
-            console.error("Failed to clear slot backup:", backupErr);
-          }
-        }
-        return true;
-      } catch (err) {
-        console.error(`Failed to finalize slot ${slot.slotId}:`, err);
-        if (slot.backupId) {
-          try {
-            // Surface the failed backup into React state — same as the
-            // single-track path — so the recovery panel (Retry/Download/Clear)
-            // renders in-session. Without this the backup is kept on disk but
-            // invisible until a reload re-runs listBackups(). We only surface on
-            // *failure*, not on startBackup, so a successful two-channel take
-            // never leaves a stale panel behind.
-            const failedBackup = await browserRecordingBackupStore.markBackupFailed(
-              slot.backupId,
-              err,
-            );
-            setRecoveryBackupSync(failedBackup);
-            setBackupError(null);
-          } catch (backupErr) {
-            console.error("Failed to mark slot backup failed:", backupErr);
-            setBackupError(backupErrorMessage(backupErr));
-          }
-        } else {
-          // No local backup for this channel — at least tell the host the
-          // upload failed rather than failing silently.
-          setBackupError(backupErrorMessage(err));
-        }
-        return false;
-      }
-    },
-    [
-      sessionId,
-      setBackupError,
-      setRecoveryBackupSync,
-      trackerOnChunkRecorded,
-      trackerTrackUpload,
-      trackerWaitForUploads,
-    ],
-  );
-
-  // Start both channel recorders as a single logical "start". Mirrors the
-  // orchestration in startRecordingLocal (state, confirmation, broadcast,
-  // preview-quality switch) but drives the slot array instead of one recorder.
-  const startLocalSlots = useCallback(
-    async (
-      sessionStartedAtIso: string,
-      takeId?: string | null,
-    ): Promise<boolean> => {
-      const effectiveTakeId = takeId ?? recordingTakeIdRef.current;
-      if (effectiveTakeId) recordingTakeIdRef.current = effectiveTakeId;
-      if (studioStateRef.current === "finalizing") {
-        void broadcastRecordingStatus(
-          "failed",
-          sessionStartedAtIso,
-          "still finalizing previous recording",
-          effectiveTakeId,
-        );
-        return false;
-      }
-      if (
-        studioStateRef.current === "recording" ||
-        slotRecordersRef.current.length > 0
-      ) {
-        void broadcastRecordingStatus(
-          "recording",
-          recordingSessionStartedAtRef.current ?? sessionStartedAtIso,
-          undefined,
-          effectiveTakeId,
-        );
-        return true;
-      }
-
-      const captures = slotCapturesRef.current;
-      if (captures.length !== LOCAL_TRACK_SLOTS.length) {
-        clearRecordingConfirmationState();
-        void broadcastRecordingStatus(
-          "failed",
-          sessionStartedAtIso,
-          "two-channel capture unavailable",
-          effectiveTakeId,
-        );
-        return false;
-      }
-
-      trackerReset();
-      recordingStartRef.current = Date.now();
-
-      const started: ActiveSlot[] = [];
-      try {
-        for (const capture of captures) {
-          started.push(
-            await beginSlotRecorder(capture, sessionStartedAtIso, effectiveTakeId),
-          );
-        }
-      } catch (err) {
-        console.error("Failed to start two-channel recorders:", err);
-        // Two-channel start is all-or-nothing. Any slot that DID start already
-        // created a server track/segment — finalize it through the normal path
-        // so it doesn't linger in `recording` waiting on recovery. Best-effort:
-        // stop the recorder, then run finalizeSlot with whatever it captured.
-        const durationMs = Date.now() - recordingStartRef.current;
-        trackerFreezeRecorded();
-        await Promise.all(
-          started.map(async (slot) => {
-            let blob: Blob | null = null;
-            try {
-              blob = await slot.recorder.stop();
-            } catch (stopErr) {
-              console.error("Failed to stop partial slot recorder:", stopErr);
-            }
-            if (blob) await finalizeSlot(slot, blob, durationMs);
-          }),
-        );
-        try {
-          await trackerWaitForUploads();
-        } catch (drainErr) {
-          console.error("Failed while draining partial slot uploads:", drainErr);
-        }
-        slotRecordersRef.current = [];
-        clearRecordingConfirmationState();
-        void broadcastRecordingStatus(
-          "failed",
-          sessionStartedAtIso,
-          "recorder failed to start",
-          effectiveTakeId,
-        );
-        return false;
-      }
-
-      slotRecordersRef.current = started;
-      setRecordingSessionStartedAtSync(sessionStartedAtIso);
-      scheduleRecordingConfirmationCheck(sessionStartedAtIso);
-      setStudioStateSync("recording");
-      void broadcastRecordingStatus(
-        "recording",
-        sessionStartedAtIso,
-        undefined,
-        effectiveTakeId,
-      );
-
-      const switched = await switchAudioQuality("bandwidth-saving");
-      if (switched) {
-        showNotification("Preview quality reduced — local recording is unaffected");
-      } else {
-        showNotification("Couldn't switch audio quality — check console");
-      }
-      return true;
-    },
-    [
-      beginSlotRecorder,
-      broadcastRecordingStatus,
-      clearRecordingConfirmationState,
-      finalizeSlot,
-      scheduleRecordingConfirmationCheck,
-      setRecordingSessionStartedAtSync,
-      setStudioStateSync,
-      showNotification,
-      switchAudioQuality,
-      trackerFreezeRecorded,
-      trackerReset,
-      trackerWaitForUploads,
-    ],
-  );
-
-  // Stop both channel recorders, finalize each track, then return to connected.
-  const stopLocalSlots = useCallback(async () => {
-    const sessionStartedAtForStatus =
-      recordingSessionStartedAtRef.current ?? undefined;
-    const takeIdForStatus = recordingTakeIdRef.current;
-    if (studioStateRef.current === "finalizing") return;
-    clearRecordingConfirmationState(false);
-
-    const slots = slotRecordersRef.current;
-    if (slots.length === 0) {
-      setRecordingSessionStartedAtSync(null);
-      recordingTakeIdRef.current = null;
-      void broadcastRecordingStatus(
-        "connected",
-        sessionStartedAtForStatus,
-        undefined,
-        takeIdForStatus,
-      );
-      return;
-    }
-
-    slotRecordersRef.current = [];
-    const startedAt = recordingStartRef.current;
-    setStudioStateSync("finalizing");
-    void broadcastRecordingStatus(
-      "finalizing",
-      sessionStartedAtForStatus,
-      undefined,
-      takeIdForStatus,
-    );
-
-    try {
-      const stopped = await Promise.all(
-        slots.map(async (slot) => ({ slot, blob: await slot.recorder.stop() })),
-      );
-      const durationMs = Date.now() - startedAt;
-      trackerFreezeRecorded();
-
-      // Finalize channels independently: each slot's final upload + complete is
-      // self-contained, so one channel failing (kept + marked failed in its
-      // backup) can never strand a sibling channel that finalized cleanly.
-      const outcomes = await Promise.all(
-        stopped.map(({ slot, blob }) => finalizeSlot(slot, blob, durationMs)),
-      );
-      await trackerWaitForUploads();
-
-      if (outcomes.some(Boolean)) setHasRecorded(true);
-    } catch (err) {
-      console.error("Failed to stop two-channel recording:", err);
-    } finally {
-      try {
-        await trackerWaitForUploads();
-      } catch (drainErr) {
-        console.error("Failed while draining slot uploads:", drainErr);
-      }
-      setStudioStateSync("connected");
-      setRecordingSessionStartedAtSync(null);
-      recordingTakeIdRef.current = null;
-      void broadcastRecordingStatus(
-        "connected",
-        sessionStartedAtForStatus,
-        undefined,
-        takeIdForStatus,
-      );
-      void switchAudioQuality("full").catch((err) => {
-        console.error("Failed to restore audio quality:", err);
-      });
-    }
-  }, [
-    broadcastRecordingStatus,
-    clearRecordingConfirmationState,
-    finalizeSlot,
+    recordingLifecycle,
     setRecordingSessionStartedAtSync,
     setStudioStateSync,
     switchAudioQuality,
-    trackerFreezeRecorded,
-    trackerWaitForUploads,
   ]);
 
   const handleRetryLocalBackupUpload = useCallback(async () => {
@@ -2361,17 +1802,16 @@ function RoomContent({
       startingRef.current ||
       studioStateRef.current === "recording" ||
       studioStateRef.current === "finalizing" ||
-      recorderRef.current ||
-      slotRecordersRef.current.length > 0
+      recordingLifecycle.active
     ) {
       return;
     }
 
     // In two-channel mode, refuse to start a take / broadcast to the room until
     // the split capture is proven ready — otherwise we'd blip remote
-    // participants and create a throwaway take that startLocalSlots then has to
-    // roll back. The REC button is also disabled in this state; this guards the
-    // programmatic/devtools path.
+    // participants and create a throwaway take that the lifecycle controller
+    // then has to roll back. The REC button is also disabled in this state;
+    // this guards the programmatic/devtools path.
     if (
       twoChannelMode &&
       slotCapturesRef.current.length !== LOCAL_TRACK_SLOTS.length
@@ -2418,9 +1858,7 @@ function RoomContent({
         return;
       }
 
-      const started = twoChannelMode
-        ? await startLocalSlots(sessionStartedAt, takeId)
-        : await startRecordingLocal(sessionStartedAt, takeId);
+      const started = await startRecordingLocal(sessionStartedAt, takeId);
       if (!started) {
         showNotification("Couldn't start your recorder — stopping the room");
         try {
@@ -2442,8 +1880,8 @@ function RoomContent({
     isHost,
     sessionId,
     transport,
+    recordingLifecycle,
     startRecordingLocal,
-    startLocalSlots,
     twoChannelMode,
     showNotification,
   ]);
@@ -2469,11 +1907,7 @@ function RoomContent({
         console.error("Failed to broadcast recording_stop:", err);
         showNotification("Couldn't tell the room to stop recording");
       }
-      if (twoChannelMode) {
-        await stopLocalSlots();
-      } else {
-        await stopRecordingLocal();
-      }
+      await stopRecordingLocal();
     } finally {
       stoppingRef.current = false;
     }
@@ -2482,8 +1916,6 @@ function RoomContent({
     sessionId,
     transport,
     stopRecordingLocal,
-    stopLocalSlots,
-    twoChannelMode,
     showNotification,
   ]);
 
