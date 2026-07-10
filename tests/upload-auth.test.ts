@@ -503,6 +503,42 @@ describe("recording upload auth", () => {
     });
   });
 
+  it("does not issue a writable URL for a complete track after finalization", async () => {
+    mocks.sessions.set("s1", "ready");
+    mocks.tracks.set("t1", {
+      id: "t1",
+      sessionId: "s1",
+      participantName: "Alice",
+      s3Key: "sessions/s1/tracks/t1/recording.webm",
+      status: "complete",
+      durationMs: 12345,
+    });
+    mocks.segments.set("t1", {
+      id: "t1",
+      trackId: "t1",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/t1/",
+      status: "complete",
+      durationMs: 12345,
+    });
+    const recordingToken = await issueRecordingUploadToken("s1", "t1");
+    mocks.getPresignedPutUrl.mockClear();
+
+    const res = await presignUpload(
+      postJson(
+        "/api/upload/presign",
+        { sessionId: "s1", trackId: "t1", partNumber: 9999 },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toMatchObject({
+      error: expect.stringContaining("already complete"),
+    });
+    expect(mocks.getPresignedPutUrl).not.toHaveBeenCalled();
+  });
+
   it("forbids completing a track outside the requested session", async () => {
     mocks.tracks.set("t1", {
       id: "t1",
