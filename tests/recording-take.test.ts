@@ -156,10 +156,26 @@ vi.mock("@/lib/db", () => {
       ),
     },
   };
+  let transactionTail = Promise.resolve();
+  const transaction = vi.fn(
+    async (fn: (tx: typeof client) => Promise<unknown>) => {
+      const previous = transactionTail;
+      let release = () => undefined;
+      transactionTail = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await previous;
+      try {
+        return await fn(client);
+      } finally {
+        release();
+      }
+    },
+  );
   return {
     db: {
       ...client,
-      $transaction: async (fn: (tx: typeof client) => unknown) => fn(client),
+      $transaction: transaction,
     },
   };
 });
@@ -180,6 +196,7 @@ import {
   PATCH as reportRecordingState,
   POST as setRecordingState,
 } from "@/app/api/sessions/[id]/recording-state/route";
+import { withSessionLock } from "@/lib/session-lock";
 
 function params(id = "s1") {
   return { params: Promise.resolve({ id }) };
@@ -418,6 +435,55 @@ describe("/api/sessions/[id]/recording-state", () => {
       status: "recording",
       stoppedAt: null,
     });
+  });
+
+  it("waits for the session lock before applying a targeted recovery stop", async () => {
+    mocks.takes.set("take-reported", {
+      id: "take-reported",
+      sessionId: "s1",
+      startedAt: new Date("2026-07-08T12:00:00.000Z"),
+      stoppedAt: null,
+      status: "recording",
+    });
+
+    let enterCriticalSection = () => undefined;
+    const criticalSectionEntered = new Promise<void>((resolve) => {
+      enterCriticalSection = resolve;
+    });
+    let releaseCriticalSection = () => undefined;
+    const holdCriticalSection = new Promise<void>((resolve) => {
+      releaseCriticalSection = resolve;
+    });
+
+    // Simulate an initial presign that already read take.status=recording and
+    // is paused before creating its track/segment while holding the session
+    // advisory lock.
+    const presignCriticalSection = withSessionLock("s1", async () => {
+      enterCriticalSection();
+      await holdCriticalSection;
+    });
+    await criticalSectionEntered;
+
+    let stopSettled = false;
+    const stopPromise = setRecordingState(
+      request("POST", { active: false, takeId: "take-reported" }),
+      params(),
+    ).then((response) => {
+      stopSettled = true;
+      return response;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const stopSettledWhileLocked = stopSettled;
+    const statusWhileLocked = mocks.takes.get("take-reported")?.status;
+
+    releaseCriticalSection();
+    await presignCriticalSection;
+    const stop = await stopPromise;
+    expect(stopSettledWhileLocked).toBe(false);
+    expect(statusWhileLocked).toBe("recording");
+    expect(stop.status).toBe(200);
+    expect(mocks.takes.get("take-reported")?.status).toBe("stopped");
   });
 
   it("treats status, not stoppedAt, as the active signal", async () => {
