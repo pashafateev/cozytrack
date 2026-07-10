@@ -478,6 +478,28 @@ describe("RecordingLifecycleController start", () => {
     );
   });
 
+  it("concludes the failed slot's server track when its recorder refuses to start", async () => {
+    // The presign already created a server track before recorder.start()
+    // rejected. With no recording data anywhere, the slot must still be
+    // completed server-side so materialization converges the track to failed
+    // instead of leaving it stuck in `recording`, which would 409-block
+    // session finalize forever (Codex P1 #2 on PR #165).
+    const h = makeHarness({ failRecorderStartAt: 0 });
+
+    const result = await h.controller.start([primarySpec()], START_OPTS);
+
+    expect(result).toEqual({ ok: false, stage: "recorder-start" });
+    expect(h.controller.active).toBe(false);
+    expect(h.uploadApi.completeUpload).toHaveBeenCalledTimes(1);
+    expect(h.uploadApi.completeUpload).toHaveBeenCalledWith(
+      "session-1",
+      "track-primary",
+      undefined,
+      "token-primary",
+      "segment-primary",
+    );
+  });
+
   it("rolls back when a later slot's recorder fails to start", async () => {
     // The second recorder created refuses to start.
     const h = makeHarness({ failRecorderStartAt: 1 });
@@ -487,10 +509,21 @@ describe("RecordingLifecycleController start", () => {
     expect(result).toEqual({ ok: false, stage: "recorder-start" });
     expect(h.controller.active).toBe(false);
     expect(h.recorders[0].stopped).toBe(true);
-    expect(h.uploadApi.completeUpload).toHaveBeenCalledTimes(1);
-    expect(h.uploadApi.completeUpload.mock.calls[0][1]).toBe(
-      "track-host-local-ch-1",
-    );
+    // Both server tracks converge: the failing slot is concluded with no
+    // recording (duration undefined), the started sibling finalizes normally.
+    const completions = h.uploadApi.completeUpload.mock.calls.map((call) => ({
+      trackId: call[1],
+      durationMs: call[2],
+    }));
+    expect(completions).toHaveLength(2);
+    expect(completions).toContainEqual({
+      trackId: "track-host-local-ch-2",
+      durationMs: undefined,
+    });
+    expect(
+      completions.find((entry) => entry.trackId === "track-host-local-ch-1")
+        ?.durationMs,
+    ).toEqual(expect.any(Number));
   });
 
   it("survives a rollback where the started slot's recorder refuses to stop", async () => {
@@ -515,8 +548,16 @@ describe("RecordingLifecycleController start", () => {
 
     expect(result).toEqual({ ok: false, stage: "presign" });
     expect(h.controller.active).toBe(false);
-    // Nothing to finalize (no blob), but the rollback must not throw.
+    // Nothing to finalize (no blob), but the rollback must not throw — and
+    // the slot's server track stays open on purpose: chunks may already be
+    // uploaded, and /complete would delete them. The local backup is kept and
+    // marked failed so the recovery panel can re-drive the track.
     expect(h.uploadApi.completeUpload).not.toHaveBeenCalled();
+    expect(h.backupStore.markBackupFailed).toHaveBeenCalledWith(
+      "session-1:segment-host-local-ch-1",
+      expect.anything(),
+    );
+    expect(h.events.recovery.at(-1)?.state).toBe("failed");
   });
 });
 

@@ -195,6 +195,27 @@ describe("materializeTrack", () => {
     expect(mocks.remuxSegments).not.toHaveBeenCalled();
   });
 
+  it("marks the track failed when the lone segment completed without an uploaded artifact", async () => {
+    // A slot concluded after its recorder never started completes its segment
+    // with no recording.webm ever uploaded. The default segment shares the
+    // logical output key, so the no-copy fast path above would otherwise mark
+    // the track complete with a nonexistent artifact (phantom-complete).
+    seedTrack();
+    seedSegment({ id: "track-1", durationMs: null });
+    mocks.trackSegmentRecordingExists.mockResolvedValue(false);
+
+    const result = await materializeTrack("track-1", {
+      readObjectBytes: mocks.readObjectBytes,
+      writeObjectBytes: mocks.writeObjectBytes,
+      remuxSegments: mocks.remuxSegments,
+    });
+
+    expect(result).toMatchObject({ status: "failed" });
+    expect(mocks.tracks.get("track-1")).toMatchObject({ status: "failed" });
+    expect(mocks.writeObjectBytes).not.toHaveBeenCalled();
+    expect(mocks.remuxSegments).not.toHaveBeenCalled();
+  });
+
   it("remuxes multiple completed segments into the logical track artifact", async () => {
     seedTrack();
     seedSegment({ id: "track-1", segmentIndex: 0, durationMs: 1000 });
