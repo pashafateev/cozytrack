@@ -408,6 +408,62 @@ describe("recording upload service integration", () => {
     ).resolves.toMatchObject({ status: "ready" });
   });
 
+  it("rejects a delayed initial presign after targeted recovery stops its take", async () => {
+    const sessionId = await createSession("Stopped take presign guard");
+    const headers = await hostHeaders();
+    const started = await modules.setRecordingState(
+      postJson(
+        `/api/sessions/${sessionId}/recording-state`,
+        {
+          active: true,
+          sessionStartedAt: new Date().toISOString(),
+        },
+        headers,
+      ),
+      { params: Promise.resolve({ id: sessionId }) },
+    );
+    expect(started.status).toBe(200);
+    const startedBody = (await started.json()) as {
+      take: { id: string };
+    };
+
+    const stopped = await modules.setRecordingState(
+      postJson(
+        `/api/sessions/${sessionId}/recording-state`,
+        { active: false, takeId: startedBody.take.id },
+        headers,
+      ),
+      { params: Promise.resolve({ id: sessionId }) },
+    );
+    expect(stopped.status).toBe(200);
+
+    const delayedTrackId = `track-${randomUUID()}`;
+    const delayed = await modules.presignUpload(
+      postJson(
+        "/api/upload/presign",
+        {
+          sessionId,
+          trackId: delayedTrackId,
+          partNumber: 0,
+          participantName: "Delayed Participant",
+          takeId: startedBody.take.id,
+        },
+        headers,
+      ),
+    );
+
+    expect(delayed.status).toBe(409);
+    await expect(delayed.json()).resolves.toMatchObject({
+      error: expect.stringContaining("no longer active"),
+    });
+    await expect(
+      modules.db.track.findUnique({ where: { id: delayedTrackId } }),
+    ).resolves.toBeNull();
+    await expect(
+      modules.db.session.findUnique({ where: { id: sessionId } }),
+    ).resolves.toMatchObject({ status: "recording" });
+  });
+
   it("creates, stores, completes, and cleans up a recording through real Postgres and S3-compatible storage", async () => {
     const sessionId = await createSession();
     const trackId = `track-${randomUUID()}`;
