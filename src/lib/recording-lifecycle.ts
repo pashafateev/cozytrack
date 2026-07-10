@@ -455,9 +455,41 @@ export class RecordingLifecycleController {
       await recorder.start(timeSliceMs);
     } catch (err) {
       console.error("Failed to start recorder:", err);
+      // The presign above already created a server track for this slot, and a
+      // slot that never reaches `started` is skipped by the rollback. Conclude
+      // it here so the row can't sit in `recording` forever.
+      await this.concludeAbandonedSlot(slot);
       throw new SlotStartError("recorder-start", err);
     }
     return slot;
+  }
+
+  /**
+   * Converge the server track of a slot that presigned but never recorded:
+   * completing with no uploaded artifact drives materialization to mark the
+   * track failed, which — unlike a row stuck in `recording` — does not block
+   * session finalize. Only safe for slots with no recording data; a slot that
+   * captured anything keeps its track open so the uploaded chunks and local
+   * backup stay recoverable (/complete deletes the segment's chunk objects).
+   */
+  private async concludeAbandonedSlot(slot: SlotState): Promise<void> {
+    try {
+      // Nothing of this slot's can be in flight, but the drain-before-complete
+      // invariant is cheap to keep uniform across every completeUpload.
+      await this.deps.tracker.waitForUploads();
+      await this.deps.uploadApi.completeUpload(
+        this.deps.sessionId,
+        slot.trackId,
+        undefined,
+        slot.uploadToken,
+        slot.segmentId,
+      );
+    } catch (concludeErr) {
+      console.error(
+        `Failed to conclude abandoned slot ${slot.key} server-side:`,
+        concludeErr,
+      );
+    }
   }
 
   /**
@@ -476,6 +508,12 @@ export class RecordingLifecycleController {
           blob = await slot.recorder.stop();
         } catch (stopErr) {
           console.error("Failed to stop partial slot recorder:", stopErr);
+          // No blob to finalize, but data may already be at risk (uploaded
+          // chunks + local backup), so the server track deliberately stays
+          // open for recovery — concluding it would let /complete delete the
+          // chunk objects. Keep + surface the backup so the recovery panel
+          // can re-drive the track in-session.
+          await this.handleSlotFailure(slot, stopErr);
         }
         if (blob) {
           await this.finalizeSlot(slot, blob, this.now() - slot.startedAtMs);

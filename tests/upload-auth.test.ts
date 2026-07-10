@@ -205,6 +205,9 @@ vi.mock("@/lib/s3", () => ({
     segmentId === trackId
       ? `sessions/${sessionId}/tracks/${trackId}/recording.webm`
       : `sessions/${sessionId}/tracks/${trackId}/segments/${segmentId}/recording.webm`,
+  // These flows upload the final recording before completing, so the
+  // materialization artifact-existence check always sees it present.
+  trackSegmentRecordingExists: vi.fn(async () => true),
 }));
 
 vi.mock("@/lib/auth", async () => {
