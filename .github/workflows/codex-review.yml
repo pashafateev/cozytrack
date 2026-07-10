@@ -117,40 +117,72 @@ jobs:
           : > codex-review-output/final-message.md
           printf '%s\n' '${{ steps.pr_context.outputs.number }}' > codex-review-output/pr-number.txt
 
-      - name: Run Codex review
-        id: run_codex
+      - name: Set up latest Codex CLI
         if: steps.pr_context.outputs.same_repo == 'true' && steps.api_key.outputs.available == 'true'
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          model: gpt-5.5
-          sandbox: read-only
-          prompt: |
-            Review this pull request for bugs, regressions, security issues, and missing tests.
 
-            Scope:
-            - Repository: ${{ github.repository }}
-            - PR: #${{ steps.pr_context.outputs.number }}
-            - Base SHA: ${{ steps.pr_context.outputs.base_sha }}
-            - Head SHA: ${{ steps.pr_context.outputs.head_sha }}
-            - Trigger: ${{ github.event_name }}
-
-            Review only the changes introduced by this PR. Do not suggest broad refactors or style-only changes.
-            Prioritize actionable findings with file and line references. If there are no findings, say that clearly.
-            Do not edit files or create commits.
+      - name: Run Codex review with model fallback
+        if: steps.pr_context.outputs.same_repo == 'true' && steps.api_key.outputs.available == 'true'
+        env:
+          CODEX_REVIEW_FALLBACK_MODEL: ${{ vars.CODEX_REVIEW_FALLBACK_MODEL }}
+          CODEX_REVIEW_PROMPT: |
+            Review pull request #${{ steps.pr_context.outputs.number }} in ${{ github.repository }} for bugs, regressions, security issues, and missing tests.
+            Review only the changes from ${{ steps.pr_context.outputs.base_sha }} to ${{ steps.pr_context.outputs.head_sha }} (trigger: ${{ github.event_name }}). Do not suggest broad refactors or style-only changes.
+            Prioritize actionable findings with file and line references. If there are no findings, say that clearly. Do not edit files or create commits.
 
             Pull request title and body:
             ----
             ${{ steps.pr_context.outputs.title }}
             ${{ steps.pr_context.outputs.body }}
-
-      - name: Write Codex feedback artifact
-        if: steps.run_codex.outputs['final-message'] != ''
-        env:
-          CODEX_FINAL_MESSAGE: ${{ steps.run_codex.outputs['final-message'] }}
         run: |
-          mkdir -p codex-review-output
-          printf '%s\n' "$CODEX_FINAL_MESSAGE" > codex-review-output/final-message.md
+          set -uo pipefail
+          attempt_output="$RUNNER_TEMP/codex-review-attempt.md"
+
+          run_attempt() {
+            local label="$1"
+            local status
+            shift
+            rm -f "$attempt_output" || return 1
+            echo "::group::$label"
+            printf '%s\n' "$CODEX_REVIEW_PROMPT" | codex exec \
+              --cd "$GITHUB_WORKSPACE" \
+              --output-last-message "$attempt_output" \
+              --color never \
+              --sandbox read-only \
+              "$@" \
+              -
+            status=$?
+            echo "::endgroup::"
+
+            if [ "$status" -eq 0 ] && grep -q '[^[:space:]]' "$attempt_output"; then
+              mv "$attempt_output" codex-review-output/final-message.md || return 1
+              return 0
+            fi
+
+            echo "::warning::$label failed or returned empty feedback (exit $status)."
+            return 1
+          }
+
+          if run_attempt "Codex review with default model"; then
+            exit 0
+          fi
+
+          if [ -z "${CODEX_REVIEW_FALLBACK_MODEL:-}" ]; then
+            echo "::error::CODEX_REVIEW_FALLBACK_MODEL is not configured."
+            exit 1
+          fi
+
+          if run_attempt \
+            "Codex review with configured fallback model" \
+            --model "$CODEX_REVIEW_FALLBACK_MODEL"
+          then
+            exit 0
+          fi
+
+          echo "::error::Default and fallback Codex reviews both failed."
+          exit 1
 
       - name: Upload Codex feedback artifact
         if: always()
