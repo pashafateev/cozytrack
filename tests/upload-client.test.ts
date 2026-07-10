@@ -141,4 +141,15 @@ describe("upload client auth", () => {
       }),
     );
   });
+
+  it("treats a create-only precondition failure as an idempotent upload", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 412 }));
+
+    await expect(
+      uploadChunk(
+        "https://s3.example/recording.webm?X-Amz-SignedHeaders=host%3Bif-none-match",
+        new Blob(["recording"], { type: "audio/webm" }),
+      ),
+    ).resolves.toBeUndefined();
+  });
 });
