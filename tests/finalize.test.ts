@@ -10,8 +10,7 @@ type Session = {
 };
 
 const sessionStore = new Map<string, Session>();
-// Session ids that currently have an active (status "recording") RecordingTake.
-const activeTakeSessions = new Set<string>();
+const activeTakes = new Map<string, { id: string; startedAt: Date }>();
 
 function tracksFor(sessionId: string): Track[] {
   return sessionStore.get(sessionId)?.tracks ?? [];
@@ -73,8 +72,8 @@ vi.mock("@/lib/db", () => {
         }: {
           where: { sessionId: string; status?: string };
         }) =>
-          status === "recording" && activeTakeSessions.has(sessionId)
-            ? { id: `take-${sessionId}` }
+          status === "recording" && activeTakes.has(sessionId)
+            ? structuredClone(activeTakes.get(sessionId))
             : null,
       ),
     },
@@ -121,7 +120,7 @@ function req(): NextRequest {
 
 beforeEach(() => {
   sessionStore.clear();
-  activeTakeSessions.clear();
+  activeTakes.clear();
   vi.clearAllMocks();
 });
 
@@ -171,10 +170,18 @@ describe("POST /api/sessions/[id]/finalize", () => {
       finalizedAt: null,
       tracks: [],
     });
-    activeTakeSessions.add("s1");
+    const startedAt = new Date("2026-07-08T15:00:00.000Z");
+    activeTakes.set("s1", { id: "take-s1", startedAt });
 
     const res = await POST(req(), { params: Promise.resolve({ id: "s1" }) });
     expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toEqual({
+      error: "An unfinished recording take is still active.",
+      activeTake: {
+        id: "take-s1",
+        startedAt: startedAt.toISOString(),
+      },
+    });
     expect(sessionStore.get("s1")?.status).toBe("recording");
     expect(sessionStore.get("s1")?.finalizedAt).toBeNull();
   });

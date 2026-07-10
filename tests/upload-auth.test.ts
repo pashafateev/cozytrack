@@ -22,7 +22,7 @@ type TrackSegment = {
 };
 
 const mocks = vi.hoisted(() => ({
-  sessions: new Set<string>(),
+  sessions: new Map<string, string>(),
   tracks: new Map<string, Track>(),
   segments: new Map<string, TrackSegment>(),
   getPresignedPutUrl: vi.fn(async (key: string) => `https://s3.example/${key}`),
@@ -37,7 +37,7 @@ vi.mock("@/lib/db", () => {
     $executeRaw: async () => 0,
     session: {
       findUnique: vi.fn(async ({ where: { id } }: { where: { id: string } }) =>
-        mocks.sessions.has(id) ? { id } : null,
+        mocks.sessions.has(id) ? { id, status: mocks.sessions.get(id) } : null,
       ),
     },
     recordingTake: {
@@ -251,7 +251,7 @@ beforeEach(() => {
   mocks.sessions.clear();
   mocks.tracks.clear();
   mocks.segments.clear();
-  mocks.sessions.add("s1");
+  mocks.sessions.set("s1", "recording");
   vi.clearAllMocks();
   mocks.resolvePrincipal.mockResolvedValue(null);
 });
@@ -461,6 +461,46 @@ describe("recording upload auth", () => {
       durationMs: 12345,
     });
     expect(mocks.deleteTrackSegmentChunks).toHaveBeenCalledWith("s1", "t1", "t1");
+  });
+
+  it("allows authorized chunk presign and completion for a track created before finalization", async () => {
+    mocks.resolvePrincipal.mockResolvedValueOnce({ kind: "host" });
+    const start = await presignUpload(
+      postJson("/api/upload/presign", {
+        sessionId: "s1",
+        trackId: "t1",
+        partNumber: 0,
+        participantName: "Alice",
+      }),
+    );
+    expect(start.status).toBe(200);
+    const { recordingToken } = (await start.json()) as {
+      recordingToken: string;
+    };
+
+    mocks.sessions.set("s1", "ready");
+
+    const chunk = await presignUpload(
+      postJson(
+        "/api/upload/presign",
+        { sessionId: "s1", trackId: "t1", partNumber: 1 },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+    expect(chunk.status).toBe(200);
+
+    const complete = await completeUpload(
+      postJson(
+        "/api/upload/complete",
+        { sessionId: "s1", trackId: "t1", durationMs: 12345 },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+    expect(complete.status).toBe(200);
+    expect(mocks.tracks.get("t1")).toMatchObject({
+      status: "complete",
+      durationMs: 12345,
+    });
   });
 
   it("forbids completing a track outside the requested session", async () => {

@@ -111,6 +111,26 @@ vi.mock("@/lib/db", () => {
           return cloneTake(updated);
         },
       ),
+      updateMany: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: { id: string; sessionId?: string; status?: string };
+          data: { stoppedAt?: Date | null; status?: string };
+        }) => {
+          const take = mocks.takes.get(where.id);
+          if (!take) return { count: 0 };
+          if (where.sessionId !== undefined && take.sessionId !== where.sessionId) {
+            return { count: 0 };
+          }
+          if (where.status !== undefined && take.status !== where.status) {
+            return { count: 0 };
+          }
+          mocks.takes.set(where.id, { ...take, ...data });
+          return { count: 1 };
+        },
+      ),
     },
     recordingTakeParticipantStatus: {
       upsert: vi.fn(
@@ -366,6 +386,38 @@ describe("/api/sessions/[id]/recording-state", () => {
     const stored = mocks.takes.get("take-1");
     expect(stored?.status).toBe("stopped");
     expect(stored?.stoppedAt).toEqual(expect.any(Date));
+  });
+
+  it("does not stop a newer active take when a targeted recovery stop is stale", async () => {
+    mocks.takes.set("take-reported", {
+      id: "take-reported",
+      sessionId: "s1",
+      startedAt: new Date("2026-07-08T12:00:00.000Z"),
+      stoppedAt: new Date("2026-07-08T12:05:00.000Z"),
+      status: "stopped",
+    });
+    mocks.takes.set("take-newer", {
+      id: "take-newer",
+      sessionId: "s1",
+      startedAt: new Date("2026-07-08T12:10:00.000Z"),
+      stoppedAt: null,
+      status: "recording",
+    });
+
+    const stop = await setRecordingState(
+      request("POST", { active: false, takeId: "take-reported" }),
+      params(),
+    );
+
+    expect(stop.status).toBe(200);
+    await expect(stop.json()).resolves.toMatchObject({
+      active: true,
+      take: { id: "take-newer", status: "recording" },
+    });
+    expect(mocks.takes.get("take-newer")).toMatchObject({
+      status: "recording",
+      stoppedAt: null,
+    });
   });
 
   it("treats status, not stoppedAt, as the active signal", async () => {

@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   sessionFindUnique: vi.fn(),
   createTake: vi.fn(),
   createTrack: vi.fn(),
+  createSegment: vi.fn(),
   findActiveTake: vi.fn(async () => null),
   resolvePrincipal: vi.fn(),
   issueRecordingUploadToken: vi.fn(async () => "token"),
@@ -50,7 +51,7 @@ vi.mock("@/lib/db", () => {
     },
     trackSegment: {
       findUnique: vi.fn(async () => null),
-      create: vi.fn(),
+      create: mocks.createSegment,
       count: vi.fn(async () => 0),
     },
   };
@@ -147,6 +148,8 @@ describe("finalized session recording guard (issue #151)", () => {
       error: expect.stringContaining("finalized"),
     });
     expect(mocks.createTrack).not.toHaveBeenCalled();
+    expect(mocks.createSegment).not.toHaveBeenCalled();
+    expect(mocks.issueRecordingUploadToken).not.toHaveBeenCalled();
     expect(mocks.getPresignedPutUrl).not.toHaveBeenCalled();
   });
 
