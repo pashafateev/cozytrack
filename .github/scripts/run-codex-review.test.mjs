@@ -87,6 +87,37 @@ test("seeds the first fallback from the API recommendation", async () => {
   assert.equal(result.successfulModel, "gpt-prior-stable");
 });
 
+test("tries the API recommendation when the stored model also fails", async () => {
+  const calls = [];
+
+  const result = await runReviewWithFallback({
+    previousModel: "gpt-retired",
+    runAttempt: async (model) => {
+      calls.push(model);
+      if (model === "gpt-recommended") {
+        return {
+          exitCode: 0,
+          output: "Recovered review.",
+          stderr: "model: gpt-recommended\n",
+        };
+      }
+      return {
+        exitCode: 1,
+        output: "",
+        stderr:
+          "The selected model is unavailable. Until then, use gpt-recommended.\n",
+      };
+    },
+  });
+
+  assert.deepEqual(calls, [null, "gpt-retired", "gpt-recommended"]);
+  assert.deepEqual(result, {
+    output: "Recovered review.",
+    successfulModel: "gpt-recommended",
+    usedFallback: true,
+  });
+});
+
 test("fails visibly when both the default and fallback attempts fail", async () => {
   const calls = [];
 
@@ -102,7 +133,7 @@ test("fails visibly when both the default and fallback attempts fail", async () 
         };
       },
     }),
-    /Default Codex review failed.*fallback gpt-prior-stable failed/s,
+    /Default Codex review failed.*all fallback attempts failed.*gpt-prior-stable/s,
   );
 
   assert.deepEqual(calls, [null, "gpt-prior-stable"]);

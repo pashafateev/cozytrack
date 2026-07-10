@@ -66,33 +66,52 @@ export async function runReviewWithFallback({
   const primaryFailure = attemptFailure("Default Codex review", primary);
   log(`${primaryFailure}; selecting a fallback model.`);
 
-  const fallback =
-    normalizeModel(fallbackModel) ??
-    normalizeModel(previousModel) ??
-    parseRecommendedFallback(`${primary.stderr}\n${primary.stdout ?? ""}`);
+  const fallbacks = [];
+  const enqueueFallback = (model) => {
+    const normalized = normalizeModel(model);
+    if (normalized && !fallbacks.includes(normalized)) {
+      fallbacks.push(normalized);
+    }
+  };
+  enqueueFallback(previousModel);
+  enqueueFallback(fallbackModel);
+  enqueueFallback(
+    parseRecommendedFallback(`${primary.stderr}\n${primary.stdout ?? ""}`),
+  );
 
-  if (!fallback) {
+  if (fallbacks.length === 0) {
     throw new Error(
       `${primaryFailure}; no last-known-good or API-recommended fallback model was available.`,
     );
   }
 
-  log(`Retrying Codex review with last-known-good model ${fallback}.`);
-  const secondary = await runAttempt(fallback);
-  if (!attemptSucceeded(secondary)) {
-    throw new Error(
-      `${primaryFailure}; fallback ${fallback} failed: ${attemptFailure("Codex fallback", secondary)}.`,
+  const fallbackFailures = [];
+  for (let index = 0; index < fallbacks.length; index += 1) {
+    const fallback = fallbacks[index];
+    log(`Retrying Codex review with fallback model ${fallback}.`);
+    const secondary = await runAttempt(fallback);
+    if (attemptSucceeded(secondary)) {
+      log(`Codex fallback review succeeded with ${fallback}.`);
+      return {
+        output: secondary.output,
+        successfulModel:
+          parseSelectedModel(`${secondary.stderr}\n${secondary.stdout ?? ""}`) ??
+          fallback,
+        usedFallback: true,
+      };
+    }
+
+    const failure = attemptFailure(`Fallback ${fallback}`, secondary);
+    fallbackFailures.push(failure);
+    log(`${failure}; checking for another fallback model.`);
+    enqueueFallback(
+      parseRecommendedFallback(`${secondary.stderr}\n${secondary.stdout ?? ""}`),
     );
   }
 
-  log(`Codex fallback review succeeded with ${fallback}.`);
-  return {
-    output: secondary.output,
-    successfulModel:
-      parseSelectedModel(`${secondary.stderr}\n${secondary.stdout ?? ""}`) ??
-      fallback,
-    usedFallback: true,
-  };
+  throw new Error(
+    `${primaryFailure}; all fallback attempts failed: ${fallbackFailures.join("; ")}.`,
+  );
 }
 
 async function runCodexAttempt({
