@@ -21,6 +21,7 @@ type Modules = {
   db: typeof import("@/lib/db").db;
   finalizeSession: typeof import("@/app/api/sessions/[id]/finalize/route").POST;
   presignUpload: typeof import("@/app/api/upload/presign/route").POST;
+  setRecordingState: typeof import("@/app/api/sessions/[id]/recording-state/route").POST;
   recoverTrack: typeof import("@/lib/recovery").recoverTrack;
   s3: typeof import("@/lib/s3");
 };
@@ -60,6 +61,7 @@ async function loadModules(): Promise<Modules> {
     dbModule,
     finalizeRoute,
     presignRoute,
+    recordingStateRoute,
     recovery,
     s3,
   ] = await Promise.all([
@@ -68,6 +70,7 @@ async function loadModules(): Promise<Modules> {
     import("@/lib/db"),
     import("@/app/api/sessions/[id]/finalize/route"),
     import("@/app/api/upload/presign/route"),
+    import("@/app/api/sessions/[id]/recording-state/route"),
     import("@/lib/recovery"),
     import("@/lib/s3"),
   ]);
@@ -78,6 +81,7 @@ async function loadModules(): Promise<Modules> {
     db: dbModule.db,
     finalizeSession: finalizeRoute.POST,
     presignUpload: presignRoute.POST,
+    setRecordingState: recordingStateRoute.POST,
     recoverTrack: recovery.recoverTrack,
     s3,
   };
@@ -257,6 +261,153 @@ afterEach(async () => {
 });
 
 describe("recording upload service integration", () => {
+  it("serializes concurrent take and track starts against finalize across fresh sessions", async () => {
+    const takeRaceSessions = await Promise.all(
+      Array.from({ length: 6 }, (_, index) =>
+        createSession(`Take/finalize race ${index}`),
+      ),
+    );
+
+    await Promise.all(
+      takeRaceSessions.map(async (sessionId) => {
+        const headers = await hostHeaders();
+        const [start, finalize] = await Promise.all([
+          modules.setRecordingState(
+            postJson(
+              `/api/sessions/${sessionId}/recording-state`,
+              {
+                active: true,
+                sessionStartedAt: new Date().toISOString(),
+              },
+              headers,
+            ),
+            { params: Promise.resolve({ id: sessionId }) },
+          ),
+          modules.finalizeSession(
+            postJson(`/api/sessions/${sessionId}/finalize`, {}),
+            { params: Promise.resolve({ id: sessionId }) },
+          ),
+        ]);
+
+        expect([start.status, finalize.status].sort()).toEqual([200, 409]);
+        const [session, activeTake] = await Promise.all([
+          modules.db.session.findUniqueOrThrow({ where: { id: sessionId } }),
+          modules.db.recordingTake.findFirst({
+            where: { sessionId, status: "recording" },
+          }),
+        ]);
+        expect(session.status === "ready" && activeTake !== null).toBe(false);
+        if (session.status === "ready") {
+          expect(start.status).toBe(409);
+          expect(activeTake).toBeNull();
+        } else {
+          expect(start.status).toBe(200);
+          expect(finalize.status).toBe(409);
+          expect(activeTake).not.toBeNull();
+        }
+      }),
+    );
+
+    const trackRaceSessions = await Promise.all(
+      Array.from({ length: 6 }, (_, index) =>
+        createSession(`Track/finalize race ${index}`),
+      ),
+    );
+
+    await Promise.all(
+      trackRaceSessions.map(async (sessionId) => {
+        const trackId = `track-${randomUUID()}`;
+        const headers = await hostHeaders();
+        const [start, finalize] = await Promise.all([
+          modules.presignUpload(
+            postJson(
+              "/api/upload/presign",
+              {
+                sessionId,
+                trackId,
+                partNumber: 0,
+                participantName: "Integration Host",
+              },
+              headers,
+            ),
+          ),
+          modules.finalizeSession(
+            postJson(`/api/sessions/${sessionId}/finalize`, {}),
+            { params: Promise.resolve({ id: sessionId }) },
+          ),
+        ]);
+
+        expect([start.status, finalize.status].sort()).toEqual([200, 409]);
+        const [session, track] = await Promise.all([
+          modules.db.session.findUniqueOrThrow({ where: { id: sessionId } }),
+          modules.db.track.findUnique({ where: { id: trackId } }),
+        ]);
+        expect(session.status === "ready" && track !== null).toBe(false);
+        if (session.status === "ready") {
+          expect(start.status).toBe(409);
+          expect(track).toBeNull();
+        } else {
+          expect(start.status).toBe(200);
+          expect(finalize.status).toBe(409);
+          expect(track).not.toBeNull();
+        }
+      }),
+    );
+  });
+
+  it("rejects a new MinIO upload start after finalize but allows an existing track to finish", async () => {
+    const sessionId = await createSession("Finalized upload recovery");
+    const { recordingToken, trackId } = await startUpload(sessionId);
+    await modules.db.session.update({
+      where: { id: sessionId },
+      data: { status: "ready", finalizedAt: new Date() },
+    });
+
+    const rejectedTrackId = `track-${randomUUID()}`;
+    const rejected = await modules.presignUpload(
+      postJson(
+        "/api/upload/presign",
+        {
+          sessionId,
+          trackId: rejectedTrackId,
+          partNumber: 0,
+          participantName: "Too Late",
+        },
+        await hostHeaders(),
+      ),
+    );
+    expect(rejected.status).toBe(409);
+    await expect(
+      modules.db.track.findUnique({ where: { id: rejectedTrackId } }),
+    ).resolves.toBeNull();
+
+    const finalUpload = await modules.presignUpload(
+      postJson(
+        "/api/upload/presign",
+        { sessionId, trackId, partNumber: 9999 },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+    expect(finalUpload.status).toBe(200);
+    const finalBody = (await finalUpload.json()) as { url: string };
+    await putPresignedBytes(finalBody.url, await makeTinyWebm(880));
+
+    const complete = await modules.completeUpload(
+      postJson(
+        "/api/upload/complete",
+        { sessionId, trackId, durationMs: 120 },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+    expect(complete.status).toBe(200);
+    await expect(
+      modules.db.track.findUnique({ where: { id: trackId } }),
+    ).resolves.toMatchObject({ status: "complete", durationMs: 120 });
+    await expect(
+      modules.db.session.findUnique({ where: { id: sessionId } }),
+    ).resolves.toMatchObject({ status: "ready" });
+  });
+
   it("creates, stores, completes, and cleans up a recording through real Postgres and S3-compatible storage", async () => {
     const sessionId = await createSession();
     const trackId = `track-${randomUUID()}`;

@@ -266,6 +266,161 @@ test("records a host track through the browser and stores a completed WebM", asy
   });
 });
 
+test("rejects recording from a stale Studio page after the session is finalized", async ({
+  page,
+}) => {
+  const sessionId = await createAndJoinHostStudio(
+    page,
+    `Stale finalized studio ${Date.now()}`,
+    "Stale Studio Host",
+  );
+  const writableRequests: string[] = [];
+  page.on("request", (request) => {
+    if (
+      request.url().includes("/api/upload/presign") ||
+      request.method() === "PUT"
+    ) {
+      writableRequests.push(`${request.method()} ${request.url()}`);
+    }
+  });
+
+  await db.session.update({
+    where: { id: sessionId },
+    data: { status: "ready", finalizedAt: new Date() },
+  });
+
+  await page.getByRole("button", { name: "Start recording" }).click();
+  await expect(
+    page.getByText(
+      "This session is finalized and can no longer be recorded into. Start a new session.",
+    ),
+  ).toBeVisible();
+
+  await page.waitForTimeout(500);
+  const [takes, tracks, segments] = await Promise.all([
+    db.recordingTake.count({ where: { sessionId } }),
+    db.track.count({ where: { sessionId } }),
+    db.trackSegment.count({ where: { track: { sessionId } } }),
+  ]);
+  expect({ takes, tracks, segments }).toEqual({
+    takes: 0,
+    tracks: 0,
+    segments: 0,
+  });
+  expect(writableRequests).toEqual([]);
+});
+
+test("recovers an unfinished active take before finalizing", async ({ page }) => {
+  const participantName = "Unfinished Take Host";
+  const sessionId = await createAndJoinHostStudio(
+    page,
+    `Unfinished take recovery ${Date.now()}`,
+    participantName,
+  );
+
+  await page.waitForTimeout(1_000);
+  await page.getByRole("button", { name: "Start recording" }).click();
+  await expect(page.getByRole("button", { name: "Stop recording" })).toBeVisible();
+  await page.waitForTimeout(2_000);
+  await page.getByRole("button", { name: "Stop recording" }).click();
+  await expect(page.getByText("FINALIZING").first()).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Start recording" }),
+  ).toBeVisible({ timeout: 45_000 });
+
+  await expect
+    .poll(
+      async () =>
+        (
+          await db.track.findFirst({
+            where: { sessionId, participantName },
+            select: { status: true },
+          })
+        )?.status ?? null,
+      { timeout: 30_000 },
+    )
+    .toBe("complete");
+
+  const unfinishedTake = await db.recordingTake.create({
+    data: {
+      sessionId,
+      startedAt: new Date(),
+      status: "recording",
+    },
+  });
+  expect(
+    await db.track.count({ where: { takeId: unfinishedTake.id } }),
+  ).toBe(0);
+
+  await page.getByRole("button", { name: "Finish recording" }).click();
+  const recoveryAction = page.getByRole("button", {
+    name: "End unfinished take and continue",
+  });
+  await expect(recoveryAction).toBeVisible();
+  await expect(page.getByText("Ready for ingest")).toBeHidden();
+  await expect
+    .poll(async () =>
+      (
+        await db.session.findUniqueOrThrow({ where: { id: sessionId } })
+      ).status,
+    )
+    .toBe("recording");
+  await expect
+    .poll(async () =>
+      (
+        await db.recordingTake.findUniqueOrThrow({
+          where: { id: unfinishedTake.id },
+        })
+      ).status,
+    )
+    .toBe("recording");
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.type()).toBe("confirm");
+    await dialog.accept();
+  });
+  await recoveryAction.click();
+  await expect(page.getByText("Ready for ingest")).toBeVisible({
+    timeout: 45_000,
+  });
+  await expect
+    .poll(async () =>
+      (
+        await db.recordingTake.findUniqueOrThrow({
+          where: { id: unfinishedTake.id },
+        })
+      ).status,
+    )
+    .toBe("stopped");
+  await expect
+    .poll(async () =>
+      (
+        await db.session.findUniqueOrThrow({ where: { id: sessionId } })
+      ).status,
+    )
+    .toBe("ready");
+
+  const beforeRetry = await Promise.all([
+    db.recordingTake.count({ where: { sessionId } }),
+    db.track.count({ where: { sessionId } }),
+    db.trackSegment.count({ where: { track: { sessionId } } }),
+  ]);
+  await page.getByRole("button", { name: "Start recording" }).click();
+  await expect(
+    page.getByText(
+      "This session is finalized and can no longer be recorded into. Start a new session.",
+    ),
+  ).toBeVisible();
+  await page.waitForTimeout(500);
+  await expect(
+    Promise.all([
+      db.recordingTake.count({ where: { sessionId } }),
+      db.track.count({ where: { sessionId } }),
+      db.trackSegment.count({ where: { track: { sessionId } } }),
+    ]),
+  ).resolves.toEqual(beforeRetry);
+});
+
 test("recovers a failed final upload from the local browser backup", async ({
   page,
 }) => {
