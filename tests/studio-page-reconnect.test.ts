@@ -1,6 +1,10 @@
 import { waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { renderGuestStudioPage, renderHostStudioPage } from "./helpers/studio-page";
+import {
+  mediaStream,
+  renderGuestStudioPage,
+  renderHostStudioPage,
+} from "./helpers/studio-page";
 
 // Stack 5 (reconnect-safe recording): a participant who (re)joins while a take
 // is still active missed the live `recording_start` broadcast. On connecting,
@@ -31,6 +35,39 @@ function takeIdOfPresign(harness: {
 }
 
 describe("StudioPage reconnect catch-up", () => {
+  it("retries catch-up after the recording stream becomes ready", async () => {
+    const studio = renderHostStudioPage();
+    studio.harness.getRecordingTakeState.mockResolvedValue(activeTake);
+
+    // Let the prejoin device probe finish, then delay the recording stream
+    // acquired after the room mounts so the active-state GET wins the race.
+    await waitFor(() => {
+      expect(studio.harness.getUserMedia).toHaveBeenCalledTimes(1);
+    });
+    let resolveRecordingStream!: (stream: MediaStream) => void;
+    studio.harness.getUserMedia.mockImplementationOnce(
+      () =>
+        new Promise<MediaStream>((resolve) => {
+          resolveRecordingStream = resolve;
+        }),
+    );
+
+    const joinPromise = studio.join();
+
+    await waitFor(() => {
+      expect(studio.harness.getRecordingTakeState).toHaveBeenCalled();
+    });
+    expect(studio.harness.recorderStart).not.toHaveBeenCalled();
+
+    resolveRecordingStream(mediaStream());
+    await joinPromise;
+
+    await waitFor(() => {
+      expect(studio.harness.recorderStart).toHaveBeenCalled();
+    });
+    expect(takeIdOfPresign(studio.harness)).toBe("take-live");
+  });
+
   it("resumes the active take for a returning host by starting a new segment", async () => {
     const studio = renderHostStudioPage();
     studio.harness.getRecordingTakeState.mockResolvedValue(activeTake);

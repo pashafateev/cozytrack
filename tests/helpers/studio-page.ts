@@ -179,7 +179,7 @@ vi.mock("@/hooks/useNavigationGuard", () => ({
   useNavigationGuard: vi.fn(),
 }));
 
-function mediaStream(): MediaStream {
+export function mediaStream(): MediaStream {
   const track = {
     stop: vi.fn(),
     getSettings: () => ({}),
