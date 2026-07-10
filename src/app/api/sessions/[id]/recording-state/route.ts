@@ -254,42 +254,61 @@ export async function POST(
         : null;
 
     if (requestedTakeId) {
-      const target = await db.recordingTake.findUnique({
-        where: { id: requestedTakeId },
-        include: {
-          participantStatuses: { orderBy: { participantName: "asc" } },
-        },
+      const outcome = await withSessionLock(id, async (tx) => {
+        const target = await tx.recordingTake.findUnique({
+          where: { id: requestedTakeId },
+          include: {
+            participantStatuses: { orderBy: { participantName: "asc" } },
+          },
+        });
+        if (target && target.sessionId !== id) {
+          return { kind: "forbidden" as const };
+        }
+
+        // Recovery stops only the take finalize reported. A delayed
+        // confirmation must never stop a newer active take that appeared in
+        // the meantime. Sharing the session advisory lock with initial presign
+        // also prevents stop from landing between its take-status read and its
+        // track/segment creation.
+        if (target?.status === "recording") {
+          await tx.recordingTake.updateMany({
+            where: { id: requestedTakeId, sessionId: id, status: "recording" },
+            data: { stoppedAt: new Date(), status: "stopped" },
+          });
+        }
+
+        const remainingActive = await tx.recordingTake.findFirst({
+          where: { sessionId: id, status: "recording" },
+          orderBy: { startedAt: "desc" },
+          include: {
+            participantStatuses: { orderBy: { participantName: "asc" } },
+          },
+        });
+        if (remainingActive) {
+          return { kind: "active" as const, take: remainingActive };
+        }
+
+        const stoppedTarget = target
+          ? await tx.recordingTake.findUnique({
+              where: { id: requestedTakeId },
+              include: {
+                participantStatuses: { orderBy: { participantName: "asc" } },
+              },
+            })
+          : null;
+        return { kind: "inactive" as const, take: stoppedTarget };
       });
-      if (target && target.sessionId !== id) {
+
+      if (outcome.kind === "forbidden") {
         return NextResponse.json({ error: "forbidden" }, { status: 403 });
       }
-
-      // Recovery stops only the take finalize reported. A delayed confirmation
-      // must never stop a newer active take that appeared in the meantime.
-      if (target?.status === "recording") {
-        await db.recordingTake.updateMany({
-          where: { id: requestedTakeId, sessionId: id, status: "recording" },
-          data: { stoppedAt: new Date(), status: "stopped" },
-        });
-      }
-
-      const remainingActive = await findActiveTake(id);
-      if (remainingActive) {
+      if (outcome.kind === "active") {
         return NextResponse.json(
-          serializeRecordingState(remainingActive, true),
+          serializeRecordingState(outcome.take, true),
         );
       }
-
-      const stoppedTarget = target
-        ? await db.recordingTake.findUnique({
-            where: { id: requestedTakeId },
-            include: {
-              participantStatuses: { orderBy: { participantName: "asc" } },
-            },
-          })
-        : null;
       return NextResponse.json(
-        serializeRecordingState(stoppedTarget, false),
+        serializeRecordingState(outcome.take, false),
       );
     }
 

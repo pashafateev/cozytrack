@@ -160,7 +160,7 @@ vi.mock("@/lib/db", () => {
   const transaction = vi.fn(
     async (fn: (tx: typeof client) => Promise<unknown>) => {
       const previous = transactionTail;
-      let release = () => undefined;
+      let release: () => void = () => {};
       transactionTail = new Promise<void>((resolve) => {
         release = resolve;
       });
@@ -446,11 +446,11 @@ describe("/api/sessions/[id]/recording-state", () => {
       status: "recording",
     });
 
-    let enterCriticalSection = () => undefined;
+    let enterCriticalSection: () => void = () => {};
     const criticalSectionEntered = new Promise<void>((resolve) => {
       enterCriticalSection = resolve;
     });
-    let releaseCriticalSection = () => undefined;
+    let releaseCriticalSection: () => void = () => {};
     const holdCriticalSection = new Promise<void>((resolve) => {
       releaseCriticalSection = resolve;
     });
