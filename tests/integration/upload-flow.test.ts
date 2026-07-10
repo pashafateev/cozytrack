@@ -22,6 +22,7 @@ type Modules = {
   finalizeSession: typeof import("@/app/api/sessions/[id]/finalize/route").POST;
   presignUpload: typeof import("@/app/api/upload/presign/route").POST;
   setRecordingState: typeof import("@/app/api/sessions/[id]/recording-state/route").POST;
+  withSessionLock: typeof import("@/lib/session-lock").withSessionLock;
   recoverTrack: typeof import("@/lib/recovery").recoverTrack;
   s3: typeof import("@/lib/s3");
 };
@@ -64,6 +65,7 @@ async function loadModules(): Promise<Modules> {
     recordingStateRoute,
     recovery,
     s3,
+    sessionLock,
   ] = await Promise.all([
     import("@/lib/auth"),
     import("@/app/api/upload/complete/route"),
@@ -73,6 +75,7 @@ async function loadModules(): Promise<Modules> {
     import("@/app/api/sessions/[id]/recording-state/route"),
     import("@/lib/recovery"),
     import("@/lib/s3"),
+    import("@/lib/session-lock"),
   ]);
 
   return {
@@ -82,6 +85,7 @@ async function loadModules(): Promise<Modules> {
     finalizeSession: finalizeRoute.POST,
     presignUpload: presignRoute.POST,
     setRecordingState: recordingStateRoute.POST,
+    withSessionLock: sessionLock.withSessionLock,
     recoverTrack: recovery.recoverTrack,
     s3,
   };
@@ -474,6 +478,69 @@ describe("recording upload service integration", () => {
     await expect(
       modules.db.session.findUnique({ where: { id: sessionId } }),
     ).resolves.toMatchObject({ status: "recording" });
+  });
+
+  it("serializes targeted recovery stop behind an in-flight presign lock", async () => {
+    const sessionId = await createSession("Targeted stop lock contract");
+    const headers = await hostHeaders();
+    const started = await modules.setRecordingState(
+      postJson(
+        `/api/sessions/${sessionId}/recording-state`,
+        {
+          active: true,
+          sessionStartedAt: new Date().toISOString(),
+        },
+        headers,
+      ),
+      { params: Promise.resolve({ id: sessionId }) },
+    );
+    const startedBody = (await started.json()) as { take: { id: string } };
+
+    let enterCriticalSection: () => void = () => {};
+    const criticalSectionEntered = new Promise<void>((resolve) => {
+      enterCriticalSection = resolve;
+    });
+    let releaseCriticalSection: () => void = () => {};
+    const holdCriticalSection = new Promise<void>((resolve) => {
+      releaseCriticalSection = resolve;
+    });
+    const presignCriticalSection = modules.withSessionLock(
+      sessionId,
+      async () => {
+        enterCriticalSection();
+        await holdCriticalSection;
+      },
+    );
+    await criticalSectionEntered;
+
+    let stopSettled = false;
+    const stopPromise = modules
+      .setRecordingState(
+        postJson(
+          `/api/sessions/${sessionId}/recording-state`,
+          { active: false, takeId: startedBody.take.id },
+          headers,
+        ),
+        { params: Promise.resolve({ id: sessionId }) },
+      )
+      .then((response) => {
+        stopSettled = true;
+        return response;
+      });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const stopSettledWhileLocked = stopSettled;
+    releaseCriticalSection();
+    await presignCriticalSection;
+    const stopped = await stopPromise;
+
+    expect(stopSettledWhileLocked).toBe(false);
+    expect(stopped.status).toBe(200);
+    await expect(
+      modules.db.recordingTake.findUnique({
+        where: { id: startedBody.take.id },
+      }),
+    ).resolves.toMatchObject({ status: "stopped" });
   });
 
   it("creates, stores, completes, and cleans up a recording through real Postgres and S3-compatible storage", async () => {
