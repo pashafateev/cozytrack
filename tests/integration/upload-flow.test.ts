@@ -406,6 +406,18 @@ describe("recording upload service integration", () => {
     await expect(
       modules.db.session.findUnique({ where: { id: sessionId } }),
     ).resolves.toMatchObject({ status: "ready" });
+
+    const overwrite = await modules.presignUpload(
+      postJson(
+        "/api/upload/presign",
+        { sessionId, trackId, partNumber: 9999 },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+    expect(overwrite.status).toBe(409);
+    await expect(overwrite.json()).resolves.toMatchObject({
+      error: expect.stringContaining("already complete"),
+    });
   });
 
   it("rejects a delayed initial presign after targeted recovery stops its take", async () => {
