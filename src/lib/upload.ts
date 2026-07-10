@@ -15,6 +15,10 @@ export interface TrackInitInfo {
   // The take this recording was broadcast for. Binds a delayed start to its
   // original take instead of whatever take is active when presign arrives.
   takeId?: string;
+  // Host-only local channel slot (issue #135). When set, the server derives a
+  // stable synthetic participant id from it so a split desktop channel records
+  // as its own logical track. Guests supplying this are rejected.
+  localTrackSlotId?: string;
 }
 
 export interface PresignedUploadTarget {
@@ -50,6 +54,7 @@ export async function getPresignedUploadTarget(
       sessionStartedAt: trackInit?.sessionStartedAt,
       segmentId: trackInit?.segmentId,
       takeId: trackInit?.takeId,
+      localTrackSlotId: trackInit?.localTrackSlotId,
     }),
   });
 

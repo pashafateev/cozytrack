@@ -485,3 +485,114 @@ describe("recording upload auth", () => {
     expect(mocks.tracks.get("t1")?.status).toBe("recording");
   });
 });
+
+describe("host-owned local track slots", () => {
+  it("creates two local-slot tracks with stable synthetic participant ids", async () => {
+    mocks.resolvePrincipal.mockResolvedValue({ kind: "host", participantId: "host" });
+
+    const ch1 = await presignUpload(
+      postJson("/api/upload/presign", {
+        sessionId: "s1",
+        trackId: "local-1",
+        partNumber: 0,
+        participantName: "Local Ch 1",
+        localTrackSlotId: "host-local-ch-1",
+      }),
+    );
+    const ch2 = await presignUpload(
+      postJson("/api/upload/presign", {
+        sessionId: "s1",
+        trackId: "local-2",
+        partNumber: 0,
+        participantName: "Local Ch 2",
+        localTrackSlotId: "host-local-ch-2",
+      }),
+    );
+
+    expect(ch1.status).toBe(200);
+    expect(ch2.status).toBe(200);
+
+    // Two distinct logical tracks, each with a stable slot-derived participant
+    // id — not the raw "host" principal id, so both channels coexist under the
+    // Track [takeId, participantId] uniqueness constraint.
+    expect(mocks.tracks.get("local-1")).toMatchObject({
+      participantName: "Local Ch 1",
+      participantId: "host-local-ch-1",
+    });
+    expect(mocks.tracks.get("local-2")).toMatchObject({
+      participantName: "Local Ch 2",
+      participantId: "host-local-ch-2",
+    });
+  });
+
+  it("keeps local slot tracks separate from a normal guest track", async () => {
+    mocks.resolvePrincipal.mockResolvedValueOnce({ kind: "host", participantId: "host" });
+    await presignUpload(
+      postJson("/api/upload/presign", {
+        sessionId: "s1",
+        trackId: "local-1",
+        partNumber: 0,
+        participantName: "Local Ch 1",
+        localTrackSlotId: "host-local-ch-1",
+      }),
+    );
+
+    mocks.resolvePrincipal.mockResolvedValueOnce({
+      kind: "guest",
+      sessionId: "s1",
+      name: "Remote Bob",
+      participantId: "guest_bob",
+    });
+    const guest = await presignUpload(
+      postJson("/api/upload/presign", {
+        sessionId: "s1",
+        trackId: "guest-track",
+        partNumber: 0,
+        participantName: "Remote Bob",
+      }),
+    );
+
+    expect(guest.status).toBe(200);
+    expect(mocks.tracks.get("local-1")?.participantId).toBe("host-local-ch-1");
+    expect(mocks.tracks.get("guest-track")?.participantId).toBe("guest_bob");
+  });
+
+  it("rejects a guest attempting to claim a local track slot", async () => {
+    mocks.resolvePrincipal.mockResolvedValue({
+      kind: "guest",
+      sessionId: "s1",
+      name: "Sneaky Guest",
+      participantId: "guest_sneaky",
+    });
+
+    const res = await presignUpload(
+      postJson("/api/upload/presign", {
+        sessionId: "s1",
+        trackId: "local-1",
+        partNumber: 0,
+        participantName: "Local Ch 1",
+        localTrackSlotId: "host-local-ch-1",
+      }),
+    );
+
+    expect(res.status).toBe(403);
+    expect(mocks.tracks.get("local-1")).toBeUndefined();
+  });
+
+  it("rejects an unknown local track slot id", async () => {
+    mocks.resolvePrincipal.mockResolvedValue({ kind: "host", participantId: "host" });
+
+    const res = await presignUpload(
+      postJson("/api/upload/presign", {
+        sessionId: "s1",
+        trackId: "local-9",
+        partNumber: 0,
+        participantName: "Local Ch 9",
+        localTrackSlotId: "host-local-ch-9",
+      }),
+    );
+
+    expect(res.status).toBe(400);
+    expect(mocks.tracks.get("local-9")).toBeUndefined();
+  });
+});
