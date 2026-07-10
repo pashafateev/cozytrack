@@ -545,6 +545,47 @@ describe("logical track segments", () => {
     );
   });
 
+  it("retries materialization when the segment is complete but the track failed", async () => {
+    mocks.tracks.set("track-1", {
+      id: "track-1",
+      sessionId: "s1",
+      participantName: "Alice",
+      participantId: "guest_alice",
+      s3Key: "sessions/s1/tracks/track-1/recording.webm",
+      status: "failed",
+      durationMs: null,
+    });
+    mocks.segments.set("track-1", {
+      id: "track-1",
+      trackId: "track-1",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/track-1/",
+      status: "complete",
+      durationMs: 12345,
+    });
+    const recordingToken = await issueRecordingUploadToken("s1", "track-1");
+
+    const res = await completeUpload(
+      postJson(
+        "/api/upload/complete",
+        {
+          sessionId: "s1",
+          trackId: "track-1",
+          segmentId: "track-1",
+          durationMs: 12345,
+        },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    expect(mocks.materializeTrack).toHaveBeenCalledWith("track-1");
+    expect(mocks.tracks.get("track-1")).toMatchObject({
+      status: "complete",
+      durationMs: 12345,
+    });
+  });
+
   it("materializes the logical track once all segments complete", async () => {
     mocks.tracks.set("logical-track", {
       id: "logical-track",
