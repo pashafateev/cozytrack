@@ -312,21 +312,32 @@ export async function POST(
       );
     }
 
-    // Untargeted stop keeps its existing idempotent behavior: if there's no
-    // active take (already stopped, or a retry after the first stop landed),
-    // report inactive so a retrying client converges.
-    const current = await findActiveTake(id);
-    if (!current) {
+    // Serialize the legacy untargeted stop with starts, recovery stops, and
+    // initial presigns. Otherwise a delayed presign can validate the active
+    // take, lose the race to this stop, and create writable artifacts for a
+    // take that is already stopped.
+    const stopped = await withSessionLock(id, async (tx) => {
+      const current = await tx.recordingTake.findFirst({
+        where: { sessionId: id, status: "recording" },
+        orderBy: { startedAt: "desc" },
+      });
+      if (!current) return null;
+
+      return await tx.recordingTake.update({
+        where: { id: current.id },
+        data: { stoppedAt: new Date(), status: "stopped" },
+        include: {
+          participantStatuses: { orderBy: { participantName: "asc" } },
+        },
+      });
+    });
+
+    // Keep the existing idempotent behavior: if there's no active take
+    // (already stopped, or a retry after the first stop landed), report
+    // inactive so a retrying client converges.
+    if (!stopped) {
       return NextResponse.json(serializeRecordingState(null, false));
     }
-
-    const stopped = await db.recordingTake.update({
-      where: { id: current.id },
-      data: { stoppedAt: new Date(), status: "stopped" },
-      include: {
-        participantStatuses: { orderBy: { participantName: "asc" } },
-      },
-    });
     return NextResponse.json(serializeRecordingState(stopped, false));
   } catch (error) {
     console.error("Failed to update recording state:", error);

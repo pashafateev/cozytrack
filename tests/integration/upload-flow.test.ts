@@ -458,7 +458,7 @@ describe("recording upload service integration", () => {
       modules.s3.getObjectBytes(
         modules.s3.trackRecordingKey(sessionId, trackId),
       ),
-    ).resolves.toEqual(originalRecording);
+    ).resolves.toEqual(new Uint8Array(originalRecording));
   });
 
   it("rejects a delayed initial presign after targeted recovery stops its take", async () => {

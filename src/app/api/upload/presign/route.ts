@@ -501,7 +501,9 @@ export async function POST(req: NextRequest) {
       partNumber === 9999
         ? trackSegmentRecordingKey(sessionId, logicalTrackId, segmentId)
         : trackSegmentPartKey(sessionId, logicalTrackId, segmentId, partNumber);
-    const url = await getPresignedPutUrl(key);
+    const url = await getPresignedPutUrl(key, {
+      createOnly: partNumber === 9999,
+    });
 
     return NextResponse.json({
       url,

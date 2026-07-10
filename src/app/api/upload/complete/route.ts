@@ -50,13 +50,23 @@ export async function POST(req: NextRequest) {
 
     const existingSegment = await db.trackSegment.findUnique({
       where: { id: segmentId },
-      select: { trackId: true },
+      select: { trackId: true, status: true },
     });
     if (!existingSegment) {
       return NextResponse.json({ error: "Track segment not found" }, { status: 404 });
     }
     if (existingSegment.trackId !== trackId) {
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
+    }
+    if (existingSegment.status === "complete") {
+      const track = await db.track.findUnique({ where: { id: trackId } });
+      return NextResponse.json(track);
+    }
+    if (existingSegment.status === "failed") {
+      return NextResponse.json(
+        { error: "Track segment is terminal" },
+        { status: 409 },
+      );
     }
 
     await db.trackSegment.update({
