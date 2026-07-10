@@ -2044,6 +2044,11 @@ function RoomContent({
       ) {
         return;
       }
+      // The room can connect before getUserMedia finishes. Do not spend the
+      // take's catch-up attempt until recorder inputs exist. recordingStream is
+      // a dependency, so becoming ready reruns this effect and fetches a fresh
+      // authoritative take snapshot before starting.
+      if (!recordingStream) return;
       // Resume each active take at most once, and only while we're still idle —
       // a start/stop the user triggered in the meantime takes precedence.
       if (caughtUpTakeIdRef.current === state.take.id) return;
@@ -2063,7 +2068,13 @@ function RoomContent({
     return () => {
       cancelled = true;
     };
-  }, [studioState, sessionId, startRecordingLocal, showNotification]);
+  }, [
+    studioState,
+    recordingStream,
+    sessionId,
+    startRecordingLocal,
+    showNotification,
+  ]);
 
 
   // Block accidental navigation while recording, finalizing, or uploading.
