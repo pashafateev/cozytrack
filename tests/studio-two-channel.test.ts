@@ -333,4 +333,65 @@ describe("StudioPage two-channel local mode", () => {
       expect(completed).toContain("host-local-ch-2");
     });
   });
+
+  it("surfaces the recovery panel when a channel's upload fails", async () => {
+    const studio = renderHostStudioPage();
+    await studio.join();
+
+    studio.harness.getPresignedUploadTarget.mockImplementation(
+      async (
+        _sessionId: string,
+        _trackId: string,
+        _part: number,
+        _name: string,
+        init?: { localTrackSlotId?: string },
+      ) => ({
+        url: "https://s3.example/0.webm",
+        key: "sessions/session-host/tracks/x/0.webm",
+        recordingToken: `token-${init?.localTrackSlotId ?? "primary"}`,
+        trackId: init?.localTrackSlotId ?? "track-1",
+        segmentId: init?.localTrackSlotId ?? "segment-1",
+      }),
+    );
+    // Ch 1's final upload fails.
+    studio.harness.getPresignedUploadUrl.mockImplementation((async (
+      ...args: unknown[]
+    ) => {
+      if (args[1] === "host-local-ch-1" && args[2] === 9999) {
+        throw new Error("ch1 final upload failed");
+      }
+      return "https://s3.example/recording.webm";
+    }) as unknown as () => Promise<string>);
+    // The failed backup is kept on disk as a recoverable manifest.
+    studio.harness.recordingBackupStore.markBackupFailed.mockResolvedValue({
+      id: "session-host:host-local-ch-1",
+      sessionId: "session-host",
+      trackId: "host-local-ch-1",
+      segmentId: "host-local-ch-1",
+      participantName: "Local Ch 1",
+      state: "failed",
+      persistentStorage: true,
+      chunks: [{ chunkIndex: 0, byteSize: 100, status: "failed" }],
+    });
+
+    fireEvent.click(
+      studio.screen.getByRole("checkbox", { name: /two-channel local/i }),
+    );
+    await studio.screen.findByText("Local Ch 1");
+
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Start recording" }),
+    );
+    await studio.screen.findByRole("button", { name: "Stop recording" });
+
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Stop recording" }),
+    );
+
+    // The host gets an in-session recovery affordance (no reload required).
+    await studio.screen.findByText("Local recording backup");
+    expect(
+      studio.screen.getByRole("button", { name: /retry upload/i }),
+    ).toBeTruthy();
+  });
 });

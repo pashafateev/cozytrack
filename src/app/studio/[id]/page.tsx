@@ -2020,16 +2020,34 @@ function RoomContent({
         console.error(`Failed to finalize slot ${slot.slotId}:`, err);
         if (slot.backupId) {
           try {
-            await browserRecordingBackupStore.markBackupFailed(slot.backupId, err);
+            // Surface the failed backup into React state — same as the
+            // single-track path — so the recovery panel (Retry/Download/Clear)
+            // renders in-session. Without this the backup is kept on disk but
+            // invisible until a reload re-runs listBackups(). We only surface on
+            // *failure*, not on startBackup, so a successful two-channel take
+            // never leaves a stale panel behind.
+            const failedBackup = await browserRecordingBackupStore.markBackupFailed(
+              slot.backupId,
+              err,
+            );
+            setRecoveryBackupSync(failedBackup);
+            setBackupError(null);
           } catch (backupErr) {
             console.error("Failed to mark slot backup failed:", backupErr);
+            setBackupError(backupErrorMessage(backupErr));
           }
+        } else {
+          // No local backup for this channel — at least tell the host the
+          // upload failed rather than failing silently.
+          setBackupError(backupErrorMessage(err));
         }
         return false;
       }
     },
     [
       sessionId,
+      setBackupError,
+      setRecoveryBackupSync,
       trackerOnChunkRecorded,
       trackerTrackUpload,
       trackerWaitForUploads,
