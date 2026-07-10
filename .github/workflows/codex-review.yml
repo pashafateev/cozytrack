@@ -45,6 +45,7 @@ jobs:
       }}
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       pull-requests: read
     outputs:
@@ -111,46 +112,144 @@ jobs:
             "$PR_BASE_REF" \
             "+refs/pull/$PR_NUMBER/head"
 
-      - name: Initialize Codex feedback artifact
-        run: |
-          mkdir -p codex-review-output
-          : > codex-review-output/final-message.md
-          printf '%s\n' '${{ steps.pr_context.outputs.number }}' > codex-review-output/pr-number.txt
+      - name: Initialize Codex review files
+        uses: actions/github-script@v7
+        env:
+          PR_BASE_SHA: ${{ steps.pr_context.outputs.base_sha }}
+          PR_BODY: ${{ steps.pr_context.outputs.body }}
+          PR_HEAD_SHA: ${{ steps.pr_context.outputs.head_sha }}
+          PR_NUMBER: ${{ steps.pr_context.outputs.number }}
+          PR_TITLE: ${{ steps.pr_context.outputs.title }}
+          TRIGGER_NAME: ${{ github.event_name }}
+        with:
+          script: |
+            const fs = require("node:fs");
+            const prNumber = Number(process.env.PR_NUMBER);
+            if (!Number.isInteger(prNumber) || prNumber <= 0) {
+              core.setFailed(`Invalid Codex review PR number: ${process.env.PR_NUMBER}`);
+              return;
+            }
 
-      - name: Run Codex review
-        id: run_codex
+            const prompt = [
+              "Review this pull request for bugs, regressions, security issues, and missing tests.",
+              "",
+              "Scope:",
+              `- Repository: ${context.repo.owner}/${context.repo.repo}`,
+              `- PR: #${prNumber}`,
+              `- Base SHA: ${process.env.PR_BASE_SHA}`,
+              `- Head SHA: ${process.env.PR_HEAD_SHA}`,
+              `- Trigger: ${process.env.TRIGGER_NAME}`,
+              "",
+              "Review only the changes introduced by this PR. Do not suggest broad refactors or style-only changes.",
+              "Prioritize actionable findings with file and line references. If there are no findings, say that clearly.",
+              "Do not edit files or create commits.",
+              "",
+              "Pull request title and body:",
+              "----",
+              process.env.PR_TITLE ?? "",
+              process.env.PR_BODY ?? "",
+              "",
+            ].join("\n");
+
+            fs.mkdirSync("codex-review-output", { recursive: true });
+            fs.writeFileSync("codex-review-output/final-message.md", "");
+            fs.writeFileSync("codex-review-output/pr-number.txt", `${prNumber}\n`);
+            fs.writeFileSync("codex-review-prompt.md", prompt);
+
+      - name: Find last-known-good Codex model
+        id: prior_model
+        if: steps.pr_context.outputs.same_repo == 'true' && steps.api_key.outputs.available == 'true'
+        uses: actions/github-script@v7
+        env:
+          PR_BASE_SHA: ${{ steps.pr_context.outputs.base_sha }}
+        with:
+          script: |
+            const fs = require("node:fs");
+            const response = await github.rest.actions.listArtifactsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: "codex-review-model",
+              per_page: 100,
+            });
+            const artifact = response.data.artifacts
+              .filter((candidate) =>
+                !candidate.expired &&
+                candidate.workflow_run?.id !== context.runId
+              )
+              .sort((left, right) =>
+                Date.parse(right.created_at) - Date.parse(left.created_at)
+              )[0];
+
+            if (!artifact?.workflow_run?.id) {
+              core.notice("No previous Codex model artifact is available yet.");
+              const baseWorkflow = await github.rest.repos.getContent({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                path: ".github/workflows/codex-review.yml",
+                ref: process.env.PR_BASE_SHA,
+              });
+              if (!Array.isArray(baseWorkflow.data) && baseWorkflow.data.content) {
+                const source = Buffer.from(baseWorkflow.data.content, "base64").toString("utf8");
+                const priorPin = source.match(
+                  /^\s+model:\s*["']?([^\s#"']+)["']?\s*(?:#.*)?$/m,
+                )?.[1];
+                if (priorPin) {
+                  fs.mkdirSync("codex-review-state", { recursive: true });
+                  fs.writeFileSync(
+                    "codex-review-state/last-known-good-model.txt",
+                    `${priorPin}\n`,
+                  );
+                  core.notice(`Seeded last-known-good model ${priorPin} from the base workflow.`);
+                }
+              }
+              core.setOutput("found", "false");
+              return;
+            }
+
+            core.info(`Using model state from workflow run ${artifact.workflow_run.id}.`);
+            core.setOutput("found", "true");
+            core.setOutput("run_id", String(artifact.workflow_run.id));
+
+      - name: Download last-known-good Codex model
+        if: steps.prior_model.outputs.found == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-review-model
+          path: codex-review-state
+          run-id: ${{ steps.prior_model.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Set up latest Codex CLI
         if: steps.pr_context.outputs.same_repo == 'true' && steps.api_key.outputs.available == 'true'
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          model: gpt-5.5
-          sandbox: read-only
-          prompt: |
-            Review this pull request for bugs, regressions, security issues, and missing tests.
 
-            Scope:
-            - Repository: ${{ github.repository }}
-            - PR: #${{ steps.pr_context.outputs.number }}
-            - Base SHA: ${{ steps.pr_context.outputs.base_sha }}
-            - Head SHA: ${{ steps.pr_context.outputs.head_sha }}
-            - Trigger: ${{ github.event_name }}
-
-            Review only the changes introduced by this PR. Do not suggest broad refactors or style-only changes.
-            Prioritize actionable findings with file and line references. If there are no findings, say that clearly.
-            Do not edit files or create commits.
-
-            Pull request title and body:
-            ----
-            ${{ steps.pr_context.outputs.title }}
-            ${{ steps.pr_context.outputs.body }}
-
-      - name: Write Codex feedback artifact
-        if: steps.run_codex.outputs['final-message'] != ''
+      - name: Run Codex review with model fallback
+        if: steps.pr_context.outputs.same_repo == 'true' && steps.api_key.outputs.available == 'true'
         env:
-          CODEX_FINAL_MESSAGE: ${{ steps.run_codex.outputs['final-message'] }}
+          CODEX_REVIEW_FALLBACK_MODEL: ${{ vars.CODEX_REVIEW_FALLBACK_MODEL }}
         run: |
-          mkdir -p codex-review-output
-          printf '%s\n' "$CODEX_FINAL_MESSAGE" > codex-review-output/final-message.md
+          node .github/scripts/run-codex-review.mjs \
+            --prompt-file codex-review-prompt.md \
+            --output-file codex-review-output/final-message.md \
+            --previous-model-file codex-review-state/last-known-good-model.txt \
+            --state-file codex-review-state-next/last-known-good-model.txt \
+            --working-directory "$GITHUB_WORKSPACE"
+
+      - name: Save last-known-good Codex model
+        if: >-
+          ${{
+            success() &&
+            steps.pr_context.outputs.same_repo == 'true' &&
+            steps.api_key.outputs.available == 'true'
+          }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-review-model
+          path: codex-review-state-next/last-known-good-model.txt
+          if-no-files-found: ignore
+          retention-days: 90
 
       - name: Upload Codex feedback artifact
         if: always()
