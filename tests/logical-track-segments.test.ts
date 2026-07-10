@@ -46,8 +46,11 @@ const mocks = vi.hoisted(() => ({
   resolvePrincipal: vi.fn<() => Promise<Principal | null>>(),
 }));
 
-vi.mock("@/lib/db", () => ({
-  db: {
+vi.mock("@/lib/db", () => {
+  const client = {
+    // withSessionLock runs its callback inside db.$transaction and issues a raw
+    // advisory-lock query; the mock just needs these to exist and pass through.
+    $executeRaw: async () => 0,
     session: {
       findUnique: vi.fn(async ({ where: { id } }: { where: { id: string } }) =>
         mocks.sessions.has(id) ? { id } : null,
@@ -212,8 +215,14 @@ vi.mock("@/lib/db", () => ({
         },
       ),
     },
-  },
-}));
+  };
+  return {
+    db: {
+      ...client,
+      $transaction: async (fn: (tx: typeof client) => unknown) => fn(client),
+    },
+  };
+});
 
 vi.mock("@/lib/s3", () => ({
   getPresignedPutUrl: mocks.getPresignedPutUrl,
@@ -536,6 +545,47 @@ describe("logical track segments", () => {
     );
   });
 
+  it("retries materialization when the segment is complete but the track failed", async () => {
+    mocks.tracks.set("track-1", {
+      id: "track-1",
+      sessionId: "s1",
+      participantName: "Alice",
+      participantId: "guest_alice",
+      s3Key: "sessions/s1/tracks/track-1/recording.webm",
+      status: "failed",
+      durationMs: null,
+    });
+    mocks.segments.set("track-1", {
+      id: "track-1",
+      trackId: "track-1",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/track-1/",
+      status: "complete",
+      durationMs: 12345,
+    });
+    const recordingToken = await issueRecordingUploadToken("s1", "track-1");
+
+    const res = await completeUpload(
+      postJson(
+        "/api/upload/complete",
+        {
+          sessionId: "s1",
+          trackId: "track-1",
+          segmentId: "track-1",
+          durationMs: 12345,
+        },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    expect(mocks.materializeTrack).toHaveBeenCalledWith("track-1");
+    expect(mocks.tracks.get("track-1")).toMatchObject({
+      status: "complete",
+      durationMs: 12345,
+    });
+  });
+
   it("materializes the logical track once all segments complete", async () => {
     mocks.tracks.set("logical-track", {
       id: "logical-track",
@@ -827,9 +877,10 @@ describe("logical track segments", () => {
     expect(mocks.tracks.get("logical-track")?.status).not.toBe("complete");
   });
 
-  it("binds a stale recording start to its broadcast take, not the newer active take", async () => {
-    // The participant's start was delayed: by the time presign arrives, the
-    // host has stopped take-a and started take-b. The audio belongs to take-a.
+  it("rejects a stale recording start after its broadcast take is stopped", async () => {
+    // The participant's start was delayed until after recovery stopped take-a.
+    // It must not create a brand-new track on that terminal take, even if the
+    // room has since started a newer take-b.
     mocks.recordingTakes.set("take-a", {
       id: "take-a",
       sessionId: "s1",
@@ -861,10 +912,11 @@ describe("logical track segments", () => {
       }),
     );
 
-    expect(res.status).toBe(200);
-    expect(mocks.tracks.get("track-1")).toMatchObject({
-      takeId: "take-a",
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toMatchObject({
+      error: expect.stringContaining("no longer active"),
     });
+    expect(mocks.tracks.has("track-1")).toBe(false);
   });
 
   it("rejects a recording start for a take from another session", async () => {

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { withSessionLock } from "@/lib/session-lock";
 import { recoverTrack } from "@/lib/recovery";
 
 export async function POST(
@@ -38,29 +39,69 @@ export async function POST(
         }
       }
 
-      const refreshed = stuck.length
-        ? await db.track.findMany({
-            where: { id: { in: stuck.map((t) => t.id) } },
-            select: { id: true, participantName: true, status: true },
-          })
-        : [];
+      // Decide pending-vs-finalize and flip the status under a per-session
+      // advisory lock (issue #151). Re-reading every track inside the lock —
+      // not just the previously-stuck subset — means a track a concurrent
+      // recording start created is seen here and blocks finalize, instead of
+      // being stranded on a session we've just marked `ready`. The lock also
+      // serializes against the start guards, so a start can't create a track
+      // between our read and our status flip.
+      const decision = await withSessionLock(id, async (tx) => {
+        // A recording start is two-phase: /recording-state creates the take,
+        // then presign creates the first track. Checking only tracks would let
+        // finalize slip through the window after the take exists but before any
+        // track does — it would mark the session `ready`, then presign 409s and
+        // the in-progress recording is stranded. Block on an active take too so
+        // that whole start is atomic w.r.t. finalize.
+        const activeTake = await tx.recordingTake.findFirst({
+          where: { sessionId: id, status: "recording" },
+          orderBy: { startedAt: "desc" },
+          select: { id: true, startedAt: true },
+        });
 
-      const pending = refreshed
-        .filter((t) => t.status !== "complete" && t.status !== "failed")
-        .map((t) => ({
-          trackId: t.id,
-          participantName: t.participantName,
-          status: t.status,
-        }));
+        const tracks = await tx.track.findMany({
+          where: { sessionId: id },
+          select: { id: true, participantName: true, status: true },
+        });
 
-      if (pending.length > 0) {
-        return NextResponse.json({ pending }, { status: 409 });
-      }
+        const pending = tracks
+          .filter((t) => t.status !== "complete" && t.status !== "failed")
+          .map((t) => ({
+            trackId: t.id,
+            participantName: t.participantName,
+            status: t.status,
+          }));
 
-      await db.session.updateMany({
-        where: { id, status: "recording" },
-        data: { status: "ready", finalizedAt: new Date() },
+        if (pending.length > 0) {
+          return { kind: "pending" as const, pending };
+        }
+
+        if (activeTake) {
+          return { kind: "active_take" as const, activeTake };
+        }
+
+        await tx.session.updateMany({
+          where: { id, status: "recording" },
+          data: { status: "ready", finalizedAt: new Date() },
+        });
+        return { kind: "ready" as const };
       });
+
+      if (decision.kind === "pending") {
+        return NextResponse.json({ pending: decision.pending }, { status: 409 });
+      }
+      if (decision.kind === "active_take") {
+        return NextResponse.json(
+          {
+            error: "An unfinished recording take is still active.",
+            activeTake: {
+              id: decision.activeTake.id,
+              startedAt: decision.activeTake.startedAt.toISOString(),
+            },
+          },
+          { status: 409 },
+        );
+      }
     }
 
     const updated = await db.session.findUnique({

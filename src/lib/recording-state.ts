@@ -91,7 +91,11 @@ export async function startRecordingTake(
 // retry transient failures until the stop is confirmed (or attempts run out).
 export async function stopRecordingTake(
   sessionId: string,
-  options: { maxAttempts?: number; retryDelayMs?: number } = {},
+  options: {
+    maxAttempts?: number;
+    retryDelayMs?: number;
+    takeId?: string;
+  } = {},
 ): Promise<RecordingTakeState> {
   const maxAttempts = Math.max(1, options.maxAttempts ?? STOP_MAX_ATTEMPTS);
   const path = `/api/sessions/${encodeURIComponent(sessionId)}/recording-state`;
@@ -101,6 +105,7 @@ export async function stopRecordingTake(
     try {
       return await jsonRequest<RecordingTakeState>(path, "POST", {
         active: false,
+        ...(options.takeId ? { takeId: options.takeId } : {}),
       });
     } catch (error) {
       lastError = error;

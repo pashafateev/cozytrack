@@ -104,13 +104,29 @@ export async function getPresignedUploadUrl(
 }
 
 export async function uploadChunk(url: string, chunk: Blob): Promise<void> {
+  let createOnly = false;
+  try {
+    createOnly =
+      new URL(url).searchParams
+        .get("X-Amz-SignedHeaders")
+        ?.split(";")
+        .includes("if-none-match") ?? false;
+  } catch {
+    // Non-presigned URLs retain the existing upload behavior.
+  }
+
   const res = await fetch(url, {
     method: "PUT",
     body: chunk,
     headers: {
       "Content-Type": "audio/webm",
+      ...(createOnly ? { "If-None-Match": "*" } : {}),
     },
   });
+
+  // A create-only final upload is safe to retry: 412 means the first PUT
+  // already created the immutable recording object.
+  if (createOnly && res.status === 412) return;
 
   if (!res.ok) {
     throw new Error(`Failed to upload chunk: ${res.statusText}`);

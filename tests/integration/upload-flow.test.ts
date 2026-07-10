@@ -21,6 +21,8 @@ type Modules = {
   db: typeof import("@/lib/db").db;
   finalizeSession: typeof import("@/app/api/sessions/[id]/finalize/route").POST;
   presignUpload: typeof import("@/app/api/upload/presign/route").POST;
+  setRecordingState: typeof import("@/app/api/sessions/[id]/recording-state/route").POST;
+  withSessionLock: typeof import("@/lib/session-lock").withSessionLock;
   recoverTrack: typeof import("@/lib/recovery").recoverTrack;
   s3: typeof import("@/lib/s3");
 };
@@ -60,16 +62,20 @@ async function loadModules(): Promise<Modules> {
     dbModule,
     finalizeRoute,
     presignRoute,
+    recordingStateRoute,
     recovery,
     s3,
+    sessionLock,
   ] = await Promise.all([
     import("@/lib/auth"),
     import("@/app/api/upload/complete/route"),
     import("@/lib/db"),
     import("@/app/api/sessions/[id]/finalize/route"),
     import("@/app/api/upload/presign/route"),
+    import("@/app/api/sessions/[id]/recording-state/route"),
     import("@/lib/recovery"),
     import("@/lib/s3"),
+    import("@/lib/session-lock"),
   ]);
 
   return {
@@ -78,6 +84,8 @@ async function loadModules(): Promise<Modules> {
     db: dbModule.db,
     finalizeSession: finalizeRoute.POST,
     presignUpload: presignRoute.POST,
+    setRecordingState: recordingStateRoute.POST,
+    withSessionLock: sessionLock.withSessionLock,
     recoverTrack: recovery.recoverTrack,
     s3,
   };
@@ -143,14 +151,30 @@ function postJson(
   });
 }
 
-async function putPresignedBytes(url: string, bytes: Uint8Array) {
+function presignedPutHeaders(url: string): Record<string, string> {
+  const signedHeaders = new URL(url).searchParams
+    .get("X-Amz-SignedHeaders")
+    ?.split(";");
+  return {
+    "content-type": "audio/webm",
+    ...(signedHeaders?.includes("if-none-match")
+      ? { "if-none-match": "*" }
+      : {}),
+  };
+}
+
+async function putPresignedBytesResponse(url: string, bytes: Uint8Array) {
   const body = new ArrayBuffer(bytes.byteLength);
   new Uint8Array(body).set(bytes);
-  const response = await fetch(url, {
+  return await fetch(url, {
     method: "PUT",
-    headers: { "content-type": "audio/webm" },
+    headers: presignedPutHeaders(url),
     body: new Blob([body], { type: "audio/webm" }),
   });
+}
+
+async function putPresignedBytes(url: string, bytes: Uint8Array) {
+  const response = await putPresignedBytesResponse(url, bytes);
 
   expect(response.ok).toBe(true);
 }
@@ -257,6 +281,305 @@ afterEach(async () => {
 });
 
 describe("recording upload service integration", () => {
+  it("serializes concurrent take and track starts against finalize across fresh sessions", async () => {
+    const takeRaceSessions = await Promise.all(
+      Array.from({ length: 6 }, (_, index) =>
+        createSession(`Take/finalize race ${index}`),
+      ),
+    );
+
+    await Promise.all(
+      takeRaceSessions.map(async (sessionId) => {
+        const headers = await hostHeaders();
+        const [start, finalize] = await Promise.all([
+          modules.setRecordingState(
+            postJson(
+              `/api/sessions/${sessionId}/recording-state`,
+              {
+                active: true,
+                sessionStartedAt: new Date().toISOString(),
+              },
+              headers,
+            ),
+            { params: Promise.resolve({ id: sessionId }) },
+          ),
+          modules.finalizeSession(
+            postJson(`/api/sessions/${sessionId}/finalize`, {}),
+            { params: Promise.resolve({ id: sessionId }) },
+          ),
+        ]);
+
+        expect([start.status, finalize.status].sort()).toEqual([200, 409]);
+        const [session, activeTake] = await Promise.all([
+          modules.db.session.findUniqueOrThrow({ where: { id: sessionId } }),
+          modules.db.recordingTake.findFirst({
+            where: { sessionId, status: "recording" },
+          }),
+        ]);
+        expect(session.status === "ready" && activeTake !== null).toBe(false);
+        if (session.status === "ready") {
+          expect(start.status).toBe(409);
+          expect(activeTake).toBeNull();
+        } else {
+          expect(start.status).toBe(200);
+          expect(finalize.status).toBe(409);
+          expect(activeTake).not.toBeNull();
+        }
+      }),
+    );
+
+    const trackRaceSessions = await Promise.all(
+      Array.from({ length: 6 }, (_, index) =>
+        createSession(`Track/finalize race ${index}`),
+      ),
+    );
+
+    await Promise.all(
+      trackRaceSessions.map(async (sessionId) => {
+        const trackId = `track-${randomUUID()}`;
+        const headers = await hostHeaders();
+        const [start, finalize] = await Promise.all([
+          modules.presignUpload(
+            postJson(
+              "/api/upload/presign",
+              {
+                sessionId,
+                trackId,
+                partNumber: 0,
+                participantName: "Integration Host",
+              },
+              headers,
+            ),
+          ),
+          modules.finalizeSession(
+            postJson(`/api/sessions/${sessionId}/finalize`, {}),
+            { params: Promise.resolve({ id: sessionId }) },
+          ),
+        ]);
+
+        expect([start.status, finalize.status].sort()).toEqual([200, 409]);
+        const [session, track] = await Promise.all([
+          modules.db.session.findUniqueOrThrow({ where: { id: sessionId } }),
+          modules.db.track.findUnique({ where: { id: trackId } }),
+        ]);
+        expect(session.status === "ready" && track !== null).toBe(false);
+        if (session.status === "ready") {
+          expect(start.status).toBe(409);
+          expect(track).toBeNull();
+        } else {
+          expect(start.status).toBe(200);
+          expect(finalize.status).toBe(409);
+          expect(track).not.toBeNull();
+        }
+      }),
+    );
+  });
+
+  it("rejects a new MinIO upload start after finalize but allows an existing track to finish", async () => {
+    const sessionId = await createSession("Finalized upload recovery");
+    const { recordingToken, trackId } = await startUpload(sessionId);
+    await modules.db.session.update({
+      where: { id: sessionId },
+      data: { status: "ready", finalizedAt: new Date() },
+    });
+
+    const rejectedTrackId = `track-${randomUUID()}`;
+    const rejected = await modules.presignUpload(
+      postJson(
+        "/api/upload/presign",
+        {
+          sessionId,
+          trackId: rejectedTrackId,
+          partNumber: 0,
+          participantName: "Too Late",
+        },
+        await hostHeaders(),
+      ),
+    );
+    expect(rejected.status).toBe(409);
+    await expect(
+      modules.db.track.findUnique({ where: { id: rejectedTrackId } }),
+    ).resolves.toBeNull();
+
+    const finalUpload = await modules.presignUpload(
+      postJson(
+        "/api/upload/presign",
+        { sessionId, trackId, partNumber: 9999 },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+    expect(finalUpload.status).toBe(200);
+    const finalBody = (await finalUpload.json()) as { url: string };
+    const originalRecording = await makeTinyWebm(880);
+    await putPresignedBytes(finalBody.url, originalRecording);
+
+    const complete = await modules.completeUpload(
+      postJson(
+        "/api/upload/complete",
+        { sessionId, trackId, durationMs: 120 },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+    expect(complete.status).toBe(200);
+    await expect(
+      modules.db.track.findUnique({ where: { id: trackId } }),
+    ).resolves.toMatchObject({ status: "complete", durationMs: 120 });
+    await expect(
+      modules.db.session.findUnique({ where: { id: sessionId } }),
+    ).resolves.toMatchObject({ status: "ready" });
+
+    const overwrite = await modules.presignUpload(
+      postJson(
+        "/api/upload/presign",
+        { sessionId, trackId, partNumber: 9999 },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+    expect(overwrite.status).toBe(409);
+    await expect(overwrite.json()).resolves.toMatchObject({
+      error: expect.stringContaining("already complete"),
+    });
+
+    const heldUrlOverwrite = await putPresignedBytesResponse(
+      finalBody.url,
+      await makeTinyWebm(990),
+    );
+    expect(heldUrlOverwrite.status).toBe(412);
+
+    const repeatedComplete = await modules.completeUpload(
+      postJson(
+        "/api/upload/complete",
+        { sessionId, trackId, durationMs: 999 },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+    expect(repeatedComplete.status).toBe(200);
+    await expect(
+      modules.s3.getObjectBytes(
+        modules.s3.trackRecordingKey(sessionId, trackId),
+      ),
+    ).resolves.toEqual(new Uint8Array(originalRecording));
+  });
+
+  it("rejects a delayed initial presign after targeted recovery stops its take", async () => {
+    const sessionId = await createSession("Stopped take presign guard");
+    const headers = await hostHeaders();
+    const started = await modules.setRecordingState(
+      postJson(
+        `/api/sessions/${sessionId}/recording-state`,
+        {
+          active: true,
+          sessionStartedAt: new Date().toISOString(),
+        },
+        headers,
+      ),
+      { params: Promise.resolve({ id: sessionId }) },
+    );
+    expect(started.status).toBe(200);
+    const startedBody = (await started.json()) as {
+      take: { id: string };
+    };
+
+    const stopped = await modules.setRecordingState(
+      postJson(
+        `/api/sessions/${sessionId}/recording-state`,
+        { active: false, takeId: startedBody.take.id },
+        headers,
+      ),
+      { params: Promise.resolve({ id: sessionId }) },
+    );
+    expect(stopped.status).toBe(200);
+
+    const delayedTrackId = `track-${randomUUID()}`;
+    const delayed = await modules.presignUpload(
+      postJson(
+        "/api/upload/presign",
+        {
+          sessionId,
+          trackId: delayedTrackId,
+          partNumber: 0,
+          participantName: "Delayed Participant",
+          takeId: startedBody.take.id,
+        },
+        headers,
+      ),
+    );
+
+    expect(delayed.status).toBe(409);
+    await expect(delayed.json()).resolves.toMatchObject({
+      error: expect.stringContaining("no longer active"),
+    });
+    await expect(
+      modules.db.track.findUnique({ where: { id: delayedTrackId } }),
+    ).resolves.toBeNull();
+    await expect(
+      modules.db.session.findUnique({ where: { id: sessionId } }),
+    ).resolves.toMatchObject({ status: "recording" });
+  });
+
+  it("serializes targeted recovery stop behind an in-flight presign lock", async () => {
+    const sessionId = await createSession("Targeted stop lock contract");
+    const headers = await hostHeaders();
+    const started = await modules.setRecordingState(
+      postJson(
+        `/api/sessions/${sessionId}/recording-state`,
+        {
+          active: true,
+          sessionStartedAt: new Date().toISOString(),
+        },
+        headers,
+      ),
+      { params: Promise.resolve({ id: sessionId }) },
+    );
+    const startedBody = (await started.json()) as { take: { id: string } };
+
+    let enterCriticalSection: () => void = () => {};
+    const criticalSectionEntered = new Promise<void>((resolve) => {
+      enterCriticalSection = resolve;
+    });
+    let releaseCriticalSection: () => void = () => {};
+    const holdCriticalSection = new Promise<void>((resolve) => {
+      releaseCriticalSection = resolve;
+    });
+    const presignCriticalSection = modules.withSessionLock(
+      sessionId,
+      async () => {
+        enterCriticalSection();
+        await holdCriticalSection;
+      },
+    );
+    await criticalSectionEntered;
+
+    let stopSettled = false;
+    const stopPromise = modules
+      .setRecordingState(
+        postJson(
+          `/api/sessions/${sessionId}/recording-state`,
+          { active: false, takeId: startedBody.take.id },
+          headers,
+        ),
+        { params: Promise.resolve({ id: sessionId }) },
+      )
+      .then((response) => {
+        stopSettled = true;
+        return response;
+      });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const stopSettledWhileLocked = stopSettled;
+    releaseCriticalSection();
+    await presignCriticalSection;
+    const stopped = await stopPromise;
+
+    expect(stopSettledWhileLocked).toBe(false);
+    expect(stopped.status).toBe(200);
+    await expect(
+      modules.db.recordingTake.findUnique({
+        where: { id: startedBody.take.id },
+      }),
+    ).resolves.toMatchObject({ status: "stopped" });
+  });
+
   it("creates, stores, completes, and cleans up a recording through real Postgres and S3-compatible storage", async () => {
     const sessionId = await createSession();
     const trackId = `track-${randomUUID()}`;

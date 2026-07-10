@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
+import { withSessionLock } from "@/lib/session-lock";
 import {
   trackRecordingKey,
   trackSegmentPartKey,
@@ -16,6 +18,8 @@ import {
   type Principal,
   verifyRecordingUploadToken,
 } from "@/lib/auth";
+
+const UPLOADABLE_STATUSES = new Set(["recording", "uploading"]);
 
 function getUploadErrorMessage(error: unknown): string {
   if (!(error instanceof Error)) {
@@ -45,15 +49,23 @@ function isUniqueConstraintError(error: unknown): boolean {
   );
 }
 
-async function findActiveTake(sessionId: string): Promise<{ id: string } | null> {
-  return await db.recordingTake.findFirst({
+async function findActiveTake(
+  client: Prisma.TransactionClient,
+  sessionId: string,
+): Promise<{ id: string } | null> {
+  return await client.recordingTake.findFirst({
     where: { sessionId, status: "recording" },
     orderBy: { startedAt: "desc" },
     select: { id: true },
   });
 }
 
+// All reads/writes run through the caller-supplied transaction client so this
+// executes inside the per-session advisory lock (issue #151): the session's
+// `ready` status is re-checked and the track/segment are created atomically
+// with respect to a concurrent finalize.
 async function ensureLogicalTrackAndSegment(input: {
+  client: Prisma.TransactionClient;
   sessionId: string;
   requestedTrackId: string;
   requestedSegmentId: string;
@@ -67,6 +79,7 @@ async function ensureLogicalTrackAndSegment(input: {
   sessionStartedAt: unknown;
 }) {
   const {
+    client,
     sessionId,
     requestedTrackId,
     requestedSegmentId,
@@ -99,9 +112,9 @@ async function ensureLogicalTrackAndSegment(input: {
   // time presign arrives (the host may have moved on to a newer take).
   let activeTake: { id: string } | null = null;
   if (requestedTakeId) {
-    const requestedTake = await db.recordingTake.findUnique({
+    const requestedTake = await client.recordingTake.findUnique({
       where: { id: requestedTakeId },
-      select: { id: true, sessionId: true },
+      select: { id: true, sessionId: true, status: true },
     });
     if (!requestedTake) {
       throw new Error("TAKE_NOT_FOUND");
@@ -109,13 +122,16 @@ async function ensureLogicalTrackAndSegment(input: {
     if (requestedTake.sessionId !== sessionId) {
       throw new Error("TAKE_SESSION_MISMATCH");
     }
+    if (requestedTake.status !== "recording") {
+      throw new Error("TAKE_NOT_ACTIVE");
+    }
     activeTake = { id: requestedTake.id };
   } else {
-    activeTake = await findActiveTake(sessionId);
+    activeTake = await findActiveTake(client, sessionId);
   }
 
   let track = activeTake
-    ? await db.track.findFirst({
+    ? await client.track.findFirst({
         where: {
           sessionId,
           takeId: activeTake.id,
@@ -126,7 +142,7 @@ async function ensureLogicalTrackAndSegment(input: {
     : null;
 
   if (!track) {
-    const existingTrack = await db.track.findUnique({
+    const existingTrack = await client.track.findUnique({
       where: { id: requestedTrackId },
     });
 
@@ -158,7 +174,7 @@ async function ensureLogicalTrackAndSegment(input: {
         : null;
 
     try {
-      track = await db.track.create({
+      track = await client.track.create({
         data: {
           id: requestedTrackId,
           sessionId,
@@ -176,7 +192,7 @@ async function ensureLogicalTrackAndSegment(input: {
       if (!activeTake || !isUniqueConstraintError(error)) {
         throw error;
       }
-      track = await db.track.findFirst({
+      track = await client.track.findFirst({
         where: {
           sessionId,
           takeId: activeTake.id,
@@ -188,7 +204,7 @@ async function ensureLogicalTrackAndSegment(input: {
     }
   }
 
-  let segment = await db.trackSegment.findUnique({
+  let segment = await client.trackSegment.findUnique({
     where: { id: requestedSegmentId },
   });
 
@@ -202,11 +218,11 @@ async function ensureLogicalTrackAndSegment(input: {
     // can collide; the loser recounts and retries.
     const maxAttempts = 3;
     for (let attempt = 1; !segment; attempt++) {
-      const segmentIndex = await db.trackSegment.count({
+      const segmentIndex = await client.trackSegment.count({
         where: { trackId: track.id },
       });
       try {
-        segment = await db.trackSegment.create({
+        segment = await client.trackSegment.create({
           data: {
             id: requestedSegmentId,
             trackId: track.id,
@@ -224,7 +240,7 @@ async function ensureLogicalTrackAndSegment(input: {
         }
         // A duplicate request may have created this exact segment id rather
         // than just claiming the index — reuse it instead of retrying.
-        const existing = await db.trackSegment.findUnique({
+        const existing = await client.trackSegment.findUnique({
           where: { id: requestedSegmentId },
         });
         if (existing) {
@@ -242,12 +258,13 @@ async function ensureLogicalTrackAndSegment(input: {
     // flight — pull it back to recording until completion resolves it. The
     // condition lives in the write so a completion that landed after our
     // track read still gets demoted.
-    const demoted = await db.track.updateMany({
+    const demoted = await client.track.updateMany({
       where: { id: track.id, status: { in: ["complete", "failed"] } },
       data: { status: "recording" },
     });
     if (demoted.count > 0) {
-      track = (await db.track.findUnique({ where: { id: track.id } })) ?? track;
+      track =
+        (await client.track.findUnique({ where: { id: track.id } })) ?? track;
     }
   }
 
@@ -299,7 +316,7 @@ export async function POST(req: NextRequest) {
 
       const existingSession = await db.session.findUnique({
         where: { id: sessionId },
-        select: { id: true },
+        select: { id: true, status: true },
       });
 
       if (!existingSession) {
@@ -309,22 +326,70 @@ export async function POST(req: NextRequest) {
         );
       }
 
+      // Refuse to start a brand-new recording (new track/segment) on a
+      // finalized session. Its id has already been handed to ingest, so
+      // any audio recorded here would attach to an old, already-ingested
+      // session and never make it downstream (issue #151). Late chunk/final
+      // uploads for tracks that started before finalize take the non-start
+      // path below and are unaffected. This is a cheap early-out for the
+      // common already-finalized case; the authoritative check runs under the
+      // advisory lock below so a concurrent finalize can't slip in between.
+      if (existingSession.status === "ready") {
+        return NextResponse.json(
+          {
+            error:
+              "This session is finalized and can no longer be recorded into. Start a new session.",
+          },
+          { status: 409 }
+        );
+      }
+
       try {
-        const { track, segment } = await ensureLogicalTrackAndSegment({
-          sessionId,
-          requestedTrackId: trackId,
-          requestedSegmentId: segmentId,
-          requestedTakeId,
-          localTrackSlotId,
-          principal,
-          participantName,
-          deviceLabel,
-          deviceId,
-          isBuiltInMic,
-          sessionStartedAt,
+        // Re-check status and materialize the track/segment under a per-session
+        // advisory lock so a finalize that flips the session to `ready` cannot
+        // interleave between the status read and the create (issue #151).
+        const locked = await withSessionLock(sessionId, async (tx) => {
+          const fresh = await tx.session.findUnique({
+            where: { id: sessionId },
+            select: { status: true },
+          });
+          if (!fresh) return { kind: "not_found" as const };
+          if (fresh.status === "ready") return { kind: "finalized" as const };
+
+          const { track, segment } = await ensureLogicalTrackAndSegment({
+            client: tx,
+            sessionId,
+            requestedTrackId: trackId,
+            requestedSegmentId: segmentId,
+            requestedTakeId,
+            localTrackSlotId,
+            principal,
+            participantName,
+            deviceLabel,
+            deviceId,
+            isBuiltInMic,
+            sessionStartedAt,
+          });
+          return { kind: "ok" as const, track, segment };
         });
-        logicalTrackId = track.id;
-        segmentId = segment.id;
+
+        if (locked.kind === "not_found") {
+          return NextResponse.json(
+            { error: `Session ${sessionId} was not found` },
+            { status: 404 }
+          );
+        }
+        if (locked.kind === "finalized") {
+          return NextResponse.json(
+            {
+              error:
+                "This session is finalized and can no longer be recorded into. Start a new session.",
+            },
+            { status: 409 }
+          );
+        }
+        logicalTrackId = locked.track.id;
+        segmentId = locked.segment.id;
       } catch (error) {
         if (
           error instanceof Error &&
@@ -356,6 +421,12 @@ export async function POST(req: NextRequest) {
           return NextResponse.json(
             { error: "Recording take not found" },
             { status: 404 }
+          );
+        }
+        if (error instanceof Error && error.message === "TAKE_NOT_ACTIVE") {
+          return NextResponse.json(
+            { error: "Recording take is no longer active" },
+            { status: 409 }
           );
         }
         throw error;
@@ -391,7 +462,7 @@ export async function POST(req: NextRequest) {
       // any writable URL is issued.
       const existingTrack = await db.track.findUnique({
         where: { id: trackId },
-        select: { sessionId: true },
+        select: { sessionId: true, status: true },
       });
       if (!existingTrack) {
         return NextResponse.json({ error: "Track not found" }, { status: 404 });
@@ -401,7 +472,7 @@ export async function POST(req: NextRequest) {
       }
       const existingSegment = await db.trackSegment.findUnique({
         where: { id: segmentId },
-        select: { trackId: true },
+        select: { trackId: true, status: true },
       });
       if (!existingSegment) {
         return NextResponse.json(
@@ -412,13 +483,27 @@ export async function POST(req: NextRequest) {
       if (existingSegment.trackId !== trackId) {
         return NextResponse.json({ error: "forbidden" }, { status: 403 });
       }
+      if (
+        !UPLOADABLE_STATUSES.has(existingTrack.status) ||
+        !UPLOADABLE_STATUSES.has(existingSegment.status)
+      ) {
+        return NextResponse.json(
+          {
+            error:
+              "Recording upload is already complete or terminal and cannot be overwritten",
+          },
+          { status: 409 }
+        );
+      }
     }
 
     const key =
       partNumber === 9999
         ? trackSegmentRecordingKey(sessionId, logicalTrackId, segmentId)
         : trackSegmentPartKey(sessionId, logicalTrackId, segmentId, partNumber);
-    const url = await getPresignedPutUrl(key);
+    const url = await getPresignedPutUrl(key, {
+      createOnly: partNumber === 9999,
+    });
 
     return NextResponse.json({
       url,

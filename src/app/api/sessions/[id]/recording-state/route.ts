@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { withSessionLock } from "@/lib/session-lock";
 import {
   principalParticipantId,
   resolvePrincipal,
@@ -75,7 +76,7 @@ async function requirePrincipal(req: NextRequest, sessionId: string) {
 async function requireSession(sessionId: string) {
   return await db.session.findUnique({
     where: { id: sessionId },
-    select: { id: true },
+    select: { id: true, status: true },
   });
 }
 
@@ -143,15 +144,6 @@ function serializeParticipantStatus(status: {
   };
 }
 
-function isUniqueActiveTakeConflict(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code?: unknown }).code === "P2002"
-  );
-}
-
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -210,41 +202,142 @@ export async function POST(
         );
       }
 
-      const existing = await findActiveTake(id);
-      if (existing) {
-        return NextResponse.json(serializeRecordingState(existing, true));
-      }
+      // Re-read status and create the take under a per-session advisory lock so
+      // a concurrent finalize cannot interleave between the status check and the
+      // take creation (issue #151). Without the lock this is a check-then-create
+      // race: finalize could flip the session to `ready` just after we read
+      // `recording`, and we'd attach a new take to an already-ingested session.
+      // Holding the lock also serializes competing starts, so the loser observes
+      // the winner's take instead of colliding on the unique-active-take index.
+      const outcome = await withSessionLock(id, async (tx) => {
+        const fresh = await tx.session.findUnique({
+          where: { id },
+          select: { status: true },
+        });
+        if (!fresh) return { kind: "not_found" as const };
+        if (fresh.status === "ready") return { kind: "finalized" as const };
 
-      try {
-        const created = await db.recordingTake.create({
+        const existing = await tx.recordingTake.findFirst({
+          where: { sessionId: id, status: "recording" },
+          orderBy: { startedAt: "desc" },
+          include: {
+            participantStatuses: { orderBy: { participantName: "asc" } },
+          },
+        });
+        if (existing) return { kind: "existing" as const, take: existing };
+
+        const created = await tx.recordingTake.create({
           data: { sessionId: id, startedAt },
           include: { participantStatuses: true },
         });
-        return NextResponse.json(serializeRecordingState(created, true));
-      } catch (error) {
-        if (isUniqueActiveTakeConflict(error)) {
-          const current = await findActiveTake(id);
-          return NextResponse.json(serializeRecordingState(current, Boolean(current)));
-        }
-        throw error;
+        return { kind: "created" as const, take: created };
+      });
+
+      if (outcome.kind === "not_found") {
+        return NextResponse.json({ error: "Session not found" }, { status: 404 });
       }
+      if (outcome.kind === "finalized") {
+        return NextResponse.json(
+          {
+            error:
+              "This session is finalized and can no longer be recorded into. Start a new session.",
+          },
+          { status: 409 },
+        );
+      }
+      return NextResponse.json(serializeRecordingState(outcome.take, true));
     }
 
-    // Stop is idempotent: if there's no recording take (already stopped, or a
-    // retry after the first stop landed), report inactive instead of erroring,
-    // so a retrying client converges.
-    const current = await findActiveTake(id);
-    if (!current) {
+    const requestedTakeId =
+      typeof body?.takeId === "string" && body.takeId.length > 0
+        ? body.takeId
+        : null;
+
+    if (requestedTakeId) {
+      const outcome = await withSessionLock(id, async (tx) => {
+        const target = await tx.recordingTake.findUnique({
+          where: { id: requestedTakeId },
+          include: {
+            participantStatuses: { orderBy: { participantName: "asc" } },
+          },
+        });
+        if (target && target.sessionId !== id) {
+          return { kind: "forbidden" as const };
+        }
+
+        // Recovery stops only the take finalize reported. A delayed
+        // confirmation must never stop a newer active take that appeared in
+        // the meantime. Sharing the session advisory lock with initial presign
+        // also prevents stop from landing between its take-status read and its
+        // track/segment creation.
+        if (target?.status === "recording") {
+          await tx.recordingTake.updateMany({
+            where: { id: requestedTakeId, sessionId: id, status: "recording" },
+            data: { stoppedAt: new Date(), status: "stopped" },
+          });
+        }
+
+        const remainingActive = await tx.recordingTake.findFirst({
+          where: { sessionId: id, status: "recording" },
+          orderBy: { startedAt: "desc" },
+          include: {
+            participantStatuses: { orderBy: { participantName: "asc" } },
+          },
+        });
+        if (remainingActive) {
+          return { kind: "active" as const, take: remainingActive };
+        }
+
+        const stoppedTarget = target
+          ? await tx.recordingTake.findUnique({
+              where: { id: requestedTakeId },
+              include: {
+                participantStatuses: { orderBy: { participantName: "asc" } },
+              },
+            })
+          : null;
+        return { kind: "inactive" as const, take: stoppedTarget };
+      });
+
+      if (outcome.kind === "forbidden") {
+        return NextResponse.json({ error: "forbidden" }, { status: 403 });
+      }
+      if (outcome.kind === "active") {
+        return NextResponse.json(
+          serializeRecordingState(outcome.take, true),
+        );
+      }
+      return NextResponse.json(
+        serializeRecordingState(outcome.take, false),
+      );
+    }
+
+    // Serialize the legacy untargeted stop with starts, recovery stops, and
+    // initial presigns. Otherwise a delayed presign can validate the active
+    // take, lose the race to this stop, and create writable artifacts for a
+    // take that is already stopped.
+    const stopped = await withSessionLock(id, async (tx) => {
+      const current = await tx.recordingTake.findFirst({
+        where: { sessionId: id, status: "recording" },
+        orderBy: { startedAt: "desc" },
+      });
+      if (!current) return null;
+
+      return await tx.recordingTake.update({
+        where: { id: current.id },
+        data: { stoppedAt: new Date(), status: "stopped" },
+        include: {
+          participantStatuses: { orderBy: { participantName: "asc" } },
+        },
+      });
+    });
+
+    // Keep the existing idempotent behavior: if there's no active take
+    // (already stopped, or a retry after the first stop landed), report
+    // inactive so a retrying client converges.
+    if (!stopped) {
       return NextResponse.json(serializeRecordingState(null, false));
     }
-
-    const stopped = await db.recordingTake.update({
-      where: { id: current.id },
-      data: { stoppedAt: new Date(), status: "stopped" },
-      include: {
-        participantStatuses: { orderBy: { participantName: "asc" } },
-      },
-    });
     return NextResponse.json(serializeRecordingState(stopped, false));
   } catch (error) {
     console.error("Failed to update recording state:", error);

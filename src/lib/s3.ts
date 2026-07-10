@@ -131,11 +131,15 @@ export function sessionPrefix(sessionId: string): string {
   return `sessions/${sessionId}/`;
 }
 
-export async function getPresignedPutUrl(key: string): Promise<string> {
+export async function getPresignedPutUrl(
+  key: string,
+  options: { createOnly?: boolean } = {},
+): Promise<string> {
   const command = new PutObjectCommand({
     Bucket: bucket,
     Key: key,
     ContentType: "audio/webm",
+    IfNoneMatch: options.createOnly ? "*" : undefined,
   });
   return getSignedUrl(s3, command, { expiresIn: 3600 });
 }

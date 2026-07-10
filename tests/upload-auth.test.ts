@@ -22,7 +22,7 @@ type TrackSegment = {
 };
 
 const mocks = vi.hoisted(() => ({
-  sessions: new Set<string>(),
+  sessions: new Map<string, string>(),
   tracks: new Map<string, Track>(),
   segments: new Map<string, TrackSegment>(),
   getPresignedPutUrl: vi.fn(async (key: string) => `https://s3.example/${key}`),
@@ -30,11 +30,14 @@ const mocks = vi.hoisted(() => ({
   resolvePrincipal: vi.fn(),
 }));
 
-vi.mock("@/lib/db", () => ({
-  db: {
+vi.mock("@/lib/db", () => {
+  const client = {
+    // withSessionLock runs its callback inside db.$transaction and issues a raw
+    // advisory-lock query; the mock just needs these to exist and pass through.
+    $executeRaw: async () => 0,
     session: {
       findUnique: vi.fn(async ({ where: { id } }: { where: { id: string } }) =>
-        mocks.sessions.has(id) ? { id } : null,
+        mocks.sessions.has(id) ? { id, status: mocks.sessions.get(id) } : null,
       ),
     },
     recordingTake: {
@@ -176,8 +179,14 @@ vi.mock("@/lib/db", () => ({
         },
       ),
     },
-  },
-}));
+  };
+  return {
+    db: {
+      ...client,
+      $transaction: async (fn: (tx: typeof client) => unknown) => fn(client),
+    },
+  };
+});
 
 vi.mock("@/lib/s3", () => ({
   getPresignedPutUrl: mocks.getPresignedPutUrl,
@@ -245,7 +254,7 @@ beforeEach(() => {
   mocks.sessions.clear();
   mocks.tracks.clear();
   mocks.segments.clear();
-  mocks.sessions.add("s1");
+  mocks.sessions.set("s1", "recording");
   vi.clearAllMocks();
   mocks.resolvePrincipal.mockResolvedValue(null);
 });
@@ -394,6 +403,7 @@ describe("recording upload auth", () => {
     const { recordingToken } = (await start.json()) as {
       recordingToken: string;
     };
+    mocks.getPresignedPutUrl.mockClear();
 
     const res = await presignUpload(
       postJson(
@@ -406,6 +416,10 @@ describe("recording upload auth", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { key: string; url: string };
     expect(body.key).toBe("sessions/s1/tracks/t1/recording.webm");
+    expect(mocks.getPresignedPutUrl).toHaveBeenCalledWith(
+      "sessions/s1/tracks/t1/recording.webm",
+      { createOnly: true },
+    );
   });
 
   it("rejects a recording token for a different track", async () => {
@@ -455,6 +469,92 @@ describe("recording upload auth", () => {
       durationMs: 12345,
     });
     expect(mocks.deleteTrackSegmentChunks).toHaveBeenCalledWith("s1", "t1", "t1");
+
+    const retry = await completeUpload(
+      postJson(
+        "/api/upload/complete",
+        { sessionId: "s1", trackId: "t1", durationMs: 12345 },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+    expect(retry.status).toBe(200);
+    expect(mocks.deleteTrackSegmentChunks).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows authorized chunk presign and completion for a track created before finalization", async () => {
+    mocks.resolvePrincipal.mockResolvedValueOnce({ kind: "host" });
+    const start = await presignUpload(
+      postJson("/api/upload/presign", {
+        sessionId: "s1",
+        trackId: "t1",
+        partNumber: 0,
+        participantName: "Alice",
+      }),
+    );
+    expect(start.status).toBe(200);
+    const { recordingToken } = (await start.json()) as {
+      recordingToken: string;
+    };
+
+    mocks.sessions.set("s1", "ready");
+
+    const chunk = await presignUpload(
+      postJson(
+        "/api/upload/presign",
+        { sessionId: "s1", trackId: "t1", partNumber: 1 },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+    expect(chunk.status).toBe(200);
+
+    const complete = await completeUpload(
+      postJson(
+        "/api/upload/complete",
+        { sessionId: "s1", trackId: "t1", durationMs: 12345 },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+    expect(complete.status).toBe(200);
+    expect(mocks.tracks.get("t1")).toMatchObject({
+      status: "complete",
+      durationMs: 12345,
+    });
+  });
+
+  it("does not issue a writable URL for a complete track after finalization", async () => {
+    mocks.sessions.set("s1", "ready");
+    mocks.tracks.set("t1", {
+      id: "t1",
+      sessionId: "s1",
+      participantName: "Alice",
+      s3Key: "sessions/s1/tracks/t1/recording.webm",
+      status: "complete",
+      durationMs: 12345,
+    });
+    mocks.segments.set("t1", {
+      id: "t1",
+      trackId: "t1",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/t1/",
+      status: "complete",
+      durationMs: 12345,
+    });
+    const recordingToken = await issueRecordingUploadToken("s1", "t1");
+    mocks.getPresignedPutUrl.mockClear();
+
+    const res = await presignUpload(
+      postJson(
+        "/api/upload/presign",
+        { sessionId: "s1", trackId: "t1", partNumber: 9999 },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toMatchObject({
+      error: expect.stringContaining("already complete"),
+    });
+    expect(mocks.getPresignedPutUrl).not.toHaveBeenCalled();
   });
 
   it("forbids completing a track outside the requested session", async () => {

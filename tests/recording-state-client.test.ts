@@ -62,6 +62,26 @@ describe("stopRecordingTake durability", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("targets only the unfinished take reported by finalization", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(inactiveState, 200));
+
+    await stopRecordingTake("s1", {
+      takeId: "take-from-finalize",
+      retryDelayMs: 0,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/sessions/s1/recording-state",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          active: false,
+          takeId: "take-from-finalize",
+        }),
+      }),
+    );
+  });
+
   it("gives up after exhausting attempts and throws the last error", async () => {
     fetchMock.mockResolvedValue(jsonResponse({ error: "still down" }, 500));
 

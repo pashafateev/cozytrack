@@ -10,6 +10,7 @@ type Session = {
 };
 
 const sessionStore = new Map<string, Session>();
+const activeTakes = new Map<string, { id: string; startedAt: Date }>();
 
 function tracksFor(sessionId: string): Track[] {
   return sessionStore.get(sessionId)?.tracks ?? [];
@@ -21,8 +22,11 @@ vi.mock("@/lib/recovery", () => ({
   recoverTrack: vi.fn(async (trackId: string) => ({ trackId })),
 }));
 
-vi.mock("@/lib/db", () => ({
-  db: {
+vi.mock("@/lib/db", () => {
+  const client = {
+    // withSessionLock runs its callback inside db.$transaction and issues a raw
+    // advisory-lock query; the mock just needs these to exist and pass through.
+    $executeRaw: async () => 0,
     session: {
       findUnique: vi.fn(async ({ where: { id } }: { where: { id: string } }) => {
         const s = sessionStore.get(id);
@@ -61,14 +65,31 @@ vi.mock("@/lib/db", () => ({
         },
       ),
     },
+    recordingTake: {
+      findFirst: vi.fn(
+        async ({
+          where: { sessionId, status },
+        }: {
+          where: { sessionId: string; status?: string };
+        }) =>
+          status === "recording" && activeTakes.has(sessionId)
+            ? structuredClone(activeTakes.get(sessionId))
+            : null,
+      ),
+    },
     track: {
       findMany: vi.fn(
         async ({
           where,
         }: {
-          where: { id: { in: string[] } };
+          where: { sessionId?: string; id?: { in: string[] } };
         }) => {
-          const ids = new Set(where.id.in);
+          // finalize now re-reads all tracks for a session under the advisory
+          // lock; still support the legacy id-in shape for safety.
+          if (where.sessionId !== undefined) {
+            return tracksFor(where.sessionId).map((t) => structuredClone(t));
+          }
+          const ids = new Set(where.id?.in ?? []);
           const all: Track[] = [];
           for (const s of sessionStore.values()) {
             for (const t of s.tracks) {
@@ -79,8 +100,14 @@ vi.mock("@/lib/db", () => ({
         },
       ),
     },
-  },
-}));
+  };
+  return {
+    db: {
+      ...client,
+      $transaction: async (fn: (tx: typeof client) => unknown) => fn(client),
+    },
+  };
+});
 
 import { POST } from "@/app/api/sessions/[id]/finalize/route";
 import { NextRequest } from "next/server";
@@ -93,6 +120,7 @@ function req(): NextRequest {
 
 beforeEach(() => {
   sessionStore.clear();
+  activeTakes.clear();
   vi.clearAllMocks();
 });
 
@@ -129,6 +157,33 @@ describe("POST /api/sessions/[id]/finalize", () => {
       "t2",
       expect.objectContaining({ chunkStitchMinAgeMs: expect.any(Number) }),
     );
+  });
+
+  it("returns 409 while a recording take is active even before any track exists", async () => {
+    // Race window (issue #151): /recording-state created the take but presign
+    // hasn't created the first track yet. Finalize must not slip through and
+    // mark the session ready — that would strand the in-progress recording.
+    sessionStore.set("s1", {
+      id: "s1",
+      name: "demo",
+      status: "recording",
+      finalizedAt: null,
+      tracks: [],
+    });
+    const startedAt = new Date("2026-07-08T15:00:00.000Z");
+    activeTakes.set("s1", { id: "take-s1", startedAt });
+
+    const res = await POST(req(), { params: Promise.resolve({ id: "s1" }) });
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toEqual({
+      error: "An unfinished recording take is still active.",
+      activeTake: {
+        id: "take-s1",
+        startedAt: startedAt.toISOString(),
+      },
+    });
+    expect(sessionStore.get("s1")?.status).toBe("recording");
+    expect(sessionStore.get("s1")?.finalizedAt).toBeNull();
   });
 
   it("finalizes when recovery flips a stuck track to complete", async () => {
