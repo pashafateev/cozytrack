@@ -19,6 +19,8 @@ import {
   verifyRecordingUploadToken,
 } from "@/lib/auth";
 
+const UPLOADABLE_STATUSES = new Set(["recording", "uploading"]);
+
 function getUploadErrorMessage(error: unknown): string {
   if (!(error instanceof Error)) {
     return "Failed to generate presigned URL";
@@ -460,7 +462,7 @@ export async function POST(req: NextRequest) {
       // any writable URL is issued.
       const existingTrack = await db.track.findUnique({
         where: { id: trackId },
-        select: { sessionId: true },
+        select: { sessionId: true, status: true },
       });
       if (!existingTrack) {
         return NextResponse.json({ error: "Track not found" }, { status: 404 });
@@ -470,7 +472,7 @@ export async function POST(req: NextRequest) {
       }
       const existingSegment = await db.trackSegment.findUnique({
         where: { id: segmentId },
-        select: { trackId: true },
+        select: { trackId: true, status: true },
       });
       if (!existingSegment) {
         return NextResponse.json(
@@ -480,6 +482,18 @@ export async function POST(req: NextRequest) {
       }
       if (existingSegment.trackId !== trackId) {
         return NextResponse.json({ error: "forbidden" }, { status: 403 });
+      }
+      if (
+        !UPLOADABLE_STATUSES.has(existingTrack.status) ||
+        !UPLOADABLE_STATUSES.has(existingSegment.status)
+      ) {
+        return NextResponse.json(
+          {
+            error:
+              "Recording upload is already complete or terminal and cannot be overwritten",
+          },
+          { status: 409 }
+        );
       }
     }
 
