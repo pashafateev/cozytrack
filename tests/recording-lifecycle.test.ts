@@ -47,6 +47,7 @@ class FakeRecorder implements RecorderLike {
   started = false;
   stopped = false;
   startTimeSlice: number | undefined;
+  startGate: Promise<void> | null = null;
   startError: Error | null = null;
   stopError: Error | null = null;
   stopBlob = new Blob(["final-recording"], { type: "audio/webm" });
@@ -57,6 +58,7 @@ class FakeRecorder implements RecorderLike {
 
   async start(timeSliceMs?: number): Promise<void> {
     this.startTimeSlice = timeSliceMs;
+    if (this.startGate) await this.startGate;
     if (this.startError) throw this.startError;
     this.started = true;
   }
@@ -833,6 +835,134 @@ describe("RecordingLifecycleController stop", () => {
     expect(eventNames).toContain("record-start");
     expect(eventNames).toContain("chunk");
     expect(eventNames).toContain("record-stop");
+  });
+
+  it("holds a stop that lands mid-start until startup settles, then stops the slots", async () => {
+    const h = makeHarness();
+    const presignGate = deferred<void>();
+    h.uploadApi.getPresignedUploadTarget.mockImplementationOnce((async () => {
+      await presignGate.promise;
+      return {
+        url: "https://s3.test/primary/0.webm",
+        recordingToken: "token-primary",
+        trackId: "track-primary",
+        segmentId: "segment-primary",
+      };
+    }) as never);
+
+    const startPromise = h.controller.start([primarySpec()], START_OPTS);
+    await settle();
+    expect(h.controller.active).toBe(true);
+
+    // The room stops while our start is still blocked in presign. The stop
+    // must not be dropped — and the eventual start must not resurrect the
+    // recording after the room stopped (Codex P1 on PR #165).
+    const stopPromise = h.controller.stop();
+    await settle();
+    expect(h.uploadApi.completeUpload).not.toHaveBeenCalled();
+
+    presignGate.resolve();
+    const [startResult, stopResult] = await Promise.all([
+      startPromise,
+      stopPromise,
+    ]);
+
+    // The caller is told a stop is already pending so it must not flip the
+    // studio into the recording state.
+    expect(startResult).toEqual({ ok: true, stopPending: true });
+    expect(h.controller.recording).toBe(false);
+    // The slot really started, then the held stop finalized it.
+    expect(stopResult).toEqual({ stopped: true, anyCompleted: true });
+    expect(h.recorders[0].started).toBe(true);
+    expect(h.recorders[0].stopped).toBe(true);
+    expect(h.uploadApi.completeUpload).toHaveBeenCalledTimes(1);
+    expect(h.controller.active).toBe(false);
+  });
+
+  it("holds a stop that lands while a recorder is still starting", async () => {
+    const h = makeHarness();
+    const startGate = deferred<void>();
+    // Slot 2's recorder blocks in start(); slot 1 is already capturing.
+    const armGate = setInterval(() => {
+      if (h.recorders.length === 2 && !h.recorders[1].started) {
+        h.recorders[1].startGate = startGate.promise;
+        clearInterval(armGate);
+      }
+    }, 0);
+
+    const startPromise = h.controller.start([slotSpec(1), slotSpec(2)], START_OPTS);
+    await settle();
+    clearInterval(armGate);
+
+    const stopPromise = h.controller.stop();
+    await settle();
+    expect(h.recorders[0].stopped).toBe(false);
+
+    startGate.resolve();
+    const [startResult, stopResult] = await Promise.all([
+      startPromise,
+      stopPromise,
+    ]);
+
+    expect(startResult).toEqual({ ok: true, stopPending: true });
+    expect(stopResult).toEqual({ stopped: true, anyCompleted: true });
+    expect(h.recorders.every((recorder) => recorder.stopped)).toBe(true);
+    const completed = h.uploadApi.completeUpload.mock.calls.map(
+      (call) => call[1],
+    );
+    expect(completed).toContain("track-host-local-ch-1");
+    expect(completed).toContain("track-host-local-ch-2");
+    expect(h.controller.active).toBe(false);
+  });
+
+  it("resolves a mid-start stop as a no-op when the start itself fails", async () => {
+    const h = makeHarness();
+    const presignGate = deferred<void>();
+    h.uploadApi.getPresignedUploadTarget.mockImplementationOnce((async () => {
+      await presignGate.promise;
+      throw new Error("presign failed");
+    }) as never);
+
+    const startPromise = h.controller.start([primarySpec()], START_OPTS);
+    await settle();
+    const stopPromise = h.controller.stop();
+    presignGate.resolve();
+
+    const [startResult, stopResult] = await Promise.all([
+      startPromise,
+      stopPromise,
+    ]);
+
+    expect(startResult).toEqual({ ok: false, stage: "presign" });
+    expect(stopResult).toEqual({ stopped: false, anyCompleted: false });
+    expect(h.controller.active).toBe(false);
+  });
+
+  it("only one of two stops racing a mid-flight start performs the stop", async () => {
+    const h = makeHarness();
+    const presignGate = deferred<void>();
+    h.uploadApi.getPresignedUploadTarget.mockImplementationOnce((async () => {
+      await presignGate.promise;
+      return {
+        url: "https://s3.test/primary/0.webm",
+        recordingToken: "token-primary",
+        trackId: "track-primary",
+        segmentId: "segment-primary",
+      };
+    }) as never);
+
+    const startPromise = h.controller.start([primarySpec()], START_OPTS);
+    await settle();
+    const firstStop = h.controller.stop();
+    const secondStop = h.controller.stop();
+    presignGate.resolve();
+
+    const [first, second] = await Promise.all([firstStop, secondStop]);
+    await startPromise;
+
+    const performed = [first, second].filter((result) => result.stopped);
+    expect(performed).toHaveLength(1);
+    expect(h.uploadApi.completeUpload).toHaveBeenCalledTimes(1);
   });
 
   it("allows a fresh start after a completed stop", async () => {
