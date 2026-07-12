@@ -405,12 +405,16 @@ test("recovers an unfinished active take before finalizing", async ({ page }) =>
     db.track.count({ where: { sessionId } }),
     db.trackSegment.count({ where: { track: { sessionId } } }),
   ]);
-  await page.getByRole("button", { name: "Start recording" }).click();
-  await expect(
-    page.getByText(
-      "This session is finalized and can no longer be recorded into. Start a new session.",
-    ),
-  ).toBeVisible();
+  // Finalizing locks the studio in place: the REC button disables with an
+  // explanation and the panel offers a fresh session instead of a click that
+  // can only 409.
+  const recButton = page.getByRole("button", { name: "Session finalized" });
+  await expect(recButton).toBeVisible();
+  await expect(recButton).toBeDisabled();
+  const startNewSession = page.getByRole("button", {
+    name: "Start a new session",
+  });
+  await expect(startNewSession).toBeVisible();
   await page.waitForTimeout(500);
   await expect(
     Promise.all([
@@ -419,6 +423,23 @@ test("recovers an unfinished active take before finalizing", async ({ page }) =>
       db.trackSegment.count({ where: { track: { sessionId } } }),
     ]),
   ).resolves.toEqual(beforeRetry);
+
+  // The CTA creates a fresh session and lands the host on its prejoin.
+  await startNewSession.click();
+  await page.waitForURL(
+    (url) =>
+      url.pathname.startsWith("/studio/") && !url.pathname.includes(sessionId),
+    { timeout: 15_000 },
+  );
+  await expect(
+    page.getByRole("heading", { name: "Join Studio" }),
+  ).toBeVisible();
+  const newSessionId = new URL(page.url()).pathname.split("/").pop()!;
+  expect(newSessionId).not.toBe(sessionId);
+  const freshSession = await db.session.findUniqueOrThrow({
+    where: { id: newSessionId },
+  });
+  expect(freshSession.status).toBe("recording");
 });
 
 test("recovers a failed final upload from the local browser backup", async ({

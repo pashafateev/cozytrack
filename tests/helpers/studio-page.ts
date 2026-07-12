@@ -12,6 +12,12 @@ const studioPageHarness = vi.hoisted(() => ({
   route: {
     sessionId: "session-guest",
   },
+  // Route-specific bodies for the global fetch stub. `sessionResponse` is
+  // null by default so the stub can fall back to a fresh non-finalized
+  // session for whatever sessionId the test rendered with.
+  sessionResponse: null as { id: string; status: string } | null,
+  createSessionResponse: { id: "session-new" },
+  finalizeResponse: {} as Record<string, unknown>,
   getToken: vi.fn(async () => "livekit-token"),
   sendControlMessage: vi.fn(async (_message: { type: string }) => undefined),
   onControlMessage: vi.fn(() => vi.fn()),
@@ -50,6 +56,11 @@ const studioPageHarness = vi.hoisted(() => ({
     buildRecordingBlob: vi.fn(),
   },
 }));
+
+// Exposed so tests can configure route-level responses (e.g. a finalized
+// session) before rendering, including for the guest helper which doesn't
+// return the harness.
+export { studioPageHarness };
 
 vi.mock("next/navigation", () => ({
   useParams: () => ({ id: studioPageHarness.route.sessionId }),
@@ -94,12 +105,20 @@ vi.mock("@/lib/transport", () => {
   };
 });
 
-vi.mock("@/lib/recording-state", () => ({
-  startRecordingTake: studioPageHarness.startRecordingTake,
-  stopRecordingTake: studioPageHarness.stopRecordingTake,
-  reportRecordingTakeParticipantStatus:
-    studioPageHarness.reportRecordingTakeParticipantStatus,
-}));
+vi.mock("@/lib/recording-state", async (importOriginal) => {
+  // Keep the real RecordingStateError class so `err instanceof
+  // RecordingStateError` in the studio page works against errors that tests
+  // construct via the same import.
+  const actual =
+    await importOriginal<typeof import("@/lib/recording-state")>();
+  return {
+    RecordingStateError: actual.RecordingStateError,
+    startRecordingTake: studioPageHarness.startRecordingTake,
+    stopRecordingTake: studioPageHarness.stopRecordingTake,
+    reportRecordingTakeParticipantStatus:
+      studioPageHarness.reportRecordingTakeParticipantStatus,
+  };
+});
 
 vi.mock("@/lib/upload", () => ({
   getPresignedUploadTarget: studioPageHarness.getPresignedUploadTarget,
@@ -296,10 +315,41 @@ beforeEach(() => {
     dispose: studioPageHarness.splitterDispose,
   }));
 
+  studioPageHarness.sessionResponse = null;
+  studioPageHarness.createSessionResponse = { id: "session-new" };
+  studioPageHarness.finalizeResponse = {};
+
   vi.stubGlobal("AudioContext", FakeAudioContext);
   vi.stubGlobal(
     "fetch",
-    vi.fn(async () => Response.json(studioPageHarness.authMeResponse)),
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const path = url.split("?")[0];
+
+      if (path === "/api/sessions" && init?.method === "POST") {
+        return Response.json(studioPageHarness.createSessionResponse, {
+          status: 201,
+        });
+      }
+      if (/^\/api\/sessions\/[^/]+\/finalize$/.test(path)) {
+        return Response.json(studioPageHarness.finalizeResponse);
+      }
+      if (/^\/api\/sessions\/[^/]+$/.test(path)) {
+        return Response.json(
+          studioPageHarness.sessionResponse ?? {
+            id: studioPageHarness.route.sessionId,
+            status: "recording",
+          },
+        );
+      }
+      // Everything else (notably /api/auth/me) keeps the original behavior.
+      return Response.json(studioPageHarness.authMeResponse);
+    }),
   );
   vi.stubGlobal("localStorage", {
     getItem: vi.fn(() => null),

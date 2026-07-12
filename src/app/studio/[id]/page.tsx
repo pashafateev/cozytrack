@@ -72,6 +72,7 @@ import {
   smoothLevel,
 } from "@/lib/audio-meter";
 import { FinishRecordingButton } from "@/components/FinishRecordingButton";
+import { SessionFinalizedPanel } from "@/components/SessionFinalizedPanel";
 import { useUploadProgress } from "@/hooks/useUploadProgress";
 import { useNavigationGuard } from "@/hooks/useNavigationGuard";
 import { UploadProgressBar } from "@/components/UploadProgressBar";
@@ -701,6 +702,8 @@ function RoomContent({
   onMonitorEnabledChange,
   onMonitorVolumeChange,
   isHost,
+  sessionFinalized,
+  onSessionFinalized,
 }: {
   sessionId: string;
   participantName: string;
@@ -714,6 +717,8 @@ function RoomContent({
   onMonitorEnabledChange: (enabled: boolean) => void;
   onMonitorVolumeChange: (volume: number) => void;
   isHost: boolean;
+  sessionFinalized: boolean;
+  onSessionFinalized: () => void;
 }) {
   const remoteParticipants = useRemoteParticipants();
   const { localParticipant } = useLocalParticipant();
@@ -1807,6 +1812,10 @@ function RoomContent({
     ) {
       return;
     }
+    // A finalized session rejects every new take server-side (issue #151).
+    // The REC button is disabled in this state; this guards the
+    // programmatic/devtools path.
+    if (sessionFinalized) return;
 
     // In two-channel mode, refuse to start a take / broadcast to the room until
     // the split capture is proven ready — otherwise we'd blip remote
@@ -1839,9 +1848,14 @@ function RoomContent({
         console.error("Failed to activate recording take:", err);
         // A finalized session rejects new takes (issue #151). Surface the
         // server's explanation so the host knows to start a fresh session
-        // rather than seeing a generic failure.
+        // rather than seeing a generic failure, and flip the studio into its
+        // finalized state so the REC button locks and the start-a-new-session
+        // CTA appears instead of leaving a dead end.
         const finalized =
           err instanceof RecordingStateError && err.status === 409;
+        if (finalized) {
+          onSessionFinalized();
+        }
         showNotification(
           finalized && err.message
             ? err.message
@@ -1894,6 +1908,8 @@ function RoomContent({
     startRecordingLocal,
     twoChannelMode,
     showNotification,
+    sessionFinalized,
+    onSessionFinalized,
   ]);
 
   const handleStopRecording = useCallback(async () => {
@@ -2051,10 +2067,14 @@ function RoomContent({
   const isRecording = studioState === "recording";
   const isFinalizing = studioState === "finalizing";
   // In two-channel mode the host can't start until both split channels are
-  // captured; block the REC button so a click can't create a bad take.
+  // captured; block the REC button so a click can't create a bad take. A
+  // finalized session can never start again, but stop stays reachable in
+  // case the flag flips while a recording is somehow still live.
   const twoChannelNotReady =
     twoChannelMode && slotCaptures.length !== LOCAL_TRACK_SLOTS.length;
-  const startDisabled = isFinalizing || (!isRecording && twoChannelNotReady);
+  const startDisabled =
+    isFinalizing ||
+    (!isRecording && (twoChannelNotReady || sessionFinalized));
 
   const localStatus: Status = isFinalizing
     ? "uploading"
@@ -2311,13 +2331,25 @@ function RoomContent({
 
           {/* Finish recording (post-stop) — surfaces after the local recorder
               has produced at least one track and the studio is no longer in
-              the recording state. Drives the /api/sessions/:id/finalize flow. */}
+              the recording state. Drives the /api/sessions/:id/finalize flow.
+              Stays mounted after finalize so the ingest instructions remain
+              visible alongside the finalized panel below. */}
           {studioState === "connected" && hasRecorded && (
             <div className="flex justify-center mt-3">
               <FinishRecordingButton
                 sessionId={sessionId}
                 waitForUploads={uploadTracker.waitForUploads}
+                onReady={onSessionFinalized}
               />
+            </div>
+          )}
+
+          {/* A finalized session rejects all new takes (issue #151) — say so
+              and give the host a real path to a fresh session instead of a
+              REC button that can only 409. */}
+          {studioState === "connected" && sessionFinalized && (
+            <div className="flex justify-center mt-3">
+              <SessionFinalizedPanel isHost={isHost} />
             </div>
           )}
         </div>
@@ -2351,11 +2383,17 @@ function RoomContent({
                       ? "Finalizing previous recording"
                       : isRecording
                       ? "Stop recording"
+                      : sessionFinalized
+                      ? "Session finalized"
                       : "Start recording"
                   }
                   title={
                     isFinalizing
                       ? "Finalizing previous recording…"
+                      : isRecording
+                      ? undefined
+                      : sessionFinalized
+                      ? "Session finalized — start a new session to record again"
                       : twoChannelNotReady
                       ? "Waiting for two-channel capture…"
                       : undefined
@@ -2474,6 +2512,36 @@ export default function StudioPage() {
   // arriving via /join have their display name recorded in the cookie; we
   // use it to prefill the prejoin form.
   const [isHost, setIsHost] = useState(false);
+  // A finalized (status "ready") session can never be recorded into again
+  // (issue #151). Fetched on mount so a reopened studio URL knows right away,
+  // and flipped by RoomContent when finalize completes in this tab or the
+  // server rejects a take with the finalized 409.
+  const [sessionFinalized, setSessionFinalized] = useState(false);
+  const handleSessionFinalized = useCallback(() => {
+    setSessionFinalized(true);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadSessionStatus() {
+      try {
+        const res = await fetch(
+          `/api/sessions/${encodeURIComponent(sessionId)}`,
+        );
+        if (!res.ok) return;
+        const body: { status?: string } = await res.json();
+        if (!cancelled && body.status === "ready") {
+          setSessionFinalized(true);
+        }
+      } catch {
+        // Fail open — the server still rejects takes on finalized sessions.
+      }
+    }
+    void loadSessionStatus();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
 
   useEffect(() => {
     setMonitorEnabled(getStoredMonitorEnabled());
@@ -2653,6 +2721,14 @@ export default function StudioPage() {
               Session {sessionId.slice(0, 8)}…
             </p>
 
+            {/* Surface a finalized session before the user joins a room they
+                can't record into; hosts can hop to a fresh session from here. */}
+            {sessionFinalized && (
+              <div className="w-full mt-5 flex justify-center">
+                <SessionFinalizedPanel isHost={isHost} />
+              </div>
+            )}
+
             <div className="w-full mt-7 space-y-4">
               <div>
                 <label className="block font-sans text-[11px] font-medium text-text-3 uppercase tracking-[0.08em] mb-2">
@@ -2763,6 +2839,8 @@ export default function StudioPage() {
           onMonitorEnabledChange={setMonitorEnabled}
           onMonitorVolumeChange={setMonitorVolume}
           isHost={isHost}
+          sessionFinalized={sessionFinalized}
+          onSessionFinalized={handleSessionFinalized}
         />
       </LiveKitRoom>
     </StudioFrame>
