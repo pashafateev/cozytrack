@@ -37,11 +37,12 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function renderButton() {
+function renderButton(props: { departedParticipantNames?: string[] } = {}) {
   render(
     React.createElement(FinishRecordingButton, {
       sessionId: "session-1",
       waitForUploads: async () => undefined,
+      ...props,
     }),
   );
 }
@@ -109,5 +110,83 @@ describe("FinishRecordingButton unfinished-take recovery", () => {
     });
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(screen.getByText("Ready for ingest")).toBeTruthy();
+  });
+});
+
+describe("FinishRecordingButton departed participants", () => {
+  function pendingResponse(participantName: string): Response {
+    return response(
+      {
+        pending: [
+          { trackId: "track-9", participantName, status: "uploading" },
+        ],
+      },
+      409,
+    );
+  }
+
+  it("names the departed participant while their track blocks finalize", async () => {
+    fetchMock.mockResolvedValue(pendingResponse("Bob"));
+    renderButton({ departedParticipantNames: ["Bob"] });
+
+    fireEvent.click(screen.getByRole("button", { name: "Finish recording" }));
+
+    expect(
+      await screen.findByText(
+        "Bob left the session — recovering their uploaded audio…",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("keeps the plain uploading label for participants still present", async () => {
+    fetchMock.mockResolvedValue(pendingResponse("Alice"));
+    renderButton({ departedParticipantNames: ["Bob"] });
+
+    fireEvent.click(screen.getByRole("button", { name: "Finish recording" }));
+
+    expect(
+      await screen.findByText("Still uploading track: Alice…"),
+    ).toBeTruthy();
+  });
+
+  it("explains a departed participant's stuck track when polling times out", async () => {
+    vi.useFakeTimers();
+    try {
+      fetchMock.mockResolvedValue(pendingResponse("Bob"));
+      renderButton({ departedParticipantNames: ["Bob"] });
+
+      fireEvent.click(screen.getByRole("button", { name: "Finish recording" }));
+
+      await vi.advanceTimersByTimeAsync(31_000);
+
+      expect(
+        screen.getByText(
+          "Bob left before their track finished uploading — retry to recover what they already uploaded.",
+        ),
+      ).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the generic timeout message when the stuck participant is still present", async () => {
+    vi.useFakeTimers();
+    try {
+      fetchMock.mockResolvedValue(pendingResponse("Alice"));
+      renderButton({ departedParticipantNames: ["Bob"] });
+
+      fireEvent.click(screen.getByRole("button", { name: "Finish recording" }));
+
+      await vi.advanceTimersByTimeAsync(31_000);
+
+      expect(
+        screen.getByText(
+          "Some tracks haven't uploaded yet — check your network and retry.",
+        ),
+      ).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
