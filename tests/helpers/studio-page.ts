@@ -7,11 +7,30 @@ type AuthMeResponse =
   | { role: "guest"; name: string }
   | { role: "host" };
 
+export type RemoteParticipantStub = {
+  identity: string;
+  name?: string;
+  metadata?: string;
+};
+
 const studioPageHarness = vi.hoisted(() => ({
   authMeResponse: { role: "guest", name: "Guest Alice" } as AuthMeResponse,
   route: {
     sessionId: "session-guest",
   },
+  // Backing store for the useRemoteParticipants mock. Tests mutate it through
+  // setRemoteParticipants (wrapped in act) — the listeners let the mocked hook
+  // re-render subscribers exactly like the real LiveKit hook would.
+  remoteParticipants: [] as Array<{
+    identity: string;
+    name?: string;
+    metadata?: string;
+  }>,
+  remoteParticipantsListeners: new Set<() => void>(),
+  // Result of the mocked isHostSender — tests that drive guest recording via
+  // control messages flip this to true so the page honors the host's message.
+  isHostSenderResult: false,
+  navigationGuard: vi.fn(),
   getToken: vi.fn(async () => "livekit-token"),
   sendControlMessage: vi.fn(async (_message: { type: string }) => undefined),
   onControlMessage: vi.fn(() => vi.fn()),
@@ -61,8 +80,9 @@ vi.mock("@livekit/components-react", () => {
   // mocked module first loads). The real LiveKit hooks memoize these, and
   // studio effects depend on them — returning fresh objects/arrays each render
   // turns those effects into re-render loops once any synchronous setState
-  // fires.
-  const remoteParticipants: unknown[] = [];
+  // fires. useRemoteParticipants reads the harness store through
+  // useSyncExternalStore: the snapshot is the same array reference until a
+  // test replaces it via setRemoteParticipants, so it stays just as stable.
   const localParticipant = {
     localParticipant: {
       republishAllTracks: studioPageHarness.republishAllTracks,
@@ -72,7 +92,16 @@ vi.mock("@livekit/components-react", () => {
     LiveKitRoom: ({ children }: { children: ReactNode }) =>
       React.createElement("div", { "data-testid": "livekit-room" }, children),
     RoomAudioRenderer: () => null,
-    useRemoteParticipants: () => remoteParticipants,
+    useRemoteParticipants: () =>
+      React.useSyncExternalStore(
+        (listener) => {
+          studioPageHarness.remoteParticipantsListeners.add(listener);
+          return () => {
+            studioPageHarness.remoteParticipantsListeners.delete(listener);
+          };
+        },
+        () => studioPageHarness.remoteParticipants,
+      ),
     useLocalParticipant: () => localParticipant,
   };
 });
@@ -89,7 +118,7 @@ vi.mock("@/lib/transport", () => {
   };
   return {
     useTransport: () => transport,
-    isHostSender: () => false,
+    isHostSender: () => studioPageHarness.isHostSenderResult,
     parseParticipantMetadata: () => null,
   };
 });
@@ -174,7 +203,8 @@ vi.mock("@/hooks/useTimingDiagnostics", () => ({
 }));
 
 vi.mock("@/hooks/useNavigationGuard", () => ({
-  useNavigationGuard: vi.fn(),
+  useNavigationGuard: (options: { when: boolean; message: string }) =>
+    studioPageHarness.navigationGuard(options),
 }));
 
 function mediaStream(): MediaStream {
@@ -225,6 +255,10 @@ function audioInput(deviceId: string, label: string): MediaDeviceInfo {
 beforeEach(() => {
   studioPageHarness.authMeResponse = { role: "guest", name: "Guest Alice" };
   studioPageHarness.route.sessionId = "session-guest";
+  studioPageHarness.remoteParticipants = [];
+  studioPageHarness.remoteParticipantsListeners.clear();
+  studioPageHarness.isHostSenderResult = false;
+  studioPageHarness.navigationGuard.mockClear();
   studioPageHarness.getToken.mockClear();
   studioPageHarness.sendControlMessage.mockReset().mockResolvedValue(undefined);
   studioPageHarness.onControlMessage.mockReset().mockReturnValue(vi.fn());
@@ -322,6 +356,20 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/**
+ * Replace the mocked room's remote participant list and notify the
+ * useRemoteParticipants subscribers, mirroring a LiveKit join/leave. Call
+ * inside act(): `act(() => setRemoteParticipants([...]))`.
+ */
+export function setRemoteParticipants(
+  participants: RemoteParticipantStub[],
+): void {
+  studioPageHarness.remoteParticipants = participants;
+  for (const listener of studioPageHarness.remoteParticipantsListeners) {
+    listener();
+  }
+}
+
 export function renderGuestStudioPage({
   name = "Guest Alice",
   sessionId = "session-guest",
@@ -351,6 +399,7 @@ export function renderGuestStudioPage({
       });
     },
     screen,
+    harness: studioPageHarness,
   };
 }
 

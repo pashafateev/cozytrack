@@ -151,6 +151,11 @@ function formatParticipantList(names: string[]): string {
   return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
 }
 
+function departureBannerMessage(names: string[]): string {
+  const tracks = names.length === 1 ? "their track" : "their tracks";
+  return `${formatParticipantList(names)} left during recording — ${tracks} may be incomplete.`;
+}
+
 function displayNameFromMetadata(metadata: string | undefined): string | undefined {
   return parseParticipantMetadata(metadata)?.displayName;
 }
@@ -890,6 +895,80 @@ function RoomContent({
       if (notificationTimerRef.current) clearTimeout(notificationTimerRef.current);
     };
   }, []);
+
+  // ---- Participant presence (departures / rejoins) ----
+  //
+  // LiveKit absorbs brief network blips server-side before dropping someone
+  // from `remoteParticipants`, so a disappearance here means they genuinely
+  // left the room. Departures outside a take get a transient toast; mid-take
+  // departures get the persistent banner below (their track is at risk).
+  // Names are captured at departure time because the participant — and their
+  // display name — is gone from the room afterwards.
+  //
+  // `departedParticipants` accumulates for the finalize flow: a finalize poll
+  // stuck on a departed participant's track should say "left the session",
+  // not "still uploading". A rejoin removes them again.
+  const [departedParticipants, setDepartedParticipants] = useState<
+    Map<string, string>
+  >(new Map());
+  const departedParticipantsRef = useRef<Map<string, string>>(new Map());
+  const [midRecordingDepartures, setMidRecordingDepartures] = useState<
+    Map<string, string>
+  >(new Map());
+  // Null until the first observation so the initial roster (everyone already
+  // in the room when we join) never reads as a wave of rejoins.
+  const prevRemoteParticipantsRef = useRef<Map<string, string> | null>(null);
+
+  useEffect(() => {
+    const current = new Map<string, string>();
+    for (const participant of remoteParticipants) {
+      current.set(
+        participant.identity,
+        remoteParticipantNames.get(participant.identity) ??
+          participant.identity,
+      );
+    }
+    const prev = prevRemoteParticipantsRef.current;
+    prevRemoteParticipantsRef.current = current;
+    if (prev === null) return;
+
+    for (const [identity, name] of prev) {
+      if (current.has(identity)) continue;
+      const departed = new Map(departedParticipantsRef.current);
+      departed.set(identity, name);
+      departedParticipantsRef.current = departed;
+      setDepartedParticipants(departed);
+      if (studioStateRef.current === "recording") {
+        setMidRecordingDepartures((m) => new Map(m).set(identity, name));
+      } else {
+        showNotification(`${name} left the session`);
+      }
+    }
+
+    for (const [identity, name] of current) {
+      if (prev.has(identity)) continue;
+      if (!departedParticipantsRef.current.has(identity)) continue;
+      const departed = new Map(departedParticipantsRef.current);
+      departed.delete(identity);
+      departedParticipantsRef.current = departed;
+      setDepartedParticipants(departed);
+      setMidRecordingDepartures((m) => {
+        if (!m.has(identity)) return m;
+        const next = new Map(m);
+        next.delete(identity);
+        return next;
+      });
+      showNotification(`${name} rejoined`);
+    }
+  }, [remoteParticipants, remoteParticipantNames, showNotification]);
+
+  // The banner warns about the take in progress; once that take stops the
+  // finalize flow owns the messaging (via departedParticipants above).
+  useEffect(() => {
+    if (studioState !== "recording") {
+      setMidRecordingDepartures((m) => (m.size === 0 ? m : new Map()));
+    }
+  }, [studioState]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2006,18 +2085,32 @@ function RoomContent({
   ]);
 
 
-  // Block accidental navigation while recording, finalizing, or uploading.
-  // Covers tab close (beforeunload), browser back/forward (popstate), in-app
-  // <a>/Link clicks, and form submits (e.g. the topbar sign-out POST). See
-  // #73 for the live-test repro and #49 for the original tab-close warning
-  // this supersedes.
+  // A slot whose upload never confirmed always surfaces as a recoverable
+  // backup manifest or a backup error (see handleSlotFailure in
+  // recording-lifecycle) — so this doubles as "my audio isn't safely on the
+  // server yet". Derived from surfaced state rather than a flag so it also
+  // covers unrecovered audio found on mount after a crash.
+  const hasUnconfirmedUpload =
+    Boolean(backupError) || isRecoverableBackup(recoveryBackup);
+
+  // Block accidental navigation while recording, finalizing, uploading, or
+  // sitting on audio that never confirmed upload. Covers tab close
+  // (beforeunload), browser back/forward (popstate), in-app <a>/Link clicks,
+  // and form submits (e.g. the topbar sign-out POST). See #73 for the
+  // live-test repro and #49 for the original tab-close warning this
+  // supersedes. A failed upload settles the in-flight count, so
+  // hasInflight alone would disarm exactly when leaving loses audio —
+  // hasUnconfirmedUpload keeps the guard up until the server confirms.
   useNavigationGuard({
     when:
       studioState === "recording" ||
       studioState === "finalizing" ||
-      uploadTracker.hasInflight,
+      uploadTracker.hasInflight ||
+      hasUnconfirmedUpload,
     message:
-      "Recording is in progress and may be lost if you leave. Leave anyway?",
+      studioState === "recording"
+        ? "Recording is in progress and may be lost if you leave. Leave anyway?"
+        : "Your audio hasn't finished uploading and may be lost if you leave. Leave anyway?",
   });
 
   useEffect(() => {
@@ -2148,6 +2241,32 @@ function RoomContent({
           </span>
           <button
             onClick={() => setBannerDismissed(true)}
+            className="text-[11px] text-warn/70 hover:text-warn underline font-sans"
+          >
+            dismiss
+          </button>
+        </div>
+      )}
+
+      {/* Mid-recording departure banner — a departed participant's track may
+          be incomplete, which is consequential enough to outlast a 4s toast.
+          Cleared on dismiss, on rejoin, or when the take stops. */}
+      {midRecordingDepartures.size > 0 && (
+        <div
+          className="flex items-center gap-2.5 py-2.5 px-5 border-b"
+          style={{
+            background: "rgba(232,168,48,0.07)",
+            borderBottomColor: "rgba(232,168,48,0.18)",
+          }}
+        >
+          <IcoAlert size={14} color="var(--warn)" />
+          <span className="text-[12px] text-warn flex-1">
+            {departureBannerMessage(
+              Array.from(midRecordingDepartures.values()),
+            )}
+          </span>
+          <button
+            onClick={() => setMidRecordingDepartures(new Map())}
             className="text-[11px] text-warn/70 hover:text-warn underline font-sans"
           >
             dismiss
@@ -2317,6 +2436,9 @@ function RoomContent({
               <FinishRecordingButton
                 sessionId={sessionId}
                 waitForUploads={uploadTracker.waitForUploads}
+                departedParticipantNames={Array.from(
+                  departedParticipants.values(),
+                )}
               />
             </div>
           )}
@@ -2448,6 +2570,22 @@ function RoomContent({
             progress={uploadTracker.progress}
             recordingStopped={studioState !== "recording"}
           />
+          {/* Positive all-clear: guests otherwise have to guess when leaving
+              stops risking their track. Host wording drops the close-tab cue —
+              their next step is finalizing, not leaving. */}
+          {hasRecorded &&
+            studioState === "connected" &&
+            !uploadTracker.hasInflight &&
+            !hasUnconfirmedUpload && (
+              <span
+                className="font-sans text-[10px] text-center px-1 pt-2 max-w-[110px] leading-tight"
+                style={{ color: "var(--ok)" }}
+              >
+                {isHost
+                  ? "All audio uploaded"
+                  : "All audio uploaded — safe to close this tab"}
+              </span>
+            )}
         </div>
       </div>
     </div>
