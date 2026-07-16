@@ -1,6 +1,6 @@
 # Cozytrack Roadmap
 
-This roadmap was reconciled against every GitHub issue that was open on July 7, 2026 (46 open issues).
+This roadmap was reconciled against every GitHub issue that was open on July 16, 2026 (45 open issues).
 
 - Every currently open issue appears exactly once as a primary roadmap entry below.
 - No open issues are explicitly excluded right now.
@@ -24,7 +24,6 @@ This roadmap was reconciled against every GitHub issue that was open on July 7, 
 
 ### Session detail, dashboard, and studio polish
 
-- #151 Finalized-session reuse guard: ensure a new studio recording always gets a fresh `Session.id`, and block finalized/ready sessions from silently accepting new tracks unless there is an explicit reopen flow.
 - #22 Session notes persistence: store the session-detail notes textarea on `Session` and autosave it with a visible saved state.
 - #24 Real waveform extraction and per-track playback: replace decorative waveform placeholders with real audio-derived peaks and track-level playback controls.
 - #25 Track peak and size metadata: persist `bytes` and `peakDbFS`, capture them during recording/finalization, and expose them in the session UI and dashboard rollups.
