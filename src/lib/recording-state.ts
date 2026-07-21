@@ -74,6 +74,25 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Read the authoritative recording state for a session. Used by the studio
+// page's reconnect catch-up: a participant returning mid-take asks whether a
+// take is still `recording` and, if so, resumes it. GET has no side effects, so
+// there's nothing to retry — a transient failure just means we skip catch-up
+// this time and the caller can try again on the next connect.
+export async function getRecordingTakeState(
+  sessionId: string,
+): Promise<RecordingTakeState> {
+  const res = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/recording-state`,
+  );
+
+  if (!res.ok) {
+    throw new RecordingStateError(await parseError(res), res.status);
+  }
+
+  return (await res.json()) as RecordingTakeState;
+}
+
 export async function startRecordingTake(
   sessionId: string,
   sessionStartedAt: string,

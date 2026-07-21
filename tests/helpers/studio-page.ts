@@ -2,10 +2,16 @@ import React, { type ReactNode } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, vi } from "vitest";
 import StudioPage from "@/app/studio/[id]/page";
+import type { ControlMessage } from "@/lib/transport/types";
 
 type AuthMeResponse =
   | { role: "guest"; name: string }
   | { role: "host" };
+
+type ControlMessageHandler = (
+  message: ControlMessage,
+  sender: { identity: string; metadata?: string },
+) => void;
 
 const studioPageHarness = vi.hoisted(() => ({
   authMeResponse: { role: "guest", name: "Guest Alice" } as AuthMeResponse,
@@ -14,7 +20,8 @@ const studioPageHarness = vi.hoisted(() => ({
   },
   getToken: vi.fn(async () => "livekit-token"),
   sendControlMessage: vi.fn(async (_message: { type: string }) => undefined),
-  onControlMessage: vi.fn(() => vi.fn()),
+  onControlMessage: vi.fn((_handler: ControlMessageHandler) => vi.fn()),
+  isHostSender: vi.fn(),
   republishAllTracks: vi.fn(async () => undefined),
   getUserMedia: vi.fn(),
   enumerateDevices: vi.fn(),
@@ -22,6 +29,7 @@ const studioPageHarness = vi.hoisted(() => ({
   audioContexts: [] as unknown[],
   startRecordingTake: vi.fn(),
   stopRecordingTake: vi.fn(),
+  getRecordingTakeState: vi.fn(),
   reportRecordingTakeParticipantStatus: vi.fn(async () => undefined),
   getPresignedUploadTarget: vi.fn(),
   getPresignedUploadUrl: vi.fn(async () => "https://s3.example/recording.webm"),
@@ -89,7 +97,7 @@ vi.mock("@/lib/transport", () => {
   };
   return {
     useTransport: () => transport,
-    isHostSender: () => false,
+    isHostSender: studioPageHarness.isHostSender,
     parseParticipantMetadata: () => null,
   };
 });
@@ -97,6 +105,7 @@ vi.mock("@/lib/transport", () => {
 vi.mock("@/lib/recording-state", () => ({
   startRecordingTake: studioPageHarness.startRecordingTake,
   stopRecordingTake: studioPageHarness.stopRecordingTake,
+  getRecordingTakeState: studioPageHarness.getRecordingTakeState,
   reportRecordingTakeParticipantStatus:
     studioPageHarness.reportRecordingTakeParticipantStatus,
 }));
@@ -177,7 +186,7 @@ vi.mock("@/hooks/useNavigationGuard", () => ({
   useNavigationGuard: vi.fn(),
 }));
 
-function mediaStream(): MediaStream {
+export function mediaStream(): MediaStream {
   const track = {
     stop: vi.fn(),
     getSettings: () => ({}),
@@ -228,6 +237,7 @@ beforeEach(() => {
   studioPageHarness.getToken.mockClear();
   studioPageHarness.sendControlMessage.mockReset().mockResolvedValue(undefined);
   studioPageHarness.onControlMessage.mockReset().mockReturnValue(vi.fn());
+  studioPageHarness.isHostSender.mockReset().mockReturnValue(false);
   studioPageHarness.republishAllTracks.mockClear();
   studioPageHarness.getUserMedia.mockReset().mockResolvedValue(mediaStream());
   studioPageHarness.enumerateDevices
@@ -254,6 +264,13 @@ beforeEach(() => {
       startedAt: "2026-06-27T12:00:00.000Z",
       stoppedAt: "2026-06-27T12:01:00.000Z",
     },
+  });
+  // Default: no active take, so the reconnect catch-up effect is a no-op for
+  // tests that don't opt in. Reconnect tests override this per case.
+  studioPageHarness.getRecordingTakeState.mockReset().mockResolvedValue({
+    active: false,
+    sessionStartedAt: null,
+    take: null,
   });
   studioPageHarness.reportRecordingTakeParticipantStatus
     .mockReset()
@@ -351,6 +368,7 @@ export function renderGuestStudioPage({
       });
     },
     screen,
+    harness: studioPageHarness,
   };
 }
 
