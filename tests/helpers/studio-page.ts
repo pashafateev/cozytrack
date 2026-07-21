@@ -31,6 +31,7 @@ const studioPageHarness = vi.hoisted(() => ({
   // control messages flip this to true so the page honors the host's message.
   isHostSenderResult: false,
   navigationGuard: vi.fn(),
+  retryLocalRecordingBackupUpload: vi.fn(),
   getToken: vi.fn(async () => "livekit-token"),
   sendControlMessage: vi.fn(async (_message: { type: string }) => undefined),
   onControlMessage: vi.fn(() => vi.fn()),
@@ -179,7 +180,9 @@ vi.mock("@/lib/recording-backup", () => ({
 }));
 
 vi.mock("@/lib/recording-backup-upload", () => ({
-  retryLocalRecordingBackupUpload: vi.fn(),
+  retryLocalRecordingBackupUpload: (
+    ...args: unknown[]
+  ) => studioPageHarness.retryLocalRecordingBackupUpload(...args),
 }));
 
 vi.mock("@/hooks/useMicMonitor", () => ({
@@ -259,6 +262,7 @@ beforeEach(() => {
   studioPageHarness.remoteParticipantsListeners.clear();
   studioPageHarness.isHostSenderResult = false;
   studioPageHarness.navigationGuard.mockClear();
+  studioPageHarness.retryLocalRecordingBackupUpload.mockReset();
   studioPageHarness.getToken.mockClear();
   studioPageHarness.sendControlMessage.mockReset().mockResolvedValue(undefined);
   studioPageHarness.onControlMessage.mockReset().mockReturnValue(vi.fn());

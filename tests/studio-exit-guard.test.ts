@@ -5,6 +5,22 @@ import {
   renderHostStudioPage,
 } from "./helpers/studio-page";
 
+function backupManifest(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "session-host:track-1",
+    sessionId: "session-host",
+    trackId: "track-1",
+    segmentId: "segment-1",
+    participantName: "Pasha",
+    createdAt: "2026-07-21T00:00:00.000Z",
+    updatedAt: "2026-07-21T00:00:00.000Z",
+    state: "failed",
+    persistentStorage: true,
+    chunks: [{ index: 0, byteSize: 5, uploadStatus: "failed" }],
+    ...overrides,
+  };
+}
+
 const RECORDING_MESSAGE =
   "Recording is in progress and may be lost if you leave. Leave anyway?";
 const UPLOADING_MESSAGE =
@@ -126,5 +142,91 @@ describe("StudioPage exit guard", () => {
         "All audio uploaded — safe to close this tab",
       ),
     ).toBeTruthy();
+  });
+
+  it("does not arm when listing local backups fails at mount", async () => {
+    const studio = renderHostStudioPage();
+    // Once, not permanent: the helper's beforeEach only mockClear()s this
+    // shared mock, so a persistent rejection would leak into later tests.
+    studio.harness.listBackups.mockRejectedValueOnce(new Error("idb wedged"));
+
+    await studio.join();
+    await waitFor(() => {
+      expect(studio.harness.listBackups).toHaveBeenCalled();
+    });
+
+    expect(lastGuardCall(studio.harness).when).toBe(false);
+  });
+
+  it("stays disarmed and shows the all-clear when only verified-backup cleanup fails", async () => {
+    const studio = renderHostStudioPage();
+    await studio.join();
+
+    // The track confirms server-side; only the local IndexedDB cleanup fails.
+    studio.harness.recordingBackupStore.startBackup.mockResolvedValue(
+      backupManifest({ state: "recording", chunks: [] }),
+    );
+    studio.harness.recordingBackupStore.clearBackup.mockRejectedValue(
+      new Error("idb wedged"),
+    );
+
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Start recording" }),
+    );
+    await studio.screen.findByRole("button", { name: "Stop recording" });
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Stop recording" }),
+    );
+    await studio.screen.findByRole("button", { name: "Start recording" });
+
+    expect(await studio.screen.findByText("All audio uploaded")).toBeTruthy();
+    expect(lastGuardCall(studio.harness).when).toBe(false);
+  });
+
+  it("disarms and shows the all-clear after a successful backup retry", async () => {
+    const studio = renderHostStudioPage();
+    await studio.join();
+
+    studio.harness.completeUpload.mockRejectedValue(
+      new Error("complete failed"),
+    );
+    studio.harness.recordingBackupStore.startBackup.mockResolvedValue(
+      backupManifest({ state: "recording", chunks: [] }),
+    );
+    studio.harness.recordingBackupStore.markBackupFailed.mockResolvedValue(
+      backupManifest(),
+    );
+    studio.harness.recordingBackupStore.getBackup.mockResolvedValue(
+      backupManifest(),
+    );
+
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Start recording" }),
+    );
+    await studio.screen.findByRole("button", { name: "Stop recording" });
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Stop recording" }),
+    );
+    await studio.screen.findByRole("button", { name: "Start recording" });
+
+    await waitFor(() => {
+      expect(lastGuardCall(studio.harness).when).toBe(true);
+    });
+
+    studio.harness.retryLocalRecordingBackupUpload.mockResolvedValue(
+      backupManifest({ state: "uploaded" }),
+    );
+
+    fireEvent.click(
+      await studio.screen.findByRole("button", { name: "Retry upload" }),
+    );
+    await waitFor(() => {
+      expect(studio.harness.retryLocalRecordingBackupUpload).toHaveBeenCalled();
+    });
+
+    await waitFor(() => {
+      expect(lastGuardCall(studio.harness).when).toBe(false);
+    });
+    expect(await studio.screen.findByText("All audio uploaded")).toBeTruthy();
   });
 });

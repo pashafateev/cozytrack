@@ -819,6 +819,13 @@ function RoomContent({
   const [notification, setNotification] = useState<string | null>(null);
   const notificationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [hasRecorded, setHasRecorded] = useState(false);
+  // True from a successful take start until the lifecycle reports that every
+  // slot confirmed server-side (onStopSettled), or a backup retry leaves no
+  // recoverable audio behind. This — not backupError/recoveryBackup — feeds
+  // the exit guard: backup state also covers unrelated store failures (mount
+  // listBackups errors, verified-backup cleanup failures) that must not read
+  // as "your audio didn't upload".
+  const [hasUnconfirmedUpload, setHasUnconfirmedUpload] = useState(false);
   const [recoveryBackup, setRecoveryBackup] =
     useState<RecordingBackupManifest | null>(null);
   const recoveryBackupRef = useRef<RecordingBackupManifest | null>(null);
@@ -1516,6 +1523,8 @@ function RoomContent({
         callbacks: {
           onRecoveryBackup: setRecoveryBackupSync,
           onBackupError: setBackupError,
+          onStopSettled: ({ allCompleted }) =>
+            setHasUnconfirmedUpload(!allCompleted),
           onBackupUnavailable: () =>
             showNotification("Local backup unavailable - remote upload only"),
           onTiming: (event) => {
@@ -1669,6 +1678,10 @@ function RoomContent({
         return false;
       }
 
+      // Slots exist server-side from here on; only onStopSettled (or a backup
+      // retry that leaves nothing recoverable) may declare them confirmed.
+      setHasUnconfirmedUpload(true);
+
       if (result.stopPending || !recordingLifecycle.recording) {
         // A stop arrived while the recorders were still starting. It is
         // already waiting inside the controller and will finalize the started
@@ -1794,6 +1807,16 @@ function RoomContent({
       await browserRecordingBackupStore.clearBackup(recovered.id, "verified-upload");
       setRecoveryBackupSync(null);
       setHasRecorded(true);
+      // The retried slot is confirmed; only declare everything confirmed if
+      // no other recoverable backup (e.g. the sibling channel's) remains.
+      try {
+        const remaining = await browserRecordingBackupStore.listBackups(sessionId);
+        if (!remaining.some((item) => isRecoverableBackup(item))) {
+          setHasUnconfirmedUpload(false);
+        }
+      } catch (listErr) {
+        console.error("Failed to re-check local backups after retry:", listErr);
+      }
       showNotification("Local backup uploaded");
     } catch (error) {
       const message = backupErrorMessage(error);
@@ -1808,7 +1831,7 @@ function RoomContent({
     } finally {
       setBackupAction("idle");
     }
-  }, [backupAction, setRecoveryBackupSync, showNotification]);
+  }, [backupAction, sessionId, setRecoveryBackupSync, showNotification]);
 
   const handleDownloadLocalBackup = useCallback(async () => {
     if (backupAction !== "idle") return;
@@ -2085,14 +2108,6 @@ function RoomContent({
   ]);
 
 
-  // A slot whose upload never confirmed always surfaces as a recoverable
-  // backup manifest or a backup error (see handleSlotFailure in
-  // recording-lifecycle) — so this doubles as "my audio isn't safely on the
-  // server yet". Derived from surfaced state rather than a flag so it also
-  // covers unrecovered audio found on mount after a crash.
-  const hasUnconfirmedUpload =
-    Boolean(backupError) || isRecoverableBackup(recoveryBackup);
-
   // Block accidental navigation while recording, finalizing, uploading, or
   // sitting on audio that never confirmed upload. Covers tab close
   // (beforeunload), browser back/forward (popstate), in-app <a>/Link clicks,
@@ -2100,7 +2115,10 @@ function RoomContent({
   // live-test repro and #49 for the original tab-close warning this
   // supersedes. A failed upload settles the in-flight count, so
   // hasInflight alone would disarm exactly when leaving loses audio —
-  // hasUnconfirmedUpload keeps the guard up until the server confirms.
+  // hasUnconfirmedUpload (fed by the lifecycle's onStopSettled) keeps the
+  // guard up until every slot confirms server-side. Stale backups from a
+  // previous visit intentionally do not arm it: the recovery panel handles
+  // those, and their audio is durable in IndexedDB either way.
   useNavigationGuard({
     when:
       studioState === "recording" ||
