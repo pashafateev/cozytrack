@@ -1,5 +1,12 @@
 import React, { type ReactNode } from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, expect, vi } from "vitest";
 import StudioPage from "@/app/studio/[id]/page";
 import type { ControlMessage } from "@/lib/transport/types";
@@ -22,6 +29,8 @@ const studioPageHarness = vi.hoisted(() => ({
   sendControlMessage: vi.fn(async (_message: { type: string }) => undefined),
   onControlMessage: vi.fn((_handler: ControlMessageHandler) => vi.fn()),
   isHostSender: vi.fn(),
+  autoConnectRoom: true,
+  roomOnConnected: undefined as (() => void) | undefined,
   republishAllTracks: vi.fn(async () => undefined),
   getUserMedia: vi.fn(),
   enumerateDevices: vi.fn(),
@@ -77,8 +86,28 @@ vi.mock("@livekit/components-react", () => {
     },
   };
   return {
-    LiveKitRoom: ({ children }: { children: ReactNode }) =>
-      React.createElement("div", { "data-testid": "livekit-room" }, children),
+    LiveKitRoom: ({
+      children,
+      onConnected,
+    }: {
+      children: ReactNode;
+      onConnected?: () => void;
+    }) => {
+      React.useEffect(() => {
+        studioPageHarness.roomOnConnected = onConnected;
+        if (studioPageHarness.autoConnectRoom) onConnected?.();
+        return () => {
+          if (studioPageHarness.roomOnConnected === onConnected) {
+            studioPageHarness.roomOnConnected = undefined;
+          }
+        };
+      }, [onConnected]);
+      return React.createElement(
+        "div",
+        { "data-testid": "livekit-room" },
+        children,
+      );
+    },
     RoomAudioRenderer: () => null,
     useRemoteParticipants: () => remoteParticipants,
     useLocalParticipant: () => localParticipant,
@@ -238,6 +267,8 @@ beforeEach(() => {
   studioPageHarness.sendControlMessage.mockReset().mockResolvedValue(undefined);
   studioPageHarness.onControlMessage.mockReset().mockReturnValue(vi.fn());
   studioPageHarness.isHostSender.mockReset().mockReturnValue(false);
+  studioPageHarness.autoConnectRoom = true;
+  studioPageHarness.roomOnConnected = undefined;
   studioPageHarness.republishAllTracks.mockClear();
   studioPageHarness.getUserMedia.mockReset().mockResolvedValue(mediaStream());
   studioPageHarness.enumerateDevices
@@ -342,12 +373,15 @@ afterEach(() => {
 export function renderGuestStudioPage({
   name = "Guest Alice",
   sessionId = "session-guest",
+  autoConnectRoom = true,
 }: {
   name?: string;
   sessionId?: string;
+  autoConnectRoom?: boolean;
 } = {}) {
   studioPageHarness.authMeResponse = { role: "guest", name };
   studioPageHarness.route.sessionId = sessionId;
+  studioPageHarness.autoConnectRoom = autoConnectRoom;
 
   render(React.createElement(StudioPage));
 
@@ -367,6 +401,13 @@ export function renderGuestStudioPage({
         expect(studioPageHarness.audioContexts.length).toBeGreaterThan(0);
       });
     },
+    connectRoom() {
+      const onConnected = studioPageHarness.roomOnConnected;
+      if (!onConnected) {
+        throw new Error("LiveKit room connected callback unavailable");
+      }
+      act(() => onConnected());
+    },
     screen,
     harness: studioPageHarness,
   };
@@ -375,12 +416,15 @@ export function renderGuestStudioPage({
 export function renderHostStudioPage({
   name = "Pasha",
   sessionId = "session-host",
+  autoConnectRoom = true,
 }: {
   name?: string;
   sessionId?: string;
+  autoConnectRoom?: boolean;
 } = {}) {
   studioPageHarness.authMeResponse = { role: "host" };
   studioPageHarness.route.sessionId = sessionId;
+  studioPageHarness.autoConnectRoom = autoConnectRoom;
 
   render(React.createElement(StudioPage));
 
@@ -395,6 +439,13 @@ export function renderHostStudioPage({
       await waitFor(() => {
         expect(studioPageHarness.audioContexts.length).toBeGreaterThan(0);
       });
+    },
+    connectRoom() {
+      const onConnected = studioPageHarness.roomOnConnected;
+      if (!onConnected) {
+        throw new Error("LiveKit room connected callback unavailable");
+      }
+      act(() => onConnected());
     },
     screen,
     harness: studioPageHarness,
