@@ -38,7 +38,7 @@ const studioPageHarness = vi.hoisted(() => ({
   republishAllTracks: vi.fn(async () => undefined),
   getUserMedia: vi.fn(),
   enumerateDevices: vi.fn(),
-  listBackups: vi.fn(async () => []),
+  listBackups: vi.fn(async (): Promise<unknown[]> => []),
   audioContexts: [] as unknown[],
   startRecordingTake: vi.fn(),
   stopRecordingTake: vi.fn(),

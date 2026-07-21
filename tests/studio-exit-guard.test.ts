@@ -286,6 +286,122 @@ describe("StudioPage exit guard", () => {
     });
   });
 
+  it("surfaces the sibling backup after retrying one of two failed channels", async () => {
+    const studio = renderHostStudioPage();
+    await studio.join();
+
+    fireEvent.click(
+      studio.screen.getByRole("checkbox", { name: /two-channel local/i }),
+    );
+    await studio.screen.findByText("Local Ch 1");
+
+    // Both channels record; both completions fail on stop, keeping two
+    // recoverable backups behind one panel slot. Per-slot presign targets so
+    // the two backups get distinct manifest ids.
+    studio.harness.getPresignedUploadTarget.mockImplementation(
+      async (
+        _sessionId: string,
+        _trackId: string,
+        _part: number,
+        _name: string,
+        init?: { localTrackSlotId?: string },
+      ) => ({
+        url: "https://s3.example/0.webm",
+        key: "sessions/session-host/tracks/x/0.webm",
+        recordingToken: `token-${init?.localTrackSlotId ?? "primary"}`,
+        trackId: `track-${init?.localTrackSlotId ?? "primary"}`,
+        segmentId: `segment-${init?.localTrackSlotId ?? "primary"}`,
+      }),
+    );
+    const manifests: Record<string, ReturnType<typeof backupManifest>> = {};
+    studio.harness.recordingBackupStore.startBackup.mockImplementation(
+      async (input: { sessionId: string; trackId: string; segmentId?: string }) => {
+        const m = backupManifest({
+          id: `${input.sessionId}:${input.segmentId}`,
+          trackId: input.trackId,
+          segmentId: input.segmentId,
+          state: "recording",
+          chunks: [],
+        });
+        manifests[m.id as string] = m;
+        return m;
+      },
+    );
+    studio.harness.recordingBackupStore.markBackupFailed.mockImplementation(
+      async (id: string) => {
+        const failed = backupManifest({
+          ...(manifests[id] ?? {}),
+          id,
+          state: "failed",
+          chunks: [{ index: 0, byteSize: 5, uploadStatus: "failed" }],
+        });
+        manifests[id] = failed;
+        return failed;
+      },
+    );
+    studio.harness.recordingBackupStore.getBackup.mockImplementation(
+      async (id: string) => manifests[id] ?? null,
+    );
+    studio.harness.completeUpload.mockRejectedValue(
+      new Error("complete failed"),
+    );
+    studio.harness.retryLocalRecordingBackupUpload.mockImplementation(
+      async (m: { id: string }) => {
+        delete manifests[m.id];
+        return backupManifest({ id: m.id, state: "uploaded" });
+      },
+    );
+    studio.harness.listBackups.mockImplementation(async () =>
+      Object.values(manifests).filter((m) => m.state === "failed"),
+    );
+
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Start recording" }),
+    );
+    await studio.screen.findByRole("button", { name: "Stop recording" });
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Stop recording" }),
+    );
+    await studio.screen.findByRole("button", { name: "Start recording" });
+
+    await waitFor(() => {
+      expect(lastGuardCall(studio.harness).when).toBe(true);
+    });
+
+    // First retry clears one backup; the sibling must take over the panel
+    // instead of the panel vanishing while the guard stays armed.
+    fireEvent.click(
+      await studio.screen.findByRole("button", { name: "Retry upload" }),
+    );
+    await waitFor(() => {
+      expect(
+        studio.harness.retryLocalRecordingBackupUpload,
+      ).toHaveBeenCalledTimes(1);
+    });
+    expect(
+      await studio.screen.findByRole("button", { name: "Retry upload" }),
+    ).toBeTruthy();
+    expect(lastGuardCall(studio.harness).when).toBe(true);
+    expect(studio.screen.queryByText("All audio uploaded")).toBeNull();
+
+    // Second retry clears the last backup: panel gone, guard down, all-clear.
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Retry upload" }),
+    );
+    await waitFor(() => {
+      expect(
+        studio.harness.retryLocalRecordingBackupUpload,
+      ).toHaveBeenCalledTimes(2);
+    });
+    expect(await studio.screen.findByText("All audio uploaded")).toBeTruthy();
+    await waitFor(() => {
+      expect(lastGuardCall(studio.harness).when).toBe(false);
+    });
+    expect(
+      studio.screen.queryByRole("button", { name: "Retry upload" }),
+    ).toBeNull();
+  });
+
   it("disarms and shows the all-clear after a successful backup retry", async () => {
     const studio = renderHostStudioPage();
     await studio.join();

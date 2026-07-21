@@ -1813,17 +1813,26 @@ function RoomContent({
       const recovered = await retryLocalRecordingBackupUpload(latest);
       setRecoveryBackupSync(recovered);
       await browserRecordingBackupStore.clearBackup(recovered.id, "verified-upload");
-      setRecoveryBackupSync(null);
       setHasRecorded(true);
-      // The retried slot is confirmed; only declare everything confirmed if
-      // no other recoverable backup (e.g. the sibling channel's) remains.
+      // The retried slot is confirmed. The panel holds one manifest at a
+      // time, so hand it the next recoverable backup (e.g. the sibling
+      // channel's) — clearing unconditionally would leave the exit guard
+      // armed with no UI left to resolve it. Only when nothing recoverable
+      // remains is everything confirmed.
       try {
         const remaining = await browserRecordingBackupStore.listBackups(sessionId);
-        if (!remaining.some((item) => isRecoverableBackup(item))) {
+        const nextRecoverable =
+          remaining.find((item) => isRecoverableBackup(item)) ?? null;
+        setRecoveryBackupSync(nextRecoverable);
+        if (!nextRecoverable) {
           setHasUnconfirmedUpload(false);
         }
       } catch (listErr) {
+        // Can't tell what remains: keep the guard armed and surface the
+        // failure so the panel still gives the user something to act on.
         console.error("Failed to re-check local backups after retry:", listErr);
+        setRecoveryBackupSync(null);
+        setBackupError(backupErrorMessage(listErr));
       }
       showNotification("Local backup uploaded");
     } catch (error) {
