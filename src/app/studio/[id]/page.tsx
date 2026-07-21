@@ -24,6 +24,7 @@ import {
   RoomAudioRenderer,
   useRemoteParticipants,
   useLocalParticipant,
+  useConnectionState,
 } from "@livekit/components-react";
 import { CozyRecorder } from "@/lib/recorder";
 import { forceMonoStream, getTrackChannelCount } from "@/lib/audio-downmix";
@@ -695,7 +696,6 @@ function RoomContent({
   selectedMic,
   selectedMicLabel,
   selectedMicIsBuiltIn,
-  roomConnected,
   studioState,
   setStudioState,
   monitorEnabled,
@@ -709,7 +709,6 @@ function RoomContent({
   selectedMic: string;
   selectedMicLabel: string | undefined;
   selectedMicIsBuiltIn: boolean;
-  roomConnected: boolean;
   studioState: StudioState;
   setStudioState: (state: StudioState) => void;
   monitorEnabled: boolean;
@@ -720,6 +719,8 @@ function RoomContent({
 }) {
   const remoteParticipants = useRemoteParticipants();
   const { localParticipant } = useLocalParticipant();
+  const roomConnectionState = useConnectionState();
+  const roomConnected = roomConnectionState === "connected";
   const transport = useTransport();
   const remoteParticipantNames = useMemo(() => {
     const next = new Map<string, string>();
@@ -2038,9 +2039,10 @@ function RoomContent({
       catchUpPhaseRef.current = "complete";
       return;
     }
-    // Token acquisition mounts RoomContent before LiveKit has joined the room.
-    // Wait for the real connection so any stop sent before we joined is already
-    // reflected by the authoritative state snapshot we fetch below.
+    // Token acquisition mounts RoomContent before LiveKit has joined the room,
+    // and onDisconnected does not cover transient reconnecting states. Require
+    // LiveKit's full connection state to be exactly connected so any stop sent
+    // while we were absent is reflected by the snapshot we fetch below.
     if (!roomConnected) return;
     if (catchUpPhaseRef.current === "complete") return;
     let cancelled = false;
@@ -2569,7 +2571,6 @@ export default function StudioPage() {
   const [mics, setMics] = useState<MediaDeviceInfo[]>([]);
   const [token, setToken] = useState("");
   const [connecting, setConnecting] = useState(false);
-  const [roomConnected, setRoomConnected] = useState(false);
   const [monitorEnabled, setMonitorEnabled] = useState(false);
   const [monitorVolume, setMonitorVolume] = useState(70);
   const [isMobile, setIsMobile] = useState(false);
@@ -2578,8 +2579,6 @@ export default function StudioPage() {
   // arriving via /join have their display name recorded in the cookie; we
   // use it to prefill the prejoin form.
   const [isHost, setIsHost] = useState(false);
-  const handleRoomConnected = useCallback(() => setRoomConnected(true), []);
-  const handleRoomDisconnected = useCallback(() => setRoomConnected(false), []);
 
   useEffect(() => {
     setMonitorEnabled(getStoredMonitorEnabled());
@@ -2705,7 +2704,6 @@ export default function StudioPage() {
     setConnecting(true);
     try {
       const jwt = await getToken(sessionId, participantName.trim());
-      setRoomConnected(false);
       setToken(jwt);
       setStudioState("connected");
     } catch (err) {
@@ -2854,8 +2852,6 @@ export default function StudioPage() {
           },
         }}
         connect={true}
-        onConnected={handleRoomConnected}
-        onDisconnected={handleRoomDisconnected}
         className="flex flex-col flex-1 min-h-0"
       >
         <RoomAudioRenderer />
@@ -2865,7 +2861,6 @@ export default function StudioPage() {
           selectedMic={selectedMic}
           selectedMicLabel={selectedMicDevice?.label || undefined}
           selectedMicIsBuiltIn={selectedMicDevice ? isSelectedMicBuiltIn(mics, selectedMic) : false}
-          roomConnected={roomConnected}
           studioState={studioState}
           setStudioState={setStudioState}
           monitorEnabled={monitorEnabled}
