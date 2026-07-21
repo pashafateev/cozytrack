@@ -232,4 +232,26 @@ describe("StudioPage reconnect catch-up", () => {
     });
     expect(studio.harness.recorderStart).not.toHaveBeenCalled();
   });
+
+  it("invalidates a pending snapshot while the room is reconnecting", async () => {
+    const studio = renderGuestStudioPage();
+    let resolveState!: (state: typeof activeTake) => void;
+    studio.harness.getRecordingTakeState.mockReturnValue(
+      new Promise((resolve) => {
+        resolveState = resolve;
+      }),
+    );
+
+    await studio.join();
+    await waitFor(() => {
+      expect(studio.harness.getRecordingTakeState).toHaveBeenCalled();
+    });
+
+    studio.setRoomConnectionState("reconnecting");
+    resolveState(activeTake);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(studio.harness.recorderStart).not.toHaveBeenCalled();
+    expect(studio.screen.getByText("Host controls recording")).toBeTruthy();
+  });
 });

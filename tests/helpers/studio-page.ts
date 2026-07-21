@@ -20,6 +20,12 @@ type ControlMessageHandler = (
   sender: { identity: string; metadata?: string },
 ) => void;
 
+type MockRoomConnectionState =
+  | "connected"
+  | "connecting"
+  | "reconnecting"
+  | "disconnected";
+
 const studioPageHarness = vi.hoisted(() => ({
   authMeResponse: { role: "guest", name: "Guest Alice" } as AuthMeResponse,
   route: {
@@ -30,6 +36,7 @@ const studioPageHarness = vi.hoisted(() => ({
   onControlMessage: vi.fn((_handler: ControlMessageHandler) => vi.fn()),
   isHostSender: vi.fn(),
   autoConnectRoom: true,
+  roomConnectionState: "connected" as MockRoomConnectionState,
   roomOnConnected: undefined as (() => void) | undefined,
   republishAllTracks: vi.fn(async () => undefined),
   getUserMedia: vi.fn(),
@@ -109,6 +116,7 @@ vi.mock("@livekit/components-react", () => {
       );
     },
     RoomAudioRenderer: () => null,
+    useConnectionState: () => studioPageHarness.roomConnectionState,
     useRemoteParticipants: () => remoteParticipants,
     useLocalParticipant: () => localParticipant,
   };
@@ -268,6 +276,7 @@ beforeEach(() => {
   studioPageHarness.onControlMessage.mockReset().mockReturnValue(vi.fn());
   studioPageHarness.isHostSender.mockReset().mockReturnValue(false);
   studioPageHarness.autoConnectRoom = true;
+  studioPageHarness.roomConnectionState = "connected";
   studioPageHarness.roomOnConnected = undefined;
   studioPageHarness.republishAllTracks.mockClear();
   studioPageHarness.getUserMedia.mockReset().mockResolvedValue(mediaStream());
@@ -382,8 +391,11 @@ export function renderGuestStudioPage({
   studioPageHarness.authMeResponse = { role: "guest", name };
   studioPageHarness.route.sessionId = sessionId;
   studioPageHarness.autoConnectRoom = autoConnectRoom;
+  studioPageHarness.roomConnectionState = autoConnectRoom
+    ? "connected"
+    : "connecting";
 
-  render(React.createElement(StudioPage));
+  const rendered = render(React.createElement(StudioPage));
 
   return {
     async join() {
@@ -403,10 +415,17 @@ export function renderGuestStudioPage({
     },
     connectRoom() {
       const onConnected = studioPageHarness.roomOnConnected;
-      if (!onConnected) {
-        throw new Error("LiveKit room connected callback unavailable");
-      }
-      act(() => onConnected());
+      act(() => {
+        studioPageHarness.roomConnectionState = "connected";
+        onConnected?.();
+        rendered.rerender(React.createElement(StudioPage));
+      });
+    },
+    setRoomConnectionState(next: MockRoomConnectionState) {
+      act(() => {
+        studioPageHarness.roomConnectionState = next;
+        rendered.rerender(React.createElement(StudioPage));
+      });
     },
     screen,
     harness: studioPageHarness,
@@ -425,8 +444,11 @@ export function renderHostStudioPage({
   studioPageHarness.authMeResponse = { role: "host" };
   studioPageHarness.route.sessionId = sessionId;
   studioPageHarness.autoConnectRoom = autoConnectRoom;
+  studioPageHarness.roomConnectionState = autoConnectRoom
+    ? "connected"
+    : "connecting";
 
-  render(React.createElement(StudioPage));
+  const rendered = render(React.createElement(StudioPage));
 
   return {
     async join() {
@@ -442,10 +464,17 @@ export function renderHostStudioPage({
     },
     connectRoom() {
       const onConnected = studioPageHarness.roomOnConnected;
-      if (!onConnected) {
-        throw new Error("LiveKit room connected callback unavailable");
-      }
-      act(() => onConnected());
+      act(() => {
+        studioPageHarness.roomConnectionState = "connected";
+        onConnected?.();
+        rendered.rerender(React.createElement(StudioPage));
+      });
+    },
+    setRoomConnectionState(next: MockRoomConnectionState) {
+      act(() => {
+        studioPageHarness.roomConnectionState = next;
+        rendered.rerender(React.createElement(StudioPage));
+      });
     },
     screen,
     harness: studioPageHarness,
