@@ -12,6 +12,9 @@ export default defineConfig({
     include: ["tests/integration/**/*.test.ts"],
     hookTimeout: 30_000,
     testTimeout: 30_000,
+    // Integration files share one bucket and one database; parallel workers
+    // race in beforeAll (concurrent CreateBucket → MinIO 409).
+    fileParallelism: false,
     sequence: {
       concurrent: false,
     },
