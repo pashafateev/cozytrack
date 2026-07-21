@@ -1667,6 +1667,14 @@ function RoomContent({
           return true;
         }
         clearRecordingConfirmationState();
+        // start() awaits rollback before resolving, so the surfaced backup
+        // state is settled here. A rollback that failed to finalize a
+        // started slot keeps its backup — that audio never confirmed, so the
+        // exit guard must arm (Codex P1 on #169). A clean rollback leaves
+        // nothing recoverable and the guard stays down.
+        setHasUnconfirmedUpload(
+          isRecoverableBackup(recoveryBackupRef.current),
+        );
         void broadcastRecordingStatus(
           "failed",
           sessionStartedAtIso,

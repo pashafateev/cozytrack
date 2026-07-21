@@ -183,6 +183,109 @@ describe("StudioPage exit guard", () => {
     expect(lastGuardCall(studio.harness).when).toBe(false);
   });
 
+  it("arms when a partial two-channel start rolls back but a backup is kept", async () => {
+    const studio = renderHostStudioPage();
+    await studio.join();
+
+    fireEvent.click(
+      studio.screen.getByRole("checkbox", { name: /two-channel local/i }),
+    );
+    await studio.screen.findByText("Local Ch 1");
+
+    // Channel 1 starts; channel 2's presign fails, forcing rollback of the
+    // started slot. Its rollback finalization also fails (completeUpload),
+    // so a recoverable backup is kept — the guard must arm.
+    studio.harness.getPresignedUploadTarget.mockImplementation(
+      async (
+        _sessionId: string,
+        _trackId: string,
+        _part: number,
+        _name: string,
+        init?: { localTrackSlotId?: string },
+      ) => {
+        if (init?.localTrackSlotId === "host-local-ch-2") {
+          throw new Error("presign failed");
+        }
+        return {
+          url: "https://s3.example/0.webm",
+          key: "sessions/session-host/tracks/x/0.webm",
+          recordingToken: "token-ch1",
+          trackId: "track-ch1",
+          segmentId: "segment-ch1",
+        };
+      },
+    );
+    studio.harness.recordingBackupStore.startBackup.mockResolvedValue(
+      backupManifest({ state: "recording", chunks: [] }),
+    );
+    studio.harness.completeUpload.mockRejectedValue(
+      new Error("complete failed"),
+    );
+    studio.harness.recordingBackupStore.markBackupFailed.mockResolvedValue(
+      backupManifest(),
+    );
+
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Start recording" }),
+    );
+
+    await waitFor(() => {
+      const guard = lastGuardCall(studio.harness);
+      expect(guard.when).toBe(true);
+      expect(guard.message).toBe(UPLOADING_MESSAGE);
+    });
+    // The failed start never entered recording.
+    expect(
+      studio.screen.getByRole("button", { name: "Start recording" }),
+    ).toBeTruthy();
+  });
+
+  it("stays disarmed when a partial start's rollback cleans up fully", async () => {
+    const studio = renderHostStudioPage();
+    await studio.join();
+
+    fireEvent.click(
+      studio.screen.getByRole("checkbox", { name: /two-channel local/i }),
+    );
+    await studio.screen.findByText("Local Ch 1");
+
+    studio.harness.getPresignedUploadTarget.mockImplementation(
+      async (
+        _sessionId: string,
+        _trackId: string,
+        _part: number,
+        _name: string,
+        init?: { localTrackSlotId?: string },
+      ) => {
+        if (init?.localTrackSlotId === "host-local-ch-2") {
+          throw new Error("presign failed");
+        }
+        return {
+          url: "https://s3.example/0.webm",
+          key: "sessions/session-host/tracks/x/0.webm",
+          recordingToken: "token-ch1",
+          trackId: "track-ch1",
+          segmentId: "segment-ch1",
+        };
+      },
+    );
+    studio.harness.recordingBackupStore.startBackup.mockResolvedValue(
+      backupManifest({ state: "recording", chunks: [] }),
+    );
+
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Start recording" }),
+    );
+
+    // Rollback finalizes channel 1 cleanly (complete + clearBackup succeed).
+    await waitFor(() => {
+      expect(studio.harness.completeUpload).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(lastGuardCall(studio.harness).when).toBe(false);
+    });
+  });
+
   it("disarms and shows the all-clear after a successful backup retry", async () => {
     const studio = renderHostStudioPage();
     await studio.join();
