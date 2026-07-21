@@ -1,6 +1,6 @@
 # Cozytrack Roadmap
 
-This roadmap was reconciled against every GitHub issue that was open on July 7, 2026 (46 open issues).
+This roadmap was reconciled against every GitHub issue that was open on July 21, 2026 (50 open issues).
 
 - Every currently open issue appears exactly once as a primary roadmap entry below.
 - No open issues are explicitly excluded right now.
@@ -24,7 +24,6 @@ This roadmap was reconciled against every GitHub issue that was open on July 7, 
 
 ### Session detail, dashboard, and studio polish
 
-- #151 Finalized-session reuse guard: ensure a new studio recording always gets a fresh `Session.id`, and block finalized/ready sessions from silently accepting new tracks unless there is an explicit reopen flow.
 - #22 Session notes persistence: store the session-detail notes textarea on `Session` and autosave it with a visible saved state.
 - #24 Real waveform extraction and per-track playback: replace decorative waveform placeholders with real audio-derived peaks and track-level playback controls.
 - #25 Track peak and size metadata: persist `bytes` and `peakDbFS`, capture them during recording/finalization, and expose them in the session UI and dashboard rollups.
@@ -49,10 +48,14 @@ This roadmap was reconciled against every GitHub issue that was open on July 7, 
 - #29 Dashboard session totals and accurate duration: land this after `#25`, because total size depends on persisted `Track.bytes` and duration should move off the current per-track max heuristic.
 - #36 Podflow JWT auth replacement: replace interim host-password auth with podflow-signed JWT verification, JIT user provisioning, and owner-scoped route authorization.
 - #37 Service-token flow for podline: start this after `#36`, because the service principal path should extend the same auth boundary rather than reintroducing a parallel interim model.
+- #173 Auth session lifecycle: treat this as the umbrella for the interim auth-expiry hardening stack so the stateless-cookie model survives active use until `#36` replaces it.
+- #174 Add sliding renewal for host and guest session cookies: start here so active sessions stop expiring mid-flow, while preserving the documented absolute caps.
+- #175 Centralize client 401 handling with an `apiFetch` wrapper and `return_to` redirect: do this after `#174`, so the fallback UX reflects the renewed auth model instead of masking the same expiry cliff.
+- #176 Studio auth-expired banner with re-auth recovery: land this after `#175`, because it depends on the studio-specific 401 signal and retry hook from the shared fetch wrapper.
+- #177 Let active recordings survive cookie expiry: this can proceed in parallel with `#174`-`#176` once scoped, but it should stay adjacent to that stack because it hardens the recording control plane around the same expiry boundary and dovetails with `#111` and `#154`.
 - #108 Integration-coverage audit: keep this as the umbrella audit for remaining high-risk coverage gaps, and use it to drive narrow follow-up issues instead of broad test churn.
 - #114 Route-level auth and invite tests: prioritize this as a direct `#108` follow-up for the auth-, invite-, and LiveKit-token routes.
 - #115 Upload and recovery boundary tests: add targeted input-contract and property-style checks as another `#108` follow-up for storage-path and recovery invariants.
-- #116 Ingest download and purge integration tests: add service-backed coverage for Podline-facing ingest lifecycle behavior as another `#108` follow-up.
 - #117 Finalize/recovery/completion race integration tests: add a small real-service race suite as another `#108` follow-up for the highest-risk lifecycle ordering cases.
 - #63 Deferred multi-participant browser E2E harness: promote this after the narrower integration coverage and reconnect stack stabilize, or sooner if a real LiveKit/multi-participant regression demands it.
 - #109 Simplify recording and recovery code after the recent safety work: do this after the current safety path and its coverage work stabilize so cleanup is guided by proven invariants instead of guesswork.
@@ -72,3 +75,4 @@ This roadmap was reconciled against every GitHub issue that was open on July 7, 
 - #72 Role-aware guest and cohost studio view: decide whether cohosts ever get dashboard access from inside an active session, or whether non-host participants should always stay inside a simplified studio shell.
 - #111 Reconnect-safe recording architecture plan: settle the remaining architecture choices around participant identity semantics, materialization timing, and how reconnect gaps should be represented after the `#148` lifecycle hardening removes the current stop-state inference gap.
 - #135 Local multichannel recording alongside a remote participant: clarify whether local tracks should appear as separate local participants, host-owned track slots, or a multi-channel capture mode, and how that choice should interact with `#111`, `#72`, and `#75`.
+- #180 Exit-guard behavior for recoverable local backups across visits: decide whether reopening a studio with a durable backup should warn before exit, and how to distinguish a real unconfirmed upload from a confirmed upload whose backup cleanup merely failed.
