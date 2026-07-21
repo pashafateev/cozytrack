@@ -2,10 +2,16 @@ import React, { type ReactNode } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, vi } from "vitest";
 import StudioPage from "@/app/studio/[id]/page";
+import type { ControlMessage } from "@/lib/transport/types";
 
 type AuthMeResponse =
   | { role: "guest"; name: string }
   | { role: "host" };
+
+type ControlMessageHandler = (
+  message: ControlMessage,
+  sender: { identity: string; metadata?: string },
+) => void;
 
 const studioPageHarness = vi.hoisted(() => ({
   authMeResponse: { role: "guest", name: "Guest Alice" } as AuthMeResponse,
@@ -14,7 +20,7 @@ const studioPageHarness = vi.hoisted(() => ({
   },
   getToken: vi.fn(async () => "livekit-token"),
   sendControlMessage: vi.fn(async (_message: { type: string }) => undefined),
-  onControlMessage: vi.fn(() => vi.fn()),
+  onControlMessage: vi.fn((_handler: ControlMessageHandler) => vi.fn()),
   isHostSender: vi.fn(),
   republishAllTracks: vi.fn(async () => undefined),
   getUserMedia: vi.fn(),
