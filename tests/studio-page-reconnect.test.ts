@@ -1,4 +1,4 @@
-import { waitFor } from "@testing-library/react";
+import { fireEvent, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import {
   mediaStream,
@@ -128,6 +128,46 @@ describe("StudioPage reconnect catch-up", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(studio.harness.recorderStart).not.toHaveBeenCalled();
+    expect(
+      studio.screen.getByRole("button", { name: "Start recording" }),
+    ).toBeTruthy();
+  });
+
+  it("does not re-run catch-up after a normal local take finishes", async () => {
+    const studio = renderHostStudioPage();
+    studio.harness.getRecordingTakeState.mockResolvedValue({
+      active: false,
+      sessionStartedAt: null,
+      take: null,
+    });
+
+    await studio.join();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const initialCatchUpChecks =
+      studio.harness.getRecordingTakeState.mock.calls.length;
+    expect(initialCatchUpChecks).toBeGreaterThan(0);
+
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Start recording" }),
+    );
+    await studio.screen.findByRole("button", { name: "Stop recording" });
+
+    studio.harness.getRecordingTakeState.mockResolvedValue(activeTake);
+
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Stop recording" }),
+    );
+    await studio.screen.findByRole("button", { name: "Start recording" });
+
+    // Flush the effect opportunity created by finalizing -> connected. A
+    // reconnect catch-up scoped to the initial join must stay closed here,
+    // even if a later server snapshot reports another active take.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(studio.harness.getRecordingTakeState).toHaveBeenCalledTimes(
+      initialCatchUpChecks,
+    );
+    expect(studio.harness.recorderStart).toHaveBeenCalledTimes(1);
     expect(
       studio.screen.getByRole("button", { name: "Start recording" }),
     ).toBeTruthy();
