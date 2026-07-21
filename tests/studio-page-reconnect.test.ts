@@ -172,4 +172,39 @@ describe("StudioPage reconnect catch-up", () => {
       studio.screen.getByRole("button", { name: "Start recording" }),
     ).toBeTruthy();
   });
+
+  it("ignores a stale active snapshot after receiving a host stop", async () => {
+    const studio = renderGuestStudioPage();
+    studio.harness.isHostSender.mockReturnValue(true);
+    let resolveState!: (state: typeof activeTake) => void;
+    studio.harness.getRecordingTakeState.mockReturnValue(
+      new Promise((resolve) => {
+        resolveState = resolve;
+      }),
+    );
+
+    await studio.join();
+    await waitFor(() => {
+      expect(studio.harness.getRecordingTakeState).toHaveBeenCalled();
+      expect(studio.harness.onControlMessage).toHaveBeenCalled();
+    });
+
+    const onControlMessage = studio.harness.onControlMessage.mock.calls.at(-1)?.[0] as
+      | ((
+          message: { type: "recording_stop" },
+          sender: { identity: string; metadata: string },
+        ) => void)
+      | undefined;
+    expect(onControlMessage).toBeTypeOf("function");
+    onControlMessage?.(
+      { type: "recording_stop" },
+      { identity: "host", metadata: "host-metadata" },
+    );
+
+    resolveState(activeTake);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(studio.harness.recorderStart).not.toHaveBeenCalled();
+    expect(studio.screen.getByText("Host controls recording")).toBeTruthy();
+  });
 });

@@ -15,6 +15,7 @@ const studioPageHarness = vi.hoisted(() => ({
   getToken: vi.fn(async () => "livekit-token"),
   sendControlMessage: vi.fn(async (_message: { type: string }) => undefined),
   onControlMessage: vi.fn(() => vi.fn()),
+  isHostSender: vi.fn(),
   republishAllTracks: vi.fn(async () => undefined),
   getUserMedia: vi.fn(),
   enumerateDevices: vi.fn(),
@@ -90,7 +91,7 @@ vi.mock("@/lib/transport", () => {
   };
   return {
     useTransport: () => transport,
-    isHostSender: () => false,
+    isHostSender: studioPageHarness.isHostSender,
     parseParticipantMetadata: () => null,
   };
 });
@@ -230,6 +231,7 @@ beforeEach(() => {
   studioPageHarness.getToken.mockClear();
   studioPageHarness.sendControlMessage.mockReset().mockResolvedValue(undefined);
   studioPageHarness.onControlMessage.mockReset().mockReturnValue(vi.fn());
+  studioPageHarness.isHostSender.mockReset().mockReturnValue(false);
   studioPageHarness.republishAllTracks.mockClear();
   studioPageHarness.getUserMedia.mockReset().mockResolvedValue(mediaStream());
   studioPageHarness.enumerateDevices
