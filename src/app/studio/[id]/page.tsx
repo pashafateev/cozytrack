@@ -695,6 +695,7 @@ function RoomContent({
   selectedMic,
   selectedMicLabel,
   selectedMicIsBuiltIn,
+  roomConnected,
   studioState,
   setStudioState,
   monitorEnabled,
@@ -708,6 +709,7 @@ function RoomContent({
   selectedMic: string;
   selectedMicLabel: string | undefined;
   selectedMicIsBuiltIn: boolean;
+  roomConnected: boolean;
   studioState: StudioState;
   setStudioState: (state: StudioState) => void;
   monitorEnabled: boolean;
@@ -2036,6 +2038,10 @@ function RoomContent({
       catchUpPhaseRef.current = "complete";
       return;
     }
+    // Token acquisition mounts RoomContent before LiveKit has joined the room.
+    // Wait for the real connection so any stop sent before we joined is already
+    // reflected by the authoritative state snapshot we fetch below.
+    if (!roomConnected) return;
     if (catchUpPhaseRef.current === "complete") return;
     let cancelled = false;
 
@@ -2094,6 +2100,7 @@ function RoomContent({
       cancelled = true;
     };
   }, [
+    roomConnected,
     studioState,
     recordingStream,
     sessionId,
@@ -2562,6 +2569,7 @@ export default function StudioPage() {
   const [mics, setMics] = useState<MediaDeviceInfo[]>([]);
   const [token, setToken] = useState("");
   const [connecting, setConnecting] = useState(false);
+  const [roomConnected, setRoomConnected] = useState(false);
   const [monitorEnabled, setMonitorEnabled] = useState(false);
   const [monitorVolume, setMonitorVolume] = useState(70);
   const [isMobile, setIsMobile] = useState(false);
@@ -2570,6 +2578,8 @@ export default function StudioPage() {
   // arriving via /join have their display name recorded in the cookie; we
   // use it to prefill the prejoin form.
   const [isHost, setIsHost] = useState(false);
+  const handleRoomConnected = useCallback(() => setRoomConnected(true), []);
+  const handleRoomDisconnected = useCallback(() => setRoomConnected(false), []);
 
   useEffect(() => {
     setMonitorEnabled(getStoredMonitorEnabled());
@@ -2695,6 +2705,7 @@ export default function StudioPage() {
     setConnecting(true);
     try {
       const jwt = await getToken(sessionId, participantName.trim());
+      setRoomConnected(false);
       setToken(jwt);
       setStudioState("connected");
     } catch (err) {
@@ -2843,6 +2854,8 @@ export default function StudioPage() {
           },
         }}
         connect={true}
+        onConnected={handleRoomConnected}
+        onDisconnected={handleRoomDisconnected}
         className="flex flex-col flex-1 min-h-0"
       >
         <RoomAudioRenderer />
@@ -2852,6 +2865,7 @@ export default function StudioPage() {
           selectedMic={selectedMic}
           selectedMicLabel={selectedMicDevice?.label || undefined}
           selectedMicIsBuiltIn={selectedMicDevice ? isSelectedMicBuiltIn(mics, selectedMic) : false}
+          roomConnected={roomConnected}
           studioState={studioState}
           setStudioState={setStudioState}
           monitorEnabled={monitorEnabled}
