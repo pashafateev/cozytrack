@@ -1973,6 +1973,10 @@ function RoomContent({
           }
         });
       } else if (msg.type === "recording_stop") {
+        // A stop can arrive while the initial authoritative-state GET is still
+        // pending. Invalidate that join snapshot before stopping locally so a
+        // stale `active: true` response cannot restart the take afterward.
+        catchUpPhaseRef.current = "complete";
         showNotification(
           `Recording stopped by ${senderName}`,
         );
@@ -2045,7 +2049,7 @@ function RoomContent({
         console.error("Failed to check for an active recording take:", err);
         return;
       }
-      if (cancelled) return;
+      if (cancelled || catchUpPhaseRef.current === "complete") return;
       if (
         !state.active ||
         !state.take ||
