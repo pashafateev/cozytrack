@@ -24,6 +24,7 @@ import {
   RoomAudioRenderer,
   useRemoteParticipants,
   useLocalParticipant,
+  useConnectionState,
 } from "@livekit/components-react";
 import { CozyRecorder } from "@/lib/recorder";
 import { forceMonoStream, getTrackChannelCount } from "@/lib/audio-downmix";
@@ -718,6 +719,8 @@ function RoomContent({
 }) {
   const remoteParticipants = useRemoteParticipants();
   const { localParticipant } = useLocalParticipant();
+  const roomConnectionState = useConnectionState();
+  const roomConnected = roomConnectionState === "connected";
   const transport = useTransport();
   const remoteParticipantNames = useMemo(() => {
     const next = new Map<string, string>();
@@ -2036,6 +2039,11 @@ function RoomContent({
       catchUpPhaseRef.current = "complete";
       return;
     }
+    // Token acquisition mounts RoomContent before LiveKit has joined the room,
+    // and onDisconnected does not cover transient reconnecting states. Require
+    // LiveKit's full connection state to be exactly connected so any stop sent
+    // while we were absent is reflected by the snapshot we fetch below.
+    if (!roomConnected) return;
     if (catchUpPhaseRef.current === "complete") return;
     let cancelled = false;
 
@@ -2094,6 +2102,7 @@ function RoomContent({
       cancelled = true;
     };
   }, [
+    roomConnected,
     studioState,
     recordingStream,
     sessionId,

@@ -207,4 +207,51 @@ describe("StudioPage reconnect catch-up", () => {
     expect(studio.harness.recorderStart).not.toHaveBeenCalled();
     expect(studio.screen.getByText("Host controls recording")).toBeTruthy();
   });
+
+  it("waits for the room connection before checking the active take", async () => {
+    const studio = renderGuestStudioPage({ autoConnectRoom: false });
+    studio.harness.getRecordingTakeState.mockResolvedValue(activeTake);
+
+    await studio.join();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(studio.harness.getRecordingTakeState).not.toHaveBeenCalled();
+    expect(studio.harness.recorderStart).not.toHaveBeenCalled();
+
+    // The host stops before this client actually joins the room. Once the
+    // connection is confirmed, the authoritative snapshot is inactive.
+    studio.harness.getRecordingTakeState.mockResolvedValue({
+      active: false,
+      sessionStartedAt: null,
+      take: null,
+    });
+    studio.connectRoom();
+
+    await waitFor(() => {
+      expect(studio.harness.getRecordingTakeState).toHaveBeenCalledTimes(1);
+    });
+    expect(studio.harness.recorderStart).not.toHaveBeenCalled();
+  });
+
+  it("invalidates a pending snapshot while the room is reconnecting", async () => {
+    const studio = renderGuestStudioPage();
+    let resolveState!: (state: typeof activeTake) => void;
+    studio.harness.getRecordingTakeState.mockReturnValue(
+      new Promise((resolve) => {
+        resolveState = resolve;
+      }),
+    );
+
+    await studio.join();
+    await waitFor(() => {
+      expect(studio.harness.getRecordingTakeState).toHaveBeenCalled();
+    });
+
+    studio.setRoomConnectionState("reconnecting");
+    resolveState(activeTake);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(studio.harness.recorderStart).not.toHaveBeenCalled();
+    expect(studio.screen.getByText("Host controls recording")).toBeTruthy();
+  });
 });
