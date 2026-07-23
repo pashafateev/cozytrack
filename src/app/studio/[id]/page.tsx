@@ -1537,8 +1537,36 @@ function RoomContent({
         callbacks: {
           onRecoveryBackup: setRecoveryBackupSync,
           onBackupError: setBackupError,
-          onStopSettled: ({ allCompleted }) =>
-            setHasUnconfirmedUpload(!allCompleted),
+          onStopSettled: ({ allCompleted }) => {
+            if (!allCompleted) {
+              setHasUnconfirmedUpload(true);
+              return;
+            }
+            // This take confirmed, but the flag is session-wide and an
+            // EARLIER take may have left audio behind — the in-session
+            // surfacing only tracks the current take's slots, so the durable
+            // store is the only witness (Codex P1 on #169). Only disarm when
+            // it holds nothing recoverable, and resurface what it does hold
+            // so the panel offers the way out.
+            void (async () => {
+              try {
+                const backups =
+                  await browserRecordingBackupStore.listBackups(sessionId);
+                const leftover =
+                  backups.find((item) => isRecoverableBackup(item)) ?? null;
+                setHasUnconfirmedUpload(leftover !== null);
+                if (leftover) setRecoveryBackupSync(leftover);
+              } catch (err) {
+                // Can't verify the store — keep the guard armed rather than
+                // promise an all-clear we can't back.
+                console.error(
+                  "Failed to re-check local backups after stop:",
+                  err,
+                );
+                setHasUnconfirmedUpload(true);
+              }
+            })();
+          },
           onBackupUnavailable: () =>
             showNotification("Local backup unavailable - remote upload only"),
           onTiming: (event) => {

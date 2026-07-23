@@ -286,6 +286,105 @@ describe("StudioPage exit guard", () => {
     });
   });
 
+  it("keeps the guard armed after a failed take even when the next take succeeds", async () => {
+    const studio = renderHostStudioPage();
+    await studio.join();
+
+    // Durable-store stand-in: take 1's failed backup must outlive take 2's
+    // clean finish, exactly like IndexedDB does. Each take gets fresh
+    // server-side ids (as in production) so the two takes' backups are
+    // distinct records keyed the way recordingBackupId derives them.
+    const store: Record<string, ReturnType<typeof backupManifest>> = {};
+    let presignSeq = 0;
+    studio.harness.getPresignedUploadTarget.mockImplementation(async () => {
+      presignSeq += 1;
+      return {
+        url: "https://s3.example/0.webm",
+        key: `sessions/session-host/tracks/take-${presignSeq}/0.webm`,
+        recordingToken: `token-take-${presignSeq}`,
+        trackId: `track-take-${presignSeq}`,
+        segmentId: `segment-take-${presignSeq}`,
+      };
+    });
+    studio.harness.recordingBackupStore.startBackup.mockImplementation(
+      async (input: {
+        sessionId: string;
+        trackId: string;
+        segmentId: string;
+      }) => {
+        const m = backupManifest({
+          id: `${input.sessionId}:${input.segmentId}`,
+          trackId: input.trackId,
+          segmentId: input.segmentId,
+          state: "recording",
+          chunks: [],
+        });
+        store[m.id as string] = m;
+        return m;
+      },
+    );
+    studio.harness.recordingBackupStore.markBackupFailed.mockImplementation(
+      async (id: string) => {
+        const failed = backupManifest({
+          id,
+          state: "failed",
+          chunks: [{ index: 0, byteSize: 5, uploadStatus: "failed" }],
+        });
+        store[id] = failed;
+        return failed;
+      },
+    );
+    studio.harness.recordingBackupStore.clearBackup.mockImplementation(
+      async (id: string) => {
+        delete store[id];
+      },
+    );
+    studio.harness.recordingBackupStore.getBackup.mockImplementation(
+      async (id: string) => store[id] ?? null,
+    );
+    studio.harness.listBackups.mockImplementation(async () =>
+      Object.values(store).filter((m) => m.state === "failed"),
+    );
+
+    // Take 1: server-side completion fails, backup kept.
+    studio.harness.completeUpload.mockRejectedValueOnce(
+      new Error("complete failed"),
+    );
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Start recording" }),
+    );
+    await studio.screen.findByRole("button", { name: "Stop recording" });
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Stop recording" }),
+    );
+    await studio.screen.findByRole("button", { name: "Start recording" });
+    await waitFor(() => {
+      expect(lastGuardCall(studio.harness).when).toBe(true);
+    });
+
+    // Take 2: completes cleanly — but take 1's audio is still unresolved.
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Start recording" }),
+    );
+    await studio.screen.findByRole("button", { name: "Stop recording" });
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Stop recording" }),
+    );
+    await studio.screen.findByRole("button", { name: "Start recording" });
+
+    await waitFor(() => {
+      expect(studio.harness.listBackups).toHaveBeenCalled();
+    });
+    const guard = lastGuardCall(studio.harness);
+    expect(guard.when).toBe(true);
+    expect(guard.message).toBe(UPLOADING_MESSAGE);
+    expect(studio.screen.queryByText("All audio uploaded")).toBeNull();
+    // The panel resurfaces take 1's backup so the armed guard has a way out.
+    expect(
+      await studio.screen.findByRole("button", { name: "Retry upload" }),
+    ).toBeTruthy();
+  });
+
   it("surfaces the sibling backup after retrying one of two failed channels", async () => {
     const studio = renderHostStudioPage();
     await studio.join();
