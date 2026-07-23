@@ -114,12 +114,14 @@ describe("FinishRecordingButton unfinished-take recovery", () => {
 });
 
 describe("FinishRecordingButton departed participants", () => {
-  function pendingResponse(participantName: string): Response {
+  function pendingResponse(...participantNames: string[]): Response {
     return response(
       {
-        pending: [
-          { trackId: "track-9", participantName, status: "uploading" },
-        ],
+        pending: participantNames.map((participantName, index) => ({
+          trackId: `track-${index}`,
+          participantName,
+          status: "uploading",
+        })),
       },
       409,
     );
@@ -136,6 +138,39 @@ describe("FinishRecordingButton departed participants", () => {
         "Bob left the session — recovering their uploaded audio…",
       ),
     ).toBeTruthy();
+  });
+
+  it("finds a departed participant anywhere in the pending list", async () => {
+    fetchMock.mockResolvedValue(pendingResponse("Alice", "Bob"));
+    renderButton({ departedParticipantNames: ["Bob"] });
+
+    fireEvent.click(screen.getByRole("button", { name: "Finish recording" }));
+
+    expect(
+      await screen.findByText(
+        "Bob left the session — recovering their uploaded audio…",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("names the departed participant on timeout even when listed after present ones", async () => {
+    vi.useFakeTimers();
+    try {
+      fetchMock.mockResolvedValue(pendingResponse("Alice", "Bob"));
+      renderButton({ departedParticipantNames: ["Bob"] });
+
+      fireEvent.click(screen.getByRole("button", { name: "Finish recording" }));
+
+      await vi.advanceTimersByTimeAsync(31_000);
+
+      expect(
+        screen.getByText(
+          "Bob left before their track finished uploading — retry to recover what they already uploaded.",
+        ),
+      ).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps the plain uploading label for participants still present", async () => {

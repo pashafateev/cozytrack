@@ -10,10 +10,10 @@ interface ActiveTake {
 
 type FinishState =
   | { kind: "idle" }
-  | { kind: "polling"; pendingName?: string }
+  | { kind: "polling"; pendingNames?: string[] }
   | { kind: "active_take"; activeTake: ActiveTake; message: string }
   | { kind: "ready" }
-  | { kind: "timeout"; pendingName?: string }
+  | { kind: "timeout"; pendingNames?: string[] }
   | { kind: "error"; message: string };
 
 interface PendingTrack {
@@ -81,7 +81,7 @@ export function FinishRecordingButton({
 
     const deadline = Date.now() + POLL_TIMEOUT_MS;
     // Carried into the timeout state so it can name who the poll was stuck on.
-    let lastPendingName: string | undefined;
+    let lastPendingNames: string[] | undefined;
 
     while (Date.now() <= deadline) {
       if (controller.signal.aborted || !isMountedRef.current) return;
@@ -108,7 +108,7 @@ export function FinishRecordingButton({
       }
 
       if (res.status === 409) {
-        let pendingName: string | undefined;
+        let pendingNames: string[] | undefined;
         let activeTake: ActiveTake | undefined;
         let error: string | undefined;
         try {
@@ -117,7 +117,9 @@ export function FinishRecordingButton({
             activeTake?: ActiveTake;
             error?: string;
           };
-          pendingName = data.pending?.[0]?.participantName;
+          pendingNames = data.pending
+            ?.map((track) => track.participantName)
+            .filter(Boolean);
           activeTake = data.activeTake;
           error = data.error;
         } catch {
@@ -132,8 +134,11 @@ export function FinishRecordingButton({
           });
           return;
         }
-        lastPendingName = pendingName ?? lastPendingName;
-        safeSetState({ kind: "polling", pendingName });
+        lastPendingNames =
+          pendingNames && pendingNames.length > 0
+            ? pendingNames
+            : lastPendingNames;
+        safeSetState({ kind: "polling", pendingNames });
         await sleep(POLL_INTERVAL_MS, controller.signal);
         continue;
       }
@@ -143,7 +148,7 @@ export function FinishRecordingButton({
       return;
     }
 
-    safeSetState({ kind: "timeout", pendingName: lastPendingName });
+    safeSetState({ kind: "timeout", pendingNames: lastPendingNames });
   }, [sessionId, waitForUploads, onReady, safeSetState]);
 
   const recoverActiveTake = useCallback(async () => {
@@ -205,14 +210,14 @@ export function FinishRecordingButton({
   }
 
   if (state.kind === "timeout") {
-    const departed =
-      state.pendingName !== undefined &&
-      departedParticipantNames?.includes(state.pendingName);
+    const departedName = state.pendingNames?.find((name) =>
+      departedParticipantNames?.includes(name),
+    );
     return (
       <div className="flex flex-col items-center gap-3 p-4 rounded-xl bg-cozy-900 border border-yellow-700">
         <p className="text-yellow-400 text-sm text-center">
-          {departed
-            ? `${state.pendingName} left before their track finished uploading — retry to recover what they already uploaded.`
+          {departedName !== undefined
+            ? `${departedName} left before their track finished uploading — retry to recover what they already uploaded.`
             : "Some tracks haven't uploaded yet — check your network and retry."}
         </p>
         <button
@@ -257,14 +262,18 @@ export function FinishRecordingButton({
   }
 
   if (state.kind === "polling") {
-    const departed =
-      state.pendingName !== undefined &&
-      departedParticipantNames?.includes(state.pendingName);
-    const label = departed
-      ? `${state.pendingName} left the session — recovering their uploaded audio…`
-      : state.pendingName
-        ? `Still uploading track: ${state.pendingName}…`
-        : "Finalizing…";
+    // A departed participant's track is the one that will never finish on
+    // its own — surface it over tracks that are merely still uploading.
+    const departedName = state.pendingNames?.find((name) =>
+      departedParticipantNames?.includes(name),
+    );
+    const firstPending = state.pendingNames?.[0];
+    const label =
+      departedName !== undefined
+        ? `${departedName} left the session — recovering their uploaded audio…`
+        : firstPending !== undefined
+          ? `Still uploading track: ${firstPending}…`
+          : "Finalizing…";
     return (
       <div className="flex flex-col items-center gap-2 p-4 rounded-xl bg-cozy-900 border border-cozy-700">
         <p className="text-gray-300 text-sm animate-pulse">{label}</p>
