@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  getRecordingTakeState,
   RecordingStateError,
   stopRecordingTake,
 } from "@/lib/recording-state";
@@ -89,5 +90,38 @@ describe("stopRecordingTake durability", () => {
       stopRecordingTake("s1", { maxAttempts: 3, retryDelayMs: 0 }),
     ).rejects.toBeInstanceOf(RecordingStateError);
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("getRecordingTakeState", () => {
+  it("GETs the recording-state endpoint and returns the parsed state", async () => {
+    const state = {
+      active: true,
+      sessionStartedAt: "2026-07-03T09:00:00.000Z",
+      take: {
+        id: "take-live",
+        sessionId: "s1",
+        startedAt: "2026-07-03T09:00:00.000Z",
+        stoppedAt: null,
+        status: "recording",
+      },
+    };
+    fetchMock.mockResolvedValueOnce(jsonResponse(state, 200));
+
+    const result = await getRecordingTakeState("s1");
+
+    expect(result).toEqual(state);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/sessions/s1/recording-state",
+    );
+  });
+
+  it("throws a RecordingStateError carrying the HTTP status on failure", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "nope" }, 404));
+
+    await expect(getRecordingTakeState("s1")).rejects.toMatchObject({
+      name: "RecordingStateError",
+      status: 404,
+    });
   });
 });

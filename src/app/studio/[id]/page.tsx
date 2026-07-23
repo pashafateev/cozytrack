@@ -24,6 +24,7 @@ import {
   RoomAudioRenderer,
   useRemoteParticipants,
   useLocalParticipant,
+  useConnectionState,
 } from "@livekit/components-react";
 import { CozyRecorder } from "@/lib/recorder";
 import { forceMonoStream, getTrackChannelCount } from "@/lib/audio-downmix";
@@ -35,6 +36,7 @@ import {
   completeUpload,
 } from "@/lib/upload";
 import {
+  getRecordingTakeState,
   RecordingStateError,
   reportRecordingTakeParticipantStatus,
   startRecordingTake,
@@ -722,6 +724,8 @@ function RoomContent({
 }) {
   const remoteParticipants = useRemoteParticipants();
   const { localParticipant } = useLocalParticipant();
+  const roomConnectionState = useConnectionState();
+  const roomConnected = roomConnectionState === "connected";
   const transport = useTransport();
   const remoteParticipantNames = useMemo(() => {
     const next = new Map<string, string>();
@@ -849,6 +853,16 @@ function RoomContent({
     useState<string | null>(null);
   const recordingSessionStartedAtRef = useRef<string | null>(null);
   const recordingTakeIdRef = useRef<string | null>(null);
+  // Reconnect catch-up: the id of the active take we've already attempted to
+  // resume on this client, so effect reruns cannot start the same take twice.
+  const caughtUpTakeIdRef = useRef<string | null>(null);
+  // Catch-up belongs to the initial room-join lifecycle, not every later UI
+  // transition back to `connected` after a recording finishes. Keep the
+  // window open only when an active take was observed before recorder inputs
+  // became ready; that lets mic readiness retry without rearming catch-up.
+  const catchUpPhaseRef = useRef<
+    "checking" | "waiting-for-stream" | "complete"
+  >("checking");
   const setRecordingSessionStartedAtSync = useCallback((next: string | null) => {
     recordingSessionStartedAtRef.current = next;
     setRecordingSessionStartedAt(next);
@@ -2081,6 +2095,10 @@ function RoomContent({
           }
         });
       } else if (msg.type === "recording_stop") {
+        // A stop can arrive while the initial authoritative-state GET is still
+        // pending. Invalidate that join snapshot before stopping locally so a
+        // stale `active: true` response cannot restart the take afterward.
+        catchUpPhaseRef.current = "complete";
         showNotification(
           `Recording stopped by ${senderName}`,
         );
@@ -2122,6 +2140,93 @@ function RoomContent({
     showNotification,
     remoteParticipantName,
     updateRemoteRecordingStatus,
+  ]);
+
+  // Reconnect catch-up (stack 5). A participant who (re)joins after the host
+  // pressed record missed the live `recording_start` control message, so during
+  // the initial connected join window we ask the server for the authoritative
+  // active take.
+  // Because RecordingTake.status is the source of truth (a host stop durably
+  // flips it to "stopped" before the room tears down — see #148/#150), a take
+  // that still reads `recording` here is genuinely ongoing: we resume it by
+  // starting a fresh segment under the same logical track (presign re-links via
+  // the take id). A stopped take reports active:false and nothing happens — no
+  // host-stop marker needed. startRecordingLocal is idempotent, so this can't
+  // race a live start/stop into a double recorder.
+  useEffect(() => {
+    if (studioState !== "connected") {
+      catchUpPhaseRef.current = "complete";
+      return;
+    }
+    // Token acquisition mounts RoomContent before LiveKit has joined the room,
+    // and onDisconnected does not cover transient reconnecting states. Require
+    // LiveKit's full connection state to be exactly connected so any stop sent
+    // while we were absent is reflected by the snapshot we fetch below.
+    if (!roomConnected) return;
+    if (catchUpPhaseRef.current === "complete") return;
+    let cancelled = false;
+
+    void (async () => {
+      let state;
+      try {
+        state = await getRecordingTakeState(sessionId);
+      } catch (err) {
+        // GET is side-effect-free; skip catch-up this time and let a later
+        // connect retry rather than surfacing noise to the user.
+        console.error("Failed to check for an active recording take:", err);
+        return;
+      }
+      if (cancelled || catchUpPhaseRef.current === "complete") return;
+      if (
+        !state.active ||
+        !state.take ||
+        state.take.status !== "recording" ||
+        !state.sessionStartedAt
+      ) {
+        catchUpPhaseRef.current = "complete";
+        return;
+      }
+      // The room can connect before getUserMedia finishes. Do not spend the
+      // take's catch-up attempt until recorder inputs exist. Keep this initial
+      // join window open so recordingStream can trigger one fresh authoritative
+      // snapshot, without letting later recording-state transitions rearm it.
+      if (!recordingStream) {
+        catchUpPhaseRef.current = "waiting-for-stream";
+        return;
+      }
+      // Resume each active take at most once, and only while we're still idle —
+      // a start/stop the user triggered in the meantime takes precedence.
+      if (caughtUpTakeIdRef.current === state.take.id) {
+        catchUpPhaseRef.current = "complete";
+        return;
+      }
+      if (studioStateRef.current !== "connected") {
+        catchUpPhaseRef.current = "complete";
+        return;
+      }
+      catchUpPhaseRef.current = "complete";
+      caughtUpTakeIdRef.current = state.take.id;
+
+      const started = await startRecordingLocal(
+        state.sessionStartedAt,
+        state.take.id,
+      );
+      if (!started && !cancelled) {
+        caughtUpTakeIdRef.current = null;
+        showNotification("Couldn't resume the active recording — check your mic");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    roomConnected,
+    studioState,
+    recordingStream,
+    sessionId,
+    startRecordingLocal,
+    showNotification,
   ]);
 
 

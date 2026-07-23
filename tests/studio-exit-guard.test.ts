@@ -108,7 +108,7 @@ describe("StudioPage exit guard", () => {
     const studio = renderGuestStudioPage();
     await studio.join();
 
-    studio.harness.isHostSenderResult = true;
+    studio.harness.isHostSender.mockReturnValue(true);
     const handlers = (
       studio.harness.onControlMessage.mock.calls as unknown as Array<
         [(message: unknown, sender: unknown) => void]

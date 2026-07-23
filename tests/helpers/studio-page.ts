@@ -1,7 +1,15 @@
 import React, { type ReactNode } from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, expect, vi } from "vitest";
 import StudioPage from "@/app/studio/[id]/page";
+import type { ControlMessage } from "@/lib/transport/types";
 
 type AuthMeResponse =
   | { role: "guest"; name: string }
@@ -12,6 +20,17 @@ export type RemoteParticipantStub = {
   name?: string;
   metadata?: string;
 };
+
+type ControlMessageHandler = (
+  message: ControlMessage,
+  sender: { identity: string; metadata?: string },
+) => void;
+
+type MockRoomConnectionState =
+  | "connected"
+  | "connecting"
+  | "reconnecting"
+  | "disconnected";
 
 const studioPageHarness = vi.hoisted(() => ({
   authMeResponse: { role: "guest", name: "Guest Alice" } as AuthMeResponse,
@@ -27,14 +46,15 @@ const studioPageHarness = vi.hoisted(() => ({
     metadata?: string;
   }>,
   remoteParticipantsListeners: new Set<() => void>(),
-  // Result of the mocked isHostSender — tests that drive guest recording via
-  // control messages flip this to true so the page honors the host's message.
-  isHostSenderResult: false,
   navigationGuard: vi.fn(),
   retryLocalRecordingBackupUpload: vi.fn(),
   getToken: vi.fn(async () => "livekit-token"),
   sendControlMessage: vi.fn(async (_message: { type: string }) => undefined),
-  onControlMessage: vi.fn(() => vi.fn()),
+  onControlMessage: vi.fn((_handler: ControlMessageHandler) => vi.fn()),
+  isHostSender: vi.fn(),
+  autoConnectRoom: true,
+  roomConnectionState: "connected" as MockRoomConnectionState,
+  roomOnConnected: undefined as (() => void) | undefined,
   republishAllTracks: vi.fn(async () => undefined),
   getUserMedia: vi.fn(),
   enumerateDevices: vi.fn(),
@@ -42,6 +62,7 @@ const studioPageHarness = vi.hoisted(() => ({
   audioContexts: [] as unknown[],
   startRecordingTake: vi.fn(),
   stopRecordingTake: vi.fn(),
+  getRecordingTakeState: vi.fn(),
   reportRecordingTakeParticipantStatus: vi.fn(async () => undefined),
   getPresignedUploadTarget: vi.fn(),
   getPresignedUploadUrl: vi.fn(async () => "https://s3.example/recording.webm"),
@@ -90,9 +111,30 @@ vi.mock("@livekit/components-react", () => {
     },
   };
   return {
-    LiveKitRoom: ({ children }: { children: ReactNode }) =>
-      React.createElement("div", { "data-testid": "livekit-room" }, children),
+    LiveKitRoom: ({
+      children,
+      onConnected,
+    }: {
+      children: ReactNode;
+      onConnected?: () => void;
+    }) => {
+      React.useEffect(() => {
+        studioPageHarness.roomOnConnected = onConnected;
+        if (studioPageHarness.autoConnectRoom) onConnected?.();
+        return () => {
+          if (studioPageHarness.roomOnConnected === onConnected) {
+            studioPageHarness.roomOnConnected = undefined;
+          }
+        };
+      }, [onConnected]);
+      return React.createElement(
+        "div",
+        { "data-testid": "livekit-room" },
+        children,
+      );
+    },
     RoomAudioRenderer: () => null,
+    useConnectionState: () => studioPageHarness.roomConnectionState,
     useRemoteParticipants: () =>
       React.useSyncExternalStore(
         (listener) => {
@@ -119,7 +161,7 @@ vi.mock("@/lib/transport", () => {
   };
   return {
     useTransport: () => transport,
-    isHostSender: () => studioPageHarness.isHostSenderResult,
+    isHostSender: studioPageHarness.isHostSender,
     parseParticipantMetadata: () => null,
   };
 });
@@ -127,6 +169,7 @@ vi.mock("@/lib/transport", () => {
 vi.mock("@/lib/recording-state", () => ({
   startRecordingTake: studioPageHarness.startRecordingTake,
   stopRecordingTake: studioPageHarness.stopRecordingTake,
+  getRecordingTakeState: studioPageHarness.getRecordingTakeState,
   reportRecordingTakeParticipantStatus:
     studioPageHarness.reportRecordingTakeParticipantStatus,
 }));
@@ -210,7 +253,7 @@ vi.mock("@/hooks/useNavigationGuard", () => ({
     studioPageHarness.navigationGuard(options),
 }));
 
-function mediaStream(): MediaStream {
+export function mediaStream(): MediaStream {
   const track = {
     stop: vi.fn(),
     getSettings: () => ({}),
@@ -260,12 +303,15 @@ beforeEach(() => {
   studioPageHarness.route.sessionId = "session-guest";
   studioPageHarness.remoteParticipants = [];
   studioPageHarness.remoteParticipantsListeners.clear();
-  studioPageHarness.isHostSenderResult = false;
   studioPageHarness.navigationGuard.mockClear();
   studioPageHarness.retryLocalRecordingBackupUpload.mockReset();
   studioPageHarness.getToken.mockClear();
   studioPageHarness.sendControlMessage.mockReset().mockResolvedValue(undefined);
   studioPageHarness.onControlMessage.mockReset().mockReturnValue(vi.fn());
+  studioPageHarness.isHostSender.mockReset().mockReturnValue(false);
+  studioPageHarness.autoConnectRoom = true;
+  studioPageHarness.roomConnectionState = "connected";
+  studioPageHarness.roomOnConnected = undefined;
   studioPageHarness.republishAllTracks.mockClear();
   studioPageHarness.getUserMedia.mockReset().mockResolvedValue(mediaStream());
   studioPageHarness.enumerateDevices
@@ -292,6 +338,13 @@ beforeEach(() => {
       startedAt: "2026-06-27T12:00:00.000Z",
       stoppedAt: "2026-06-27T12:01:00.000Z",
     },
+  });
+  // Default: no active take, so the reconnect catch-up effect is a no-op for
+  // tests that don't opt in. Reconnect tests override this per case.
+  studioPageHarness.getRecordingTakeState.mockReset().mockResolvedValue({
+    active: false,
+    sessionStartedAt: null,
+    take: null,
   });
   studioPageHarness.reportRecordingTakeParticipantStatus
     .mockReset()
@@ -377,14 +430,20 @@ export function setRemoteParticipants(
 export function renderGuestStudioPage({
   name = "Guest Alice",
   sessionId = "session-guest",
+  autoConnectRoom = true,
 }: {
   name?: string;
   sessionId?: string;
+  autoConnectRoom?: boolean;
 } = {}) {
   studioPageHarness.authMeResponse = { role: "guest", name };
   studioPageHarness.route.sessionId = sessionId;
+  studioPageHarness.autoConnectRoom = autoConnectRoom;
+  studioPageHarness.roomConnectionState = autoConnectRoom
+    ? "connected"
+    : "connecting";
 
-  render(React.createElement(StudioPage));
+  const rendered = render(React.createElement(StudioPage));
 
   return {
     async join() {
@@ -402,6 +461,20 @@ export function renderGuestStudioPage({
         expect(studioPageHarness.audioContexts.length).toBeGreaterThan(0);
       });
     },
+    connectRoom() {
+      const onConnected = studioPageHarness.roomOnConnected;
+      act(() => {
+        studioPageHarness.roomConnectionState = "connected";
+        onConnected?.();
+        rendered.rerender(React.createElement(StudioPage));
+      });
+    },
+    setRoomConnectionState(next: MockRoomConnectionState) {
+      act(() => {
+        studioPageHarness.roomConnectionState = next;
+        rendered.rerender(React.createElement(StudioPage));
+      });
+    },
     screen,
     harness: studioPageHarness,
   };
@@ -410,14 +483,20 @@ export function renderGuestStudioPage({
 export function renderHostStudioPage({
   name = "Pasha",
   sessionId = "session-host",
+  autoConnectRoom = true,
 }: {
   name?: string;
   sessionId?: string;
+  autoConnectRoom?: boolean;
 } = {}) {
   studioPageHarness.authMeResponse = { role: "host" };
   studioPageHarness.route.sessionId = sessionId;
+  studioPageHarness.autoConnectRoom = autoConnectRoom;
+  studioPageHarness.roomConnectionState = autoConnectRoom
+    ? "connected"
+    : "connecting";
 
-  render(React.createElement(StudioPage));
+  const rendered = render(React.createElement(StudioPage));
 
   return {
     async join() {
@@ -429,6 +508,20 @@ export function renderHostStudioPage({
 
       await waitFor(() => {
         expect(studioPageHarness.audioContexts.length).toBeGreaterThan(0);
+      });
+    },
+    connectRoom() {
+      const onConnected = studioPageHarness.roomOnConnected;
+      act(() => {
+        studioPageHarness.roomConnectionState = "connected";
+        onConnected?.();
+        rendered.rerender(React.createElement(StudioPage));
+      });
+    },
+    setRoomConnectionState(next: MockRoomConnectionState) {
+      act(() => {
+        studioPageHarness.roomConnectionState = next;
+        rendered.rerender(React.createElement(StudioPage));
       });
     },
     screen,
