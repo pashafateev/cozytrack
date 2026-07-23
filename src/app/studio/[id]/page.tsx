@@ -853,15 +853,25 @@ function RoomContent({
   // panel holds one at a time) and keep the exit guard armed exactly while
   // one remains. If the store can't be read, stay armed and surface the
   // failure so the panel still offers a way forward.
+  //
+  // The epoch discards stale results: a settle races the next take's start
+  // (which pre-arms the guard), and a slow listBackups resolving afterwards
+  // must not overwrite that newer `true` with its old `false`. Every settle
+  // and every take start bumps the epoch; a settle only writes state if the
+  // epoch is still its own when the store answers.
+  const unconfirmedSettleEpochRef = useRef(0);
   const settleUnconfirmedFromBackupStore = useCallback(async () => {
+    const epoch = ++unconfirmedSettleEpochRef.current;
     try {
       const backups = await browserRecordingBackupStore.listBackups(sessionId);
+      if (epoch !== unconfirmedSettleEpochRef.current) return;
       const leftover =
         backups.find((item) => isRecoverableBackup(item)) ?? null;
       setRecoveryBackupSync(leftover);
       setHasUnconfirmedUpload(leftover !== null);
     } catch (err) {
       console.error("Failed to re-check local backups:", err);
+      if (epoch !== unconfirmedSettleEpochRef.current) return;
       setRecoveryBackupSync(null);
       setBackupError(backupErrorMessage(err));
       setHasUnconfirmedUpload(true);
@@ -1712,7 +1722,10 @@ function RoomContent({
       // outcome: presign creates server-side tracks while start() is still
       // in flight, so leaving mid-startup already strands audio (Codex P1 on
       // #169). The !result.ok branch below settles the flag from rollback
-      // state; onStopSettled owns it once the take is running.
+      // state; onStopSettled owns it once the take is running. Bumping the
+      // epoch invalidates any store re-check still in flight from a previous
+      // take, whose stale empty answer would otherwise disarm this take.
+      unconfirmedSettleEpochRef.current += 1;
       setHasUnconfirmedUpload(true);
       const result = await recordingLifecycle.start(slotSpecs.specs, {
         sessionStartedAt: sessionStartedAtIso,

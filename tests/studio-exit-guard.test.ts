@@ -348,6 +348,76 @@ describe("StudioPage exit guard", () => {
     });
   });
 
+  it("ignores a stale store re-check that resolves after the next take starts", async () => {
+    const studio = renderHostStudioPage();
+    await studio.join();
+
+    // Take 1 finishes clean; its post-stop store re-check hangs. Take 2 then
+    // starts (guard pre-armed) with its presign held open. When the stale
+    // re-check finally resolves empty, it must NOT disarm the guard that
+    // take 2's startup owns.
+    let releaseStaleList: ((backups: unknown[]) => void) | undefined;
+    let deferNextList = false;
+    studio.harness.listBackups.mockImplementation(async () => {
+      if (deferNextList) {
+        deferNextList = false;
+        return new Promise<unknown[]>((resolve) => {
+          releaseStaleList = resolve;
+        });
+      }
+      return [];
+    });
+    let presignCalls = 0;
+    let releaseSecondPresign: (() => void) | undefined;
+    studio.harness.getPresignedUploadTarget.mockImplementation(async () => {
+      presignCalls += 1;
+      if (presignCalls === 2) {
+        await new Promise<void>((resolve) => {
+          releaseSecondPresign = resolve;
+        });
+      }
+      return {
+        url: "https://s3.example/0.webm",
+        key: `sessions/session-host/tracks/take-${presignCalls}/0.webm`,
+        recordingToken: `token-take-${presignCalls}`,
+        trackId: `track-take-${presignCalls}`,
+        segmentId: `segment-take-${presignCalls}`,
+      };
+    });
+
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Start recording" }),
+    );
+    await studio.screen.findByRole("button", { name: "Stop recording" });
+    deferNextList = true;
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Stop recording" }),
+    );
+    await studio.screen.findByRole("button", { name: "Start recording" });
+    await waitFor(() => {
+      expect(releaseStaleList).toBeDefined();
+    });
+
+    // Take 2 starts while the stale re-check is still pending.
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Start recording" }),
+    );
+    await waitFor(() => {
+      expect(releaseSecondPresign).toBeDefined();
+    });
+    await waitFor(() => {
+      expect(lastGuardCall(studio.harness).when).toBe(true);
+    });
+
+    releaseStaleList?.([]);
+    // The stale empty result must not overwrite take 2's armed guard.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(lastGuardCall(studio.harness).when).toBe(true);
+
+    releaseSecondPresign?.();
+    await studio.screen.findByRole("button", { name: "Stop recording" });
+  });
+
   it("keeps the guard armed after a failed take even when the next take succeeds", async () => {
     const studio = renderHostStudioPage();
     await studio.join();
