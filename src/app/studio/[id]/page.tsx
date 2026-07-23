@@ -976,6 +976,10 @@ function RoomContent({
     prevRemoteParticipantsRef.current = current;
     if (prev === null) return;
 
+    // One roster update can drop several participants at once (e.g. a
+    // network partition); the toast holds a single message, so aggregate
+    // the names instead of letting each call overwrite the previous one.
+    const departedNames: string[] = [];
     for (const [identity, name] of prev) {
       if (current.has(identity)) continue;
       const departed = new Map(departedParticipantsRef.current);
@@ -985,10 +989,16 @@ function RoomContent({
       if (studioStateRef.current === "recording") {
         setMidRecordingDepartures((m) => new Map(m).set(identity, name));
       } else {
-        showNotification(`${name} left the session`);
+        departedNames.push(name);
       }
     }
+    if (departedNames.length > 0) {
+      showNotification(
+        `${formatParticipantList(departedNames)} left the session`,
+      );
+    }
 
+    const rejoinedNames: string[] = [];
     for (const [identity, name] of current) {
       if (prev.has(identity)) continue;
       if (!departedParticipantsRef.current.has(identity)) continue;
@@ -1002,7 +1012,10 @@ function RoomContent({
         next.delete(identity);
         return next;
       });
-      showNotification(`${name} rejoined`);
+      rejoinedNames.push(name);
+    }
+    if (rejoinedNames.length > 0) {
+      showNotification(`${formatParticipantList(rejoinedNames)} rejoined`);
     }
   }, [remoteParticipants, remoteParticipantNames, showNotification]);
 

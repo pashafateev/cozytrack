@@ -34,6 +34,36 @@ describe("StudioPage presence notifications", () => {
     expect(await studio.screen.findByText("Bob rejoined")).toBeTruthy();
   });
 
+  it("aggregates simultaneous departures into one toast", async () => {
+    const studio = renderHostStudioPage();
+    await studio.join();
+
+    act(() =>
+      setRemoteParticipants([BOB, { identity: "guest-cara", name: "Cara" }]),
+    );
+    act(() => setRemoteParticipants([]));
+
+    expect(
+      await studio.screen.findByText("Bob and Cara left the session"),
+    ).toBeTruthy();
+  });
+
+  it("aggregates simultaneous rejoins into one toast", async () => {
+    const studio = renderHostStudioPage();
+    await studio.join();
+
+    const cara = { identity: "guest-cara", name: "Cara" };
+    act(() => setRemoteParticipants([BOB, cara]));
+    act(() => setRemoteParticipants([]));
+    await studio.screen.findByText("Bob and Cara left the session");
+
+    act(() => setRemoteParticipants([BOB, cara]));
+
+    expect(
+      await studio.screen.findByText("Bob and Cara rejoined"),
+    ).toBeTruthy();
+  });
+
   it("does not toast when a participant first joins", async () => {
     const studio = renderHostStudioPage();
     await studio.join();
