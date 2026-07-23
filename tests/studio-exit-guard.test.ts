@@ -1,5 +1,5 @@
 import { fireEvent, waitFor } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   renderGuestStudioPage,
   renderHostStudioPage,
@@ -447,18 +447,18 @@ describe("StudioPage exit guard", () => {
     ).toBeTruthy();
   });
 
-  it("surfaces the sibling backup after retrying one of two failed channels", async () => {
-    const studio = renderHostStudioPage();
-    await studio.join();
-
+  // Drives a two-channel take where BOTH channel completions fail on stop,
+  // leaving two distinct recoverable backups behind the single panel slot.
+  // Returns after the stop settles with the guard armed.
+  async function recordTwoFailedChannels(
+    studio: ReturnType<typeof renderHostStudioPage>,
+  ) {
     fireEvent.click(
       studio.screen.getByRole("checkbox", { name: /two-channel local/i }),
     );
     await studio.screen.findByText("Local Ch 1");
 
-    // Both channels record; both completions fail on stop, keeping two
-    // recoverable backups behind one panel slot. Per-slot presign targets so
-    // the two backups get distinct manifest ids.
+    // Per-slot presign targets so the two backups get distinct manifest ids.
     studio.harness.getPresignedUploadTarget.mockImplementation(
       async (
         _sessionId: string,
@@ -503,6 +503,11 @@ describe("StudioPage exit guard", () => {
     studio.harness.recordingBackupStore.getBackup.mockImplementation(
       async (id: string) => manifests[id] ?? null,
     );
+    studio.harness.recordingBackupStore.clearBackup.mockImplementation(
+      async (id: string) => {
+        delete manifests[id];
+      },
+    );
     studio.harness.completeUpload.mockRejectedValue(
       new Error("complete failed"),
     );
@@ -528,6 +533,12 @@ describe("StudioPage exit guard", () => {
     await waitFor(() => {
       expect(lastGuardCall(studio.harness).when).toBe(true);
     });
+  }
+
+  it("surfaces the sibling backup after retrying one of two failed channels", async () => {
+    const studio = renderHostStudioPage();
+    await studio.join();
+    await recordTwoFailedChannels(studio);
 
     // First retry clears one backup; the sibling must take over the panel
     // instead of the panel vanishing while the guard stays armed.
@@ -560,6 +571,107 @@ describe("StudioPage exit guard", () => {
     });
     expect(
       studio.screen.queryByRole("button", { name: "Retry upload" }),
+    ).toBeNull();
+  });
+
+  it("surfaces the sibling backup after clearing one of two failed channels", async () => {
+    const studio = renderHostStudioPage();
+    await studio.join();
+    await recordTwoFailedChannels(studio);
+    vi.stubGlobal("confirm", vi.fn(() => true));
+
+    // Clearing one backup must hand the panel to the sibling, guard still up.
+    fireEvent.click(
+      await studio.screen.findByRole("button", { name: "Clear" }),
+    );
+    await waitFor(() => {
+      expect(
+        studio.harness.recordingBackupStore.clearBackup,
+      ).toHaveBeenCalledTimes(1);
+    });
+    expect(
+      await studio.screen.findByRole("button", { name: "Clear" }),
+    ).toBeTruthy();
+    expect(lastGuardCall(studio.harness).when).toBe(true);
+    expect(studio.screen.queryByText("All audio uploaded")).toBeNull();
+
+    // Clearing the last one resolves everything: panel gone, guard down.
+    fireEvent.click(studio.screen.getByRole("button", { name: "Clear" }));
+    await waitFor(() => {
+      expect(
+        studio.harness.recordingBackupStore.clearBackup,
+      ).toHaveBeenCalledTimes(2);
+    });
+    await waitFor(() => {
+      expect(lastGuardCall(studio.harness).when).toBe(false);
+    });
+    expect(
+      studio.screen.queryByRole("button", { name: "Clear" }),
+    ).toBeNull();
+  });
+
+  it("disarms the guard when the only failed backup is deliberately cleared", async () => {
+    const studio = renderHostStudioPage();
+    await studio.join();
+    vi.stubGlobal("confirm", vi.fn(() => true));
+
+    const store: Record<string, ReturnType<typeof backupManifest>> = {};
+    studio.harness.recordingBackupStore.startBackup.mockImplementation(
+      async (input: { sessionId: string; segmentId: string }) => {
+        const m = backupManifest({
+          id: `${input.sessionId}:${input.segmentId}`,
+          state: "recording",
+          chunks: [],
+        });
+        store[m.id as string] = m;
+        return m;
+      },
+    );
+    studio.harness.recordingBackupStore.markBackupFailed.mockImplementation(
+      async (id: string) => {
+        const failed = backupManifest({
+          id,
+          state: "failed",
+          chunks: [{ index: 0, byteSize: 5, uploadStatus: "failed" }],
+        });
+        store[id] = failed;
+        return failed;
+      },
+    );
+    studio.harness.recordingBackupStore.clearBackup.mockImplementation(
+      async (id: string) => {
+        delete store[id];
+      },
+    );
+    studio.harness.listBackups.mockImplementation(async () =>
+      Object.values(store).filter((m) => m.state === "failed"),
+    );
+    studio.harness.completeUpload.mockRejectedValueOnce(
+      new Error("complete failed"),
+    );
+
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Start recording" }),
+    );
+    await studio.screen.findByRole("button", { name: "Stop recording" });
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Stop recording" }),
+    );
+    await studio.screen.findByRole("button", { name: "Start recording" });
+    await waitFor(() => {
+      expect(lastGuardCall(studio.harness).when).toBe(true);
+    });
+
+    // The user deliberately discards the failed audio: nothing recoverable
+    // remains, so the guard must come down with the panel.
+    fireEvent.click(
+      await studio.screen.findByRole("button", { name: "Clear" }),
+    );
+    await waitFor(() => {
+      expect(lastGuardCall(studio.harness).when).toBe(false);
+    });
+    expect(
+      studio.screen.queryByRole("button", { name: "Clear" }),
     ).toBeNull();
   });
 

@@ -845,6 +845,29 @@ function RoomContent({
     [],
   );
 
+  // Shared settling step for every event that may resolve (or reveal) locally
+  // backed-up audio: a take finishing clean, a backup retry succeeding, or
+  // the user discarding a backup. The durable store is the only witness to
+  // audio from earlier takes — the in-session surfacing tracks only the
+  // current take's slots — so: surface the next recoverable backup (the
+  // panel holds one at a time) and keep the exit guard armed exactly while
+  // one remains. If the store can't be read, stay armed and surface the
+  // failure so the panel still offers a way forward.
+  const settleUnconfirmedFromBackupStore = useCallback(async () => {
+    try {
+      const backups = await browserRecordingBackupStore.listBackups(sessionId);
+      const leftover =
+        backups.find((item) => isRecoverableBackup(item)) ?? null;
+      setRecoveryBackupSync(leftover);
+      setHasUnconfirmedUpload(leftover !== null);
+    } catch (err) {
+      console.error("Failed to re-check local backups:", err);
+      setRecoveryBackupSync(null);
+      setBackupError(backupErrorMessage(err));
+      setHasUnconfirmedUpload(true);
+    }
+  }, [sessionId, setRecoveryBackupSync]);
+
   // Elapsed recording timer
   const [elapsedMs, setElapsedMs] = useState(0);
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -1542,30 +1565,9 @@ function RoomContent({
               setHasUnconfirmedUpload(true);
               return;
             }
-            // This take confirmed, but the flag is session-wide and an
-            // EARLIER take may have left audio behind — the in-session
-            // surfacing only tracks the current take's slots, so the durable
-            // store is the only witness (Codex P1 on #169). Only disarm when
-            // it holds nothing recoverable, and resurface what it does hold
-            // so the panel offers the way out.
-            void (async () => {
-              try {
-                const backups =
-                  await browserRecordingBackupStore.listBackups(sessionId);
-                const leftover =
-                  backups.find((item) => isRecoverableBackup(item)) ?? null;
-                setHasUnconfirmedUpload(leftover !== null);
-                if (leftover) setRecoveryBackupSync(leftover);
-              } catch (err) {
-                // Can't verify the store — keep the guard armed rather than
-                // promise an all-clear we can't back.
-                console.error(
-                  "Failed to re-check local backups after stop:",
-                  err,
-                );
-                setHasUnconfirmedUpload(true);
-              }
-            })();
+            // This take confirmed, but an earlier take may have left audio
+            // behind (Codex P1 on #169) — let the store decide.
+            void settleUnconfirmedFromBackupStore();
           },
           onBackupUnavailable: () =>
             showNotification("Local backup unavailable - remote upload only"),
@@ -1581,6 +1583,7 @@ function RoomContent({
     [
       sessionId,
       setRecoveryBackupSync,
+      settleUnconfirmedFromBackupStore,
       showNotification,
       timingDebug,
       trackerFreezeRecorded,
@@ -1858,26 +1861,7 @@ function RoomContent({
       setRecoveryBackupSync(recovered);
       await browserRecordingBackupStore.clearBackup(recovered.id, "verified-upload");
       setHasRecorded(true);
-      // The retried slot is confirmed. The panel holds one manifest at a
-      // time, so hand it the next recoverable backup (e.g. the sibling
-      // channel's) — clearing unconditionally would leave the exit guard
-      // armed with no UI left to resolve it. Only when nothing recoverable
-      // remains is everything confirmed.
-      try {
-        const remaining = await browserRecordingBackupStore.listBackups(sessionId);
-        const nextRecoverable =
-          remaining.find((item) => isRecoverableBackup(item)) ?? null;
-        setRecoveryBackupSync(nextRecoverable);
-        if (!nextRecoverable) {
-          setHasUnconfirmedUpload(false);
-        }
-      } catch (listErr) {
-        // Can't tell what remains: keep the guard armed and surface the
-        // failure so the panel still gives the user something to act on.
-        console.error("Failed to re-check local backups after retry:", listErr);
-        setRecoveryBackupSync(null);
-        setBackupError(backupErrorMessage(listErr));
-      }
+      await settleUnconfirmedFromBackupStore();
       showNotification("Local backup uploaded");
     } catch (error) {
       const message = backupErrorMessage(error);
@@ -1892,7 +1876,12 @@ function RoomContent({
     } finally {
       setBackupAction("idle");
     }
-  }, [backupAction, sessionId, setRecoveryBackupSync, showNotification]);
+  }, [
+    backupAction,
+    setRecoveryBackupSync,
+    settleUnconfirmedFromBackupStore,
+    showNotification,
+  ]);
 
   const handleDownloadLocalBackup = useCallback(async () => {
     if (backupAction !== "idle") return;
@@ -1932,13 +1921,17 @@ function RoomContent({
     setBackupError(null);
     try {
       await browserRecordingBackupStore.clearBackup(current.id, "user-confirmed");
-      setRecoveryBackupSync(null);
+      // Discarding is the user resolving this audio: hand the panel the next
+      // recoverable backup and only disarm the exit guard when none remain —
+      // leaving the flag untouched here kept the guard armed forever with no
+      // UI left to resolve it (Codex P1 on #169).
+      await settleUnconfirmedFromBackupStore();
     } catch (error) {
       setBackupError(backupErrorMessage(error));
     } finally {
       setBackupAction("idle");
     }
-  }, [backupAction, setRecoveryBackupSync]);
+  }, [backupAction, settleUnconfirmedFromBackupStore]);
 
   // Synchronous "request in flight" guards. Set true at the top of the click
   // handler before any await so a rapid second click is dropped immediately
