@@ -1692,6 +1692,12 @@ function RoomContent({
         return false;
       }
 
+      // Arm for the whole startup window, not just from the first resolved
+      // outcome: presign creates server-side tracks while start() is still
+      // in flight, so leaving mid-startup already strands audio (Codex P1 on
+      // #169). The !result.ok branch below settles the flag from rollback
+      // state; onStopSettled owns it once the take is running.
+      setHasUnconfirmedUpload(true);
       const result = await recordingLifecycle.start(slotSpecs.specs, {
         sessionStartedAt: sessionStartedAtIso,
         takeId: effectiveTakeId,
@@ -1727,10 +1733,6 @@ function RoomContent({
         );
         return false;
       }
-
-      // Slots exist server-side from here on; only onStopSettled (or a backup
-      // retry that leaves nothing recoverable) may declare them confirmed.
-      setHasUnconfirmedUpload(true);
 
       if (result.stopPending || !recordingLifecycle.recording) {
         // A stop arrived while the recorders were still starting. It is

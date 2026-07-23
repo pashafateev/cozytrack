@@ -286,6 +286,68 @@ describe("StudioPage exit guard", () => {
     });
   });
 
+  it("arms during recorder startup, before start() resolves", async () => {
+    const studio = renderHostStudioPage();
+    await studio.join();
+
+    fireEvent.click(
+      studio.screen.getByRole("checkbox", { name: /two-channel local/i }),
+    );
+    await studio.screen.findByText("Local Ch 1");
+
+    // Channel 1 presigns immediately (its server track now exists); channel
+    // 2's presign hangs, holding the whole startup window open.
+    let releaseSecondSlot: (() => void) | undefined;
+    studio.harness.getPresignedUploadTarget.mockImplementation(
+      async (
+        _sessionId: string,
+        _trackId: string,
+        _part: number,
+        _name: string,
+        init?: { localTrackSlotId?: string },
+      ) => {
+        if (init?.localTrackSlotId === "host-local-ch-2") {
+          await new Promise<void>((resolve) => {
+            releaseSecondSlot = resolve;
+          });
+        }
+        return {
+          url: "https://s3.example/0.webm",
+          key: "sessions/session-host/tracks/x/0.webm",
+          recordingToken: `token-${init?.localTrackSlotId}`,
+          trackId: `track-${init?.localTrackSlotId}`,
+          segmentId: `segment-${init?.localTrackSlotId}`,
+        };
+      },
+    );
+
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Start recording" }),
+    );
+
+    // Startup is pending: not yet "recording", but a server track exists.
+    await waitFor(() => {
+      expect(releaseSecondSlot).toBeDefined();
+    });
+    expect(
+      studio.screen.queryByRole("button", { name: "Stop recording" }),
+    ).toBeNull();
+    await waitFor(() => {
+      expect(lastGuardCall(studio.harness).when).toBe(true);
+    });
+
+    // Let startup finish and stop cleanly: everything confirms, guard down.
+    releaseSecondSlot?.();
+    await studio.screen.findByRole("button", { name: "Stop recording" });
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Stop recording" }),
+    );
+    await studio.screen.findByRole("button", { name: "Start recording" });
+    await waitFor(() => {
+      expect(lastGuardCall(studio.harness).when).toBe(false);
+    });
+  });
+
   it("keeps the guard armed after a failed take even when the next take succeeds", async () => {
     const studio = renderHostStudioPage();
     await studio.join();
