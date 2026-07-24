@@ -17,6 +17,14 @@ export function getStoredMonitorEnabled(): boolean {
   return localStorage.getItem(LS_ENABLED) === "true";
 }
 
+export function setStoredMonitorEnabled(enabled: boolean) {
+  localStorage.setItem(LS_ENABLED, String(enabled));
+}
+
+export function setStoredMonitorVolume(volume: number) {
+  localStorage.setItem(LS_VOLUME, String(volume));
+}
+
 export function getStoredMonitorVolume(): number {
   if (typeof window === "undefined") return 70;
   const v = localStorage.getItem(LS_VOLUME);
