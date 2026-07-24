@@ -85,12 +85,18 @@ export default function DashboardPage() {
   );
 
   return (
-    <div className="animate-page-enter min-h-screen bg-bg">
+    <div
+      className="animate-page-enter min-h-screen bg-bg"
+      style={{
+        background:
+          "radial-gradient(560px 300px at 12% 0%, rgba(150,90,255,0.06), transparent 70%), var(--bg)",
+      }}
+    >
       <Topbar />
       <div className="max-w-[740px] mx-auto px-5 pt-8 pb-12">
         <div className="flex items-center justify-between mb-6">
           <div>
-            <h1 className="text-xl font-bold text-text tracking-[-0.02em]">Recordings</h1>
+            <h1 className="text-xl font-extrabold text-text tracking-[-0.02em]">Recordings</h1>
             <p className="text-xs text-text-3 mt-0.5">
               {sessions.length} session{sessions.length === 1 ? "" : "s"} · {trackCount} track
               {trackCount === 1 ? "" : "s"} total
@@ -115,7 +121,7 @@ export default function DashboardPage() {
             {sessions.map((s) => (
               <div
                 key={s.id}
-                className="group relative rounded-lg p-4 border transition-[border-color,background-color] duration-150 bg-card border-[color:var(--border)] hover:bg-card-hi hover:border-[color:var(--border-hi)] focus-within:border-[color:var(--border-hi)]"
+                className="group relative rounded-panel p-4 border transition-[border-color,background-color] duration-150 bg-card border-[color:var(--border)] hover:bg-card-hi hover:border-[color:var(--border-hi)] focus-within:border-[color:var(--border-hi)]"
               >
                 {/* Card-wide navigation overlay. `z-10` lifts it above the
                  *  card's text content (which sits at auto z-index) so clicks
@@ -126,7 +132,7 @@ export default function DashboardPage() {
                 <Link
                   href={`/session/${s.id}`}
                   aria-label={`Open session ${s.name}`}
-                  className="absolute inset-0 z-10 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--amber)]"
+                  className="absolute inset-0 z-10 rounded-panel focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--accent)]"
                 />
                 <div className="relative flex items-start justify-between mb-3 pointer-events-none">
                   <div>

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { Aurora } from "@/components/ui/Aurora";
 
 export default function JoinForm({
   token,
@@ -16,6 +17,7 @@ export default function JoinForm({
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [focused, setFocused] = useState(false);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -42,38 +44,39 @@ export default function JoinForm({
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-neutral-950 text-neutral-100 px-4">
-      <form onSubmit={onSubmit} className="w-full max-w-sm space-y-4">
-        <div className="space-y-1">
-          <p className="text-sm text-neutral-400">You&apos;re invited to record</p>
-          <h1 className="text-2xl font-semibold">{sessionName}</h1>
-        </div>
-        <div className="space-y-2">
-          <label htmlFor="name" className="block text-sm text-neutral-300">
-            Your name
-          </label>
-          <input
-            id="name"
-            name="name"
-            type="text"
-            autoFocus
-            required
-            minLength={1}
-            maxLength={80}
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            className="w-full rounded-md border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm outline-none focus:border-neutral-600"
-          />
-        </div>
+    <div className="relative min-h-screen flex items-center justify-center overflow-hidden bg-bg px-4">
+      <Aurora variant="auth" />
+      <form onSubmit={onSubmit} className="relative w-full max-w-[360px] flex flex-col">
+        <p className="text-[13px] text-text-2">You&apos;re invited to record</p>
+        <h1 className="text-[26px] font-extrabold tracking-[-0.02em] text-text mt-1">
+          {sessionName}
+        </h1>
+        <input
+          id="name"
+          name="name"
+          type="text"
+          aria-label="Your name"
+          placeholder="Your name"
+          autoFocus
+          required
+          minLength={1}
+          maxLength={80}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          className="w-full mt-7 px-3.5 py-2.5 text-sm font-sans bg-card text-text placeholder:text-text-3 rounded-[8px] outline-none border transition-[border-color] duration-150"
+          style={{ borderColor: focused ? "var(--border-hi)" : "var(--border)" }}
+        />
         {error && (
-          <p className="text-sm text-red-400" role="alert">
+          <p className="text-sm text-rec mt-3" role="alert">
             {error}
           </p>
         )}
         <button
           type="submit"
           disabled={pending || name.trim().length === 0}
-          className="w-full rounded-md bg-neutral-100 px-3 py-2 text-sm font-medium text-neutral-900 hover:bg-white disabled:opacity-50 disabled:cursor-not-allowed"
+          className="w-full mt-4 py-[11px] text-[15px] font-semibold font-sans rounded-[10px] bg-accent text-accent-ink hover:bg-accent-hi disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {pending ? "Joining…" : "Join session"}
         </button>

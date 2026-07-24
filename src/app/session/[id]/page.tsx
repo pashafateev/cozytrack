@@ -13,6 +13,7 @@ import {
   IcoPause,
   IcoAlert,
 } from "@/components/ui/Icon";
+import { speakerHue } from "@/lib/speaker-hues";
 
 interface Track {
   id: string;
@@ -54,6 +55,23 @@ function seedFromId(id: string): number {
   let h = 0;
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
   return h % 1000;
+}
+
+/** Track status → Sunset status color (mono uppercase tag next to the track). */
+function statusColor(status: string): string {
+  switch (status) {
+    case "complete":
+      return "var(--ok)";
+    case "failed":
+      return "var(--rec)";
+    case "recording":
+      return "var(--rec)";
+    case "uploading":
+    case "processing":
+      return "var(--warn)";
+    default:
+      return "var(--text-3)";
+  }
 }
 
 export default function SessionDetailPage() {
@@ -125,7 +143,7 @@ export default function SessionDetailPage() {
         <Topbar />
         <div className="flex flex-col items-center justify-center py-24 gap-4">
           <p className="text-text-2 text-sm">Session not found</p>
-          <Link href="/dashboard" className="text-amber text-sm hover:underline">
+          <Link href="/dashboard" className="text-accent text-sm hover:underline">
             Back to Dashboard
           </Link>
         </div>
@@ -149,7 +167,7 @@ export default function SessionDetailPage() {
 
         {/* Header */}
         <div className="mb-6">
-          <h1 className="text-xl font-bold text-text tracking-[-0.02em] mb-2">
+          <h1 className="text-xl font-extrabold text-text tracking-[-0.02em] mb-2">
             {session.name}
           </h1>
           <div className="flex gap-4 flex-wrap">
@@ -184,7 +202,7 @@ export default function SessionDetailPage() {
             onBlur={() => setNotesFocused(false)}
             rows={3}
             placeholder="Notes are local-only for now and will clear on refresh."
-            className="w-full px-3.5 py-2.5 text-[13px] leading-[1.6] font-sans text-text-2 bg-card rounded-md resize-y outline-none border"
+            className="w-full px-3.5 py-2.5 text-[13px] leading-[1.6] font-sans text-text-2 bg-card rounded-panel resize-y outline-none border"
             style={{
               borderColor: notesFocused ? "var(--border-hi)" : "var(--border)",
             }}
@@ -202,7 +220,7 @@ export default function SessionDetailPage() {
           </label>
 
           {session.tracks.length === 0 ? (
-            <div className="text-center py-10 rounded-lg bg-card border border-[color:var(--border)]">
+            <div className="text-center py-10 rounded-panel bg-card border border-[color:var(--border)]">
               <p className="text-text-2 text-sm">No tracks recorded yet</p>
               <p className="text-text-3 text-xs mt-1.5">
                 Open the studio to start recording.
@@ -210,10 +228,10 @@ export default function SessionDetailPage() {
             </div>
           ) : (
             <div
-              className="flex flex-col gap-px rounded-lg overflow-hidden"
+              className="flex flex-col gap-px rounded-panel overflow-hidden"
               style={{ background: "var(--border)" }}
             >
-              {session.tracks.map((t) => {
+              {session.tracks.map((t, trackIndex) => {
                 const isPlaying = playing === t.id;
                 return (
                   <div
@@ -229,7 +247,10 @@ export default function SessionDetailPage() {
                         borderColor: "var(--border-hi)",
                       }}
                     >
-                      <span className="text-[11px] font-semibold text-text-2">
+                      <span
+                        className="text-[11px] font-semibold"
+                        style={{ color: speakerHue(trackIndex) }}
+                      >
                         {t.participantName.charAt(0).toUpperCase()}
                       </span>
                     </div>
@@ -282,7 +303,10 @@ export default function SessionDetailPage() {
 
                     {/* Status + download */}
                     <div className="flex items-center gap-2.5 flex-shrink-0">
-                      <span className="font-mono text-[10px] text-text-3 uppercase">
+                      <span
+                        className="font-mono text-[10px] uppercase tracking-[0.05em]"
+                        style={{ color: statusColor(t.status) }}
+                      >
                         {t.status}
                       </span>
                       {t.status === "complete" && (

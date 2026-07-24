@@ -64,6 +64,8 @@ import {
   MicMonitorToggle,
   getStoredMonitorEnabled,
   getStoredMonitorVolume,
+  setStoredMonitorEnabled,
+  setStoredMonitorVolume,
 } from "@/components/MicMonitorToggle";
 import { useMicMonitor } from "@/hooks/useMicMonitor";
 import { useRemoteAudioLevels } from "@/hooks/useRemoteAudioLevels";
@@ -78,16 +80,18 @@ import { useUploadProgress } from "@/hooks/useUploadProgress";
 import { useNavigationGuard } from "@/hooks/useNavigationGuard";
 import { UploadProgressBar } from "@/components/UploadProgressBar";
 
+import { Aurora } from "@/components/ui/Aurora";
 import { Button } from "@/components/ui/Button";
 import { Topbar } from "@/components/ui/Topbar";
-import { VUMeter, DbScale } from "@/components/ui/VUMeter";
-import { StatusDot, type Status } from "@/components/ui/StatusDot";
+import { Wordmark } from "@/components/ui/Wordmark";
+import { type Status } from "@/components/ui/StatusDot";
+import { LavaLamp } from "@/components/LavaLamp";
+import { speakerHue } from "@/lib/speaker-hues";
+import { getUploadPhase } from "@/lib/upload-progress";
 import {
   IcoAlert,
   IcoDownload,
-  IcoLink,
   IcoMic,
-  IcoPlus,
   IcoTrash,
   IcoUpload,
   IcoX,
@@ -142,10 +146,12 @@ type SlotCapture = {
 
 function formatElapsed(totalMs: number): string {
   const totalSec = Math.floor(totalMs / 1000);
-  const h = Math.floor(totalSec / 3600).toString().padStart(2, "0");
-  const m = Math.floor((totalSec % 3600) / 60).toString().padStart(2, "0");
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
   const s = (totalSec % 60).toString().padStart(2, "0");
-  return `${h}:${m}:${s}`;
+  return h > 0
+    ? `${h}:${m.toString().padStart(2, "0")}:${s}`
+    : `${m.toString().padStart(2, "0")}:${s}`;
 }
 
 function formatParticipantList(names: string[]): string {
@@ -202,10 +208,10 @@ function MobileBrowserWarningBanner({
     <div
       role="status"
       aria-live="polite"
-      className="sticky top-[var(--topbar-height)] z-40 flex items-start gap-3 px-5 py-3 border-b"
+      className="flex items-start gap-3 px-4 py-3 rounded-[10px] border backdrop-blur-[6px]"
       style={{
-        background: "rgba(232,168,48,0.09)",
-        borderBottomColor: "rgba(232,168,48,0.22)",
+        background: "rgba(34,26,69,0.92)",
+        borderColor: "rgba(255,179,71,0.28)",
       }}
     >
       <span className="mt-0.5 flex-shrink-0">
@@ -251,111 +257,118 @@ function StudioFrame({
   );
 }
 
-// ---------- Participant Strip ----------
+// ---------- Speaker chrome (Sunset 2a/2b) ----------
 
-interface ParticipantStripProps {
+/** Quantize a 0..255 level to 4% meter steps so width writes are change-gated. */
+function meterPct(level: number): number {
+  return Math.round((Math.max(0, Math.min(255, level)) / 255) * 25) * 4;
+}
+
+/** Talking threshold shared by dots and the wax tint: eased level > 0.22. */
+function isTalking(level: number): boolean {
+  return level / 255 > 0.22;
+}
+
+/** 8px identity dot — idle slate, speaker hue while talking, red while clipping. */
+function TalkingDot({
+  hue,
+  level,
+  clipping = false,
+}: {
+  hue: string;
+  level: number;
+  clipping?: boolean;
+}) {
+  const on = clipping || isTalking(level);
+  const color = clipping ? "var(--rec)" : hue;
+  return (
+    <span
+      aria-hidden
+      className="w-2 h-2 rounded-full flex-shrink-0"
+      style={{
+        background: on ? color : "#6f65a0",
+        boxShadow: on
+          ? `0 0 8px 2px ${clipping ? "rgba(255,59,77,0.40)" : `${hue}66`}`
+          : "none",
+        transition: "background 240ms ease, box-shadow 240ms ease",
+      }}
+    />
+  );
+}
+
+/** Per-track status → mono chip tag. Maps the existing Status vocabulary. */
+function statusTag(status: Status): { label: string; color: string } | null {
+  switch (status) {
+    case "recording":
+      return { label: "REC", color: "var(--rec)" };
+    case "starting":
+    case "unconfirmed":
+      return { label: "STARTING…", color: "var(--warn)" };
+    case "uploading":
+      return { label: "UPLOADING…", color: "var(--warn)" };
+    case "failed":
+      return { label: "FAILED", color: "var(--rec)" };
+    default:
+      return null;
+  }
+}
+
+interface SpeakerChipProps {
   name: string;
-  role: "host" | "guest";
-  micLabel: string | undefined;
-  isBuiltIn: boolean;
+  hue: string;
   level: number; // 0..255
   status: Status;
   clipping?: boolean;
 }
 
-function ParticipantStrip({
-  name,
-  role,
-  micLabel,
-  isBuiltIn,
-  level,
-  status,
-  clipping = false,
-}: ParticipantStripProps) {
-  const normalized = Math.max(0, Math.min(1, level / 255));
+/** Floating speaker chip (host 2a): talking dot · name · gradient meter · status. */
+function SpeakerChip({ name, hue, level, status, clipping = false }: SpeakerChipProps) {
+  const tag = statusTag(status);
   return (
-    <div
-      className="rounded-lg px-4 py-3.5 border flex flex-col gap-2.5"
+    <span
+      className="flex items-center gap-[9px] rounded-full border backdrop-blur-[6px]"
       style={{
-        background: "var(--card)",
-        borderColor: clipping ? "var(--rec)" : "var(--border)",
-        boxShadow: clipping ? "0 0 0 1px var(--rec), 0 0 12px rgba(232,80,80,0.45)" : undefined,
-        transition: "border-color 80ms ease, box-shadow 80ms ease",
+        background: "rgba(25,19,56,0.78)",
+        borderColor: "rgba(210,190,255,0.12)",
+        padding: "8px 14px 8px 10px",
       }}
     >
-      <div className="flex items-center gap-2.5">
-        <div
-          className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 border"
+      <TalkingDot hue={hue} level={level} clipping={clipping} />
+      <span className="text-[12.5px] font-semibold text-text whitespace-nowrap">
+        {name}
+      </span>
+      <span
+        className="block w-14 h-[5px] rounded-[3px] overflow-hidden flex-shrink-0"
+        style={{ background: "#221a45" }}
+      >
+        <span
+          className="block h-full"
           style={{
-            background: "var(--card-hi)",
-            borderColor: "var(--border-hi)",
+            width: `${meterPct(level)}%`,
+            background: "linear-gradient(90deg,#7b4dff,#ff4d7d 55%,#ffb347)",
+            transition: "width 200ms ease-out",
           }}
+        />
+      </span>
+      {tag && (
+        <span
+          className="font-mono text-[9.5px] tracking-[0.06em] whitespace-nowrap"
+          style={{ color: tag.color }}
         >
-          <span className="text-xs font-semibold text-text-2">
-            {name.charAt(0).toUpperCase()}
-          </span>
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="text-[13px] font-semibold text-text truncate">{name}</span>
-            {role === "host" && (
-              <span
-                className="inline-flex items-center font-mono text-[11px] font-semibold px-2 py-0.5 rounded-[4px]"
-                style={{
-                  background: "rgba(200,120,64,0.09)",
-                  color: "var(--amber)",
-                  border: "1px solid rgba(200,120,64,0.16)",
-                  letterSpacing: "0.03em",
-                }}
-              >
-                host
-              </span>
-            )}
-            {isBuiltIn && (
-              <span
-                title="Using built-in laptop mic"
-                aria-label="Using built-in laptop mic"
-                className="inline-flex"
-              >
-                <IcoAlert size={11} color="var(--warn)" />
-              </span>
-            )}
-            {clipping && (
-              <span
-                title="Audio is clipping — ask the talker to back off the mic or lower input gain"
-                aria-label="Audio is clipping"
-                className="inline-flex items-center font-mono text-[10px] font-semibold px-1.5 py-0.5 rounded-[4px]"
-                style={{
-                  background: "rgba(232,80,80,0.16)",
-                  color: "var(--rec)",
-                  border: "1px solid rgba(232,80,80,0.3)",
-                  letterSpacing: "0.04em",
-                }}
-              >
-                CLIP
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-1 text-[11px] text-text-3 mt-0.5">
-            <IcoMic size={10} color="currentColor" />
-            <span className="font-mono truncate">{micLabel ?? "—"}</span>
-          </div>
-        </div>
-        <StatusDot status={status} />
-      </div>
-      <VUMeter level={normalized} active={status !== "idle"} segments={32} height={52} />
-      <DbScale />
-    </div>
+          {tag.label}
+        </span>
+      )}
+    </span>
   );
 }
 
 // ---------- Invite Participant Tile ----------
 
-// Host-only tile. Clicking mints a fresh invite URL via the session's invite
+// Host-only chip. Clicking mints a fresh invite URL via the session's invite
 // endpoint, copies it to the clipboard, and shows a modal so the host can
 // re-copy or see the expiry. Each click mints a new token — we don't persist
 // the last one; it's cheap and keeps the UI stateless across reloads.
-function InviteParticipantTile({ sessionId }: { sessionId: string }) {
+function InviteChip({ sessionId }: { sessionId: string }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [invite, setInvite] = useState<{
@@ -398,27 +411,19 @@ function InviteParticipantTile({ sessionId }: { sessionId: string }) {
         type="button"
         onClick={onClick}
         disabled={pending}
-        className="rounded-lg px-4 py-3.5 flex items-center gap-3 border border-dashed hover:bg-card/40 focus:outline-none focus:ring-1 focus:ring-[var(--border-hi)] transition-colors disabled:opacity-60 disabled:cursor-wait text-left"
-        style={{ borderColor: "var(--border)" }}
+        className="flex items-center gap-[7px] rounded-full border border-dashed px-3.5 py-2 text-[12px] text-text-2 backdrop-blur-[6px] hover:text-text focus:outline-none focus:ring-1 focus:ring-[var(--border-hi)] transition-colors disabled:opacity-60 disabled:cursor-wait whitespace-nowrap"
+        style={{
+          borderColor: "rgba(210,190,255,0.22)",
+          background: "rgba(25,19,56,0.35)",
+        }}
         title="Generate a shareable invite link for a participant"
       >
-        <div
-          className="w-8 h-8 rounded-full flex items-center justify-center border border-dashed"
-          style={{ borderColor: "var(--border-hi)" }}
-        >
-          <IcoPlus size={14} color="var(--text-3)" />
-        </div>
-        <span className="text-[13px] text-text-2">
-          {pending ? "Generating invite…" : "Invite a participant…"}
-        </span>
-        <div className="ml-auto">
-          <IcoLink size={13} color="var(--text-3)" />
-        </div>
+        {pending ? "Generating invite…" : "+ Invite"}
       </button>
       {error && (
-        <div className="text-[11px] text-red-400 px-1" role="alert">
+        <span className="text-[11px] text-rec" role="alert">
           {error}
-        </div>
+        </span>
       )}
       {invite && (
         <InviteLinkModal
@@ -521,7 +526,7 @@ function InviteLinkModal({
         aria-modal="true"
         aria-labelledby="invite-link-title"
         onClick={(e) => e.stopPropagation()}
-        className="max-w-md w-full rounded-xl border p-6 shadow-2xl space-y-5"
+        className="max-w-md w-full rounded-[10px] border p-6 shadow-2xl space-y-5"
         style={{ background: "var(--card)", borderColor: "var(--border-hi)" }}
       >
         <div>
@@ -550,16 +555,16 @@ function InviteLinkModal({
             <button
               type="button"
               onClick={onClose}
-              className="text-[12px] px-3 py-1.5 rounded-md border hover:bg-card/50"
-              style={{ borderColor: "var(--border)", color: "var(--text-2)" }}
+              className="text-[12px] px-3 py-1.5 rounded-[8px] border hover:bg-card/50"
+              style={{ borderColor: "var(--border-hi)", color: "var(--text-2)" }}
             >
               Close
             </button>
             <button
               type="button"
               onClick={copy}
-              className="text-[12px] px-3 py-1.5 rounded-md font-medium"
-              style={{ background: "var(--amber)", color: "var(--bg)" }}
+              className="text-[12px] px-3 py-1.5 rounded-[8px] font-semibold"
+              style={{ background: "var(--accent)", color: "#2b0b18" }}
             >
               {copyState === "copied" ? "Copy again" : "Copy link"}
             </button>
@@ -602,10 +607,10 @@ function LocalRecordingBackupPanel({
   return (
     <div
       role="alert"
-      className="rounded-lg border px-4 py-3.5 flex flex-col gap-3"
+      className="rounded-[10px] border px-4 py-3.5 flex flex-col gap-3 backdrop-blur-[6px]"
       style={{
-        background: "rgba(232,168,48,0.08)",
-        borderColor: "rgba(232,168,48,0.28)",
+        background: "rgba(34,26,69,0.92)",
+        borderColor: "rgba(255,179,71,0.28)",
       }}
     >
       <div className="flex items-start gap-3">
@@ -708,6 +713,8 @@ function RoomContent({
   onMonitorEnabledChange,
   onMonitorVolumeChange,
   isHost,
+  showMobileWarning,
+  onDismissMobileWarning,
 }: {
   sessionId: string;
   participantName: string;
@@ -721,6 +728,8 @@ function RoomContent({
   onMonitorEnabledChange: (enabled: boolean) => void;
   onMonitorVolumeChange: (volume: number) => void;
   isHost: boolean;
+  showMobileWarning: boolean;
+  onDismissMobileWarning: () => void;
 }) {
   const remoteParticipants = useRemoteParticipants();
   const { localParticipant } = useLocalParticipant();
@@ -2330,6 +2339,66 @@ function RoomContent({
   const [bannerDismissed, setBannerDismissed] = useState(false);
   const showLocalMicWarning = selectedMicIsBuiltIn && !bannerDismissed;
 
+  // ---- Sunset chrome (host "ambient-2a" / guest "chromeless-2b") ----
+  // Presentation-only state: recording lifecycle, uploads, and status logic
+  // above are untouched by the redesign.
+  const [micMuted, setMicMuted] = useState(false);
+  const [overflowOpen, setOverflowOpen] = useState(false);
+  // The controls cluster rests at 0.45 opacity and wakes to 1 on pointer
+  // movement anywhere in the room (plus plain CSS hover/focus on itself).
+  const [controlsAwake, setControlsAwake] = useState(false);
+  const controlsAwakeRef = useRef(false);
+  const controlsAwakeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wakeControls = useCallback(() => {
+    if (!controlsAwakeRef.current) {
+      controlsAwakeRef.current = true;
+      setControlsAwake(true);
+    }
+    if (controlsAwakeTimerRef.current) clearTimeout(controlsAwakeTimerRef.current);
+    controlsAwakeTimerRef.current = setTimeout(() => {
+      controlsAwakeRef.current = false;
+      setControlsAwake(false);
+    }, 2600);
+  }, []);
+  useEffect(
+    () => () => {
+      if (controlsAwakeTimerRef.current) clearTimeout(controlsAwakeTimerRef.current);
+    },
+    [],
+  );
+
+  // Preview-level mute: disables the published LiveKit track so the room
+  // stops hearing you. The local recorder consumes its own device stream and
+  // keeps rolling — recording capture is deliberately unaffected.
+  //
+  // State flips only after setMicrophoneEnabled resolves: an optimistic flip
+  // would let the UI claim "Muted" while a rejected call left the mic live.
+  const mutePendingRef = useRef(false);
+  const toggleMute = useCallback(async () => {
+    if (mutePendingRef.current) return;
+    mutePendingRef.current = true;
+    const next = !micMuted;
+    try {
+      await localParticipant.setMicrophoneEnabled?.(!next);
+      setMicMuted(next);
+    } catch (err) {
+      console.error("Failed to toggle microphone:", err);
+      showNotification(
+        next
+          ? "Couldn't mute your microphone"
+          : "Couldn't unmute your microphone",
+      );
+    } finally {
+      mutePendingRef.current = false;
+    }
+  }, [micMuted, localParticipant, showNotification]);
+
+  const toggleMonitor = useCallback(() => {
+    const next = !monitorEnabled;
+    setStoredMonitorEnabled(next);
+    onMonitorEnabledChange(next);
+  }, [monitorEnabled, onMonitorEnabledChange]);
+
   const isRecording = studioState === "recording";
   const isFinalizing = studioState === "finalizing";
   // In two-channel mode the host can't start until both split channels are
@@ -2400,12 +2469,102 @@ function RoomContent({
     studioState === "connected" &&
     (Boolean(backupError) || isRecoverableBackup(recoveryBackup));
 
+  // Ordered speaker roster shared by the lamp, chips, and name dots: local
+  // capture first (both channel slots when the split is live), then remotes
+  // in join order. Identity hues cycle by roster index.
+  const twoChannelChipsActive =
+    isHost && twoChannelMode && slotCaptures.length === LOCAL_TRACK_SLOTS.length;
+  const speakers = useMemo(() => {
+    const locals = twoChannelChipsActive
+      ? LOCAL_TRACK_SLOTS.map((slot) => ({
+          key: slot.slotId,
+          name: slot.label,
+          kind: "slot" as const,
+        }))
+      : [{ key: participantName, name: participantName, kind: "local" as const }];
+    const remotes = remoteParticipants.map((p) => ({
+      key: p.identity,
+      name: remoteParticipantName(p.identity),
+      kind: "remote" as const,
+      host: isHostSender(p.metadata),
+    }));
+    // Hue slots follow the design's roster order: the host owns pink,
+    // guests take the following hues in join order. Guests therefore list
+    // the remote host first, then themselves, then the other guests.
+    if (isHost) return [...locals, ...remotes];
+    const remoteHosts = remotes.filter((r) => r.host);
+    const remoteGuests = remotes.filter((r) => !r.host);
+    return [...remoteHosts, ...locals, ...remoteGuests];
+  }, [
+    isHost,
+    twoChannelChipsActive,
+    participantName,
+    remoteParticipants,
+    remoteParticipantName,
+  ]);
+
+  const speakerLevel = useCallback(
+    (s: { key: string; kind: "slot" | "local" | "remote" }) =>
+      s.kind === "slot" ? slotLevels.get(s.key) ?? 0 : audioLevels.get(s.key) ?? 0,
+    [slotLevels, audioLevels],
+  );
+
+  const speakerClipping = useCallback(
+    (s: { key: string; kind: "slot" | "local" | "remote" }) =>
+      s.kind === "local"
+        ? localClipping
+        : s.kind === "remote"
+        ? remoteAudio.clipping.has(s.key)
+        : false,
+    [localClipping, remoteAudio.clipping],
+  );
+
+  const lampLevels = useMemo(
+    () => speakers.map((s) => speakerLevel(s) / 255),
+    [speakers, speakerLevel],
+  );
+
+  const uploadPhase = getUploadPhase(
+    uploadTracker.progress,
+    studioState !== "recording",
+  );
+
+  const connectionTint =
+    roomConnectionState === "connected"
+      ? { dot: "var(--ok)", label: "Connected" }
+      : roomConnectionState === "reconnecting"
+      ? { dot: "var(--warn)", label: "Reconnecting…" }
+      : roomConnectionState === "connecting"
+      ? { dot: "var(--text-3)", label: "Connecting…" }
+      : { dot: "var(--rec)", label: "Disconnected" };
+
+  const chromeMode = isHost ? "ambient-2a" : "chromeless-2b";
+
   return (
-    <div className="flex flex-col flex-1 min-h-0">
+    <div
+      className="relative flex-1 min-h-0 overflow-hidden"
+      data-chrome={chromeMode}
+      onPointerMove={isHost ? wakeControls : undefined}
+    >
+      <Aurora variant="studio" stars frame />
+
+      {/* Stage — the lamp is the room. */}
+      <div
+        className="absolute inset-0 flex items-center justify-center"
+        style={{ paddingBottom: isHost ? 100 : 40 }}
+      >
+        <div
+          className="relative"
+          style={{ height: isHost ? "80%" : "90%", aspectRatio: "400 / 640" }}
+        >
+          <LavaLamp levels={lampLevels} rec={isRecording} />
+        </div>
+      </div>
+
       {/* Notification toast */}
       {notification && (
         <div
-          className="fixed top-[68px] left-1/2 -translate-x-1/2 z-50 px-3.5 py-2 rounded-lg text-[12px] text-text-2 shadow-lg animate-toast-fade-in border"
+          className="fixed top-16 left-1/2 -translate-x-1/2 z-50 px-3.5 py-2 rounded-lg text-[12px] text-text-2 shadow-lg animate-toast-fade-in border"
           style={{
             background: "var(--card-hi)",
             borderColor: "var(--border-hi)",
@@ -2415,346 +2574,99 @@ function RoomContent({
         </div>
       )}
 
-      {/* Local built-in mic warning banner */}
-      {showLocalMicWarning && (
-        <div
-          className="flex items-center gap-2.5 py-2.5 px-5 border-b"
-          style={{
-            background: "rgba(232,168,48,0.07)",
-            borderBottomColor: "rgba(232,168,48,0.18)",
-          }}
-        >
-          <IcoAlert size={14} color="var(--warn)" />
-          <span className="text-[12px] text-warn flex-1">
-            You&apos;re using a built-in laptop mic — audio quality may be lower than expected
-          </span>
-          <button
-            onClick={() => setBannerDismissed(true)}
-            className="text-[11px] text-warn/70 hover:text-warn underline font-sans"
-          >
-            dismiss
-          </button>
-        </div>
-      )}
-
-      {/* Mid-recording departure banner — a departed participant's track may
-          be incomplete, which is consequential enough to outlast a 4s toast.
-          Cleared on dismiss, on rejoin, or when the take stops. */}
-      {midRecordingDepartures.size > 0 && (
-        <div
-          className="flex items-center gap-2.5 py-2.5 px-5 border-b"
-          style={{
-            background: "rgba(232,168,48,0.07)",
-            borderBottomColor: "rgba(232,168,48,0.18)",
-          }}
-        >
-          <IcoAlert size={14} color="var(--warn)" />
-          <span className="text-[12px] text-warn flex-1">
-            {departureBannerMessage(
-              Array.from(midRecordingDepartures.values()),
-            )}
-          </span>
-          <button
-            onClick={() => setMidRecordingDepartures(new Map())}
-            className="text-[11px] text-warn/70 hover:text-warn underline font-sans"
-          >
-            dismiss
-          </button>
-        </div>
-      )}
-
-      {/* Audio quality pill (preview) */}
-      <div className="flex items-center justify-center gap-3 px-5 py-3 border-b" style={{ borderBottomColor: "var(--border)" }}>
-        <span
-          className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium border font-mono"
-          style={{
-            color: audioQualityMode === "full" ? "var(--ok)" : "var(--warn)",
-            borderColor: audioQualityMode === "full" ? "rgba(82,201,122,0.3)" : "rgba(232,168,48,0.3)",
-            background: audioQualityMode === "full" ? "rgba(82,201,122,0.08)" : "rgba(232,168,48,0.08)",
-          }}
-        >
-          <span
-            className="w-1.5 h-1.5 rounded-full"
+      {/* Transient overlays — warnings surface as floating toasts, never
+          persistent panels owning the room. */}
+      <div className="absolute top-14 left-1/2 -translate-x-1/2 z-40 flex flex-col items-stretch gap-2 w-[min(560px,92%)]">
+        {showMobileWarning && (
+          <MobileBrowserWarningBanner onDismiss={onDismissMobileWarning} />
+        )}
+        {showLocalMicWarning && (
+          <div
+            className="flex items-center gap-2.5 px-4 py-3 rounded-[10px] border backdrop-blur-[6px]"
             style={{
-              background: audioQualityMode === "full" ? "var(--ok)" : "var(--warn)",
+              background: "rgba(34,26,69,0.92)",
+              borderColor: "rgba(255,179,71,0.28)",
             }}
-          />
-          {audioQualityMode === "full" ? "Full Quality Preview" : "Bandwidth-Saving Mode"}
-        </span>
-        {isRecording && (
-          <button
-            onClick={() =>
-              switchAudioQuality(
-                audioQualityMode === "full" ? "bandwidth-saving" : "full",
-              )
-            }
-            className="text-[11px] text-text-3 hover:text-text-2 underline underline-offset-2 font-sans"
           >
-            {audioQualityMode === "full"
-              ? "Switch to bandwidth-saving"
-              : "Switch to full quality"}
-          </button>
+            <IcoAlert size={14} color="var(--warn)" />
+            <span className="text-[12px] text-warn flex-1">
+              You&apos;re using a built-in laptop mic — audio quality may be lower than expected
+            </span>
+            <button
+              onClick={() => setBannerDismissed(true)}
+              className="text-[11px] text-warn/70 hover:text-warn underline font-sans"
+            >
+              dismiss
+            </button>
+          </div>
+        )}
+        {/* Mid-recording departure card — a departed participant's track may
+            be incomplete, which is consequential enough to outlast a 4s
+            toast. Cleared on dismiss, on rejoin, or when the take stops. */}
+        {midRecordingDepartures.size > 0 && (
+          <div
+            className="flex items-center gap-2.5 px-4 py-3 rounded-[10px] border backdrop-blur-[6px]"
+            style={{
+              background: "rgba(34,26,69,0.92)",
+              borderColor: "rgba(255,179,71,0.28)",
+            }}
+          >
+            <IcoAlert size={14} color="var(--warn)" />
+            <span className="text-[12px] text-warn flex-1">
+              {departureBannerMessage(
+                Array.from(midRecordingDepartures.values()),
+              )}
+            </span>
+            <button
+              onClick={() => setMidRecordingDepartures(new Map())}
+              className="text-[11px] text-warn/70 hover:text-warn underline font-sans"
+            >
+              dismiss
+            </button>
+          </div>
+        )}
+        {isHost && twoChannelMode && !twoChannelChipsActive && (
+          <div
+            role="status"
+            className="flex items-start gap-2.5 px-4 py-3.5 rounded-[10px] border backdrop-blur-[6px]"
+            style={{
+              background: "rgba(34,26,69,0.92)",
+              borderColor: "rgba(255,179,71,0.28)",
+            }}
+          >
+            <span className="mt-0.5 flex-shrink-0">
+              <IcoAlert size={14} color="var(--warn)" />
+            </span>
+            <span className="text-[12px] leading-5 text-warn">
+              {twoChannelStatus === "missing-channels"
+                ? "Selected interface reports a single channel — pick a 2-channel input to split into Local Ch 1 and Ch 2."
+                : twoChannelStatus === "unsupported"
+                ? "This browser or device can't prove 2-channel capture, so two-channel recording is unavailable."
+                : "Preparing two channels…"}
+            </span>
+          </div>
+        )}
+        {showBackupPanel && (
+          <LocalRecordingBackupPanel
+            manifest={recoveryBackup}
+            error={backupError}
+            action={backupAction}
+            onRetry={handleRetryLocalBackupUpload}
+            onDownload={handleDownloadLocalBackup}
+            onClear={handleClearLocalBackup}
+          />
         )}
       </div>
 
-      {/* Main layout: strips + right sidebar */}
-      <div className="flex flex-1 min-h-0">
-        <div className="flex-1 p-5 flex flex-col gap-2.5 overflow-y-auto">
-          {/* Host-only two-channel toggle. Disabled mid-take so the capture
-              graph can't be swapped out from under an active recording. */}
-          {isHost && (
-            <div
-              className="flex items-center gap-2.5 rounded-lg px-4 py-2.5 border select-none"
-              style={{ background: "var(--card)", borderColor: "var(--border)" }}
-            >
-              {/* Standalone input (not wrapped in a <label>) — a wrapping
-                  label re-forwards the click to its control, which recurses
-                  under happy-dom. aria-label carries the accessible name. */}
-              <input
-                id="two-channel-toggle"
-                type="checkbox"
-                aria-label="Two-channel local mode"
-                checked={twoChannelMode}
-                disabled={studioState !== "connected"}
-                onChange={(e) => setTwoChannelMode(e.target.checked)}
-                className="accent-[var(--amber)] cursor-pointer"
-              />
-              <label
-                htmlFor="two-channel-toggle"
-                className="text-[12px] text-text-2 cursor-pointer"
-              >
-                Two-channel local mode
-              </label>
-              {twoChannelMode && twoChannelStatus === "ok" && (
-                <span className="ml-auto font-mono text-[10px] text-text-3 truncate max-w-[45%]">
-                  {selectedMicLabel ?? "selected interface"} → 2 channels
-                </span>
-              )}
-            </div>
-          )}
-
-          {isHost && twoChannelMode ? (
-            slotCaptures.length === LOCAL_TRACK_SLOTS.length ? (
-              LOCAL_TRACK_SLOTS.map((slot) => (
-                <ParticipantStrip
-                  key={slot.slotId}
-                  name={slot.label}
-                  role="host"
-                  micLabel={selectedMicLabel ?? "Interface"}
-                  isBuiltIn={false}
-                  level={slotLevels.get(slot.slotId) ?? 0}
-                  status={localStatus}
-                />
-              ))
-            ) : (
-              <div
-                role="status"
-                className="rounded-lg px-4 py-3.5 border flex items-start gap-2.5"
-                style={{
-                  background: "rgba(232,168,48,0.08)",
-                  borderColor: "rgba(232,168,48,0.28)",
-                }}
-              >
-                <span className="mt-0.5 flex-shrink-0">
-                  <IcoAlert size={14} color="var(--warn)" />
-                </span>
-                <span className="text-[12px] leading-5 text-warn">
-                  {twoChannelStatus === "missing-channels"
-                    ? "Selected interface reports a single channel — pick a 2-channel input to split into Local Ch 1 and Ch 2."
-                    : twoChannelStatus === "unsupported"
-                    ? "This browser or device can't prove 2-channel capture, so two-channel recording is unavailable."
-                    : "Preparing two channels…"}
-                </span>
-              </div>
-            )
-          ) : (
-            <ParticipantStrip
-              name={participantName}
-              role={isHost ? "host" : "guest"}
-              micLabel={selectedMicLabel ?? "Unknown mic"}
-              isBuiltIn={selectedMicIsBuiltIn}
-              level={audioLevels.get(participantName) ?? 0}
-              status={localStatus}
-              clipping={localClipping}
-            />
-          )}
-
-          {remoteParticipants.map((p) => (
-            <ParticipantStrip
-              key={p.identity}
-              name={remoteParticipantName(p.identity)}
-              role="guest"
-              micLabel={undefined /* Remote mic label — needs #28 (LiveKit metadata propagation). */}
-              isBuiltIn={false /* Remote built-in detection — needs #28. */}
-              level={audioLevels.get(p.identity) ?? 0}
-              status={getRemoteStatus(p.identity)}
-              clipping={remoteAudio.clipping.has(p.identity)}
-            />
-          ))}
-
-          {/* Invite tile — host-only. Guests don't see the affordance; the
-              underlying API also rejects non-host callers. */}
-          {isHost && <InviteParticipantTile sessionId={sessionId} />}
-
-          {/* Monitor toggle kept below the strips so it doesn't crowd the meters */}
-          <div className="mt-2">
-            <MicMonitorToggle
-              enabled={monitorEnabled}
-              volume={monitorVolume}
-              onEnabledChange={onMonitorEnabledChange}
-              onVolumeChange={onMonitorVolumeChange}
-            />
-          </div>
-
-          {showBackupPanel && (
-            <LocalRecordingBackupPanel
-              manifest={recoveryBackup}
-              error={backupError}
-              action={backupAction}
-              onRetry={handleRetryLocalBackupUpload}
-              onDownload={handleDownloadLocalBackup}
-              onClear={handleClearLocalBackup}
-            />
-          )}
-
-          {/* Finish recording (post-stop) — surfaces after the local recorder
-              has produced at least one track and the studio is no longer in
-              the recording state. Drives the /api/sessions/:id/finalize flow. */}
-          {studioState === "connected" && hasRecorded && (
-            <div className="flex justify-center mt-3">
-              <FinishRecordingButton
-                sessionId={sessionId}
-                waitForUploads={uploadTracker.waitForUploads}
-                departedParticipantNames={Array.from(
-                  departedParticipants.values(),
-                )}
-              />
-            </div>
-          )}
-        </div>
-
-        {/* Right sidebar: record button + upload */}
+      {/* Upload progress — transient corner chip, only while it matters. */}
+      {uploadPhase !== "idle" && (
         <div
-          className="w-[120px] flex flex-col items-center py-7 border-l"
+          className="absolute bottom-7 left-7 z-30 w-[132px] rounded-[10px] border px-2 py-2 backdrop-blur-[6px]"
           style={{
-            background: "var(--surface)",
-            borderLeftColor: "var(--border)",
+            background: "rgba(34,26,69,0.85)",
+            borderColor: "var(--border-hi)",
           }}
         >
-          <div className="flex flex-col items-center gap-3 flex-1 justify-center">
-            <div className="relative">
-              {isHost ? (
-                <button
-                  type="button"
-                  onClick={() => (isRecording ? handleStopRecording() : handleStartRecording())}
-                  disabled={startDisabled}
-                  className={`w-[60px] h-[60px] rounded-full flex items-center justify-center border-2 ${
-                    isRecording ? "rec-ring" : ""
-                  } ${startDisabled ? "cursor-not-allowed" : "cursor-pointer"}`}
-                  style={{
-                    background: isRecording ? "rgba(232,80,80,0.1)" : "var(--card)",
-                    borderColor: isRecording ? "var(--rec)" : "var(--border-hi)",
-                    opacity: startDisabled ? 0.5 : 1,
-                    transition: "all 200ms ease",
-                  }}
-                  aria-label={
-                    isFinalizing
-                      ? "Finalizing previous recording"
-                      : isRecording
-                      ? "Stop recording"
-                      : "Start recording"
-                  }
-                  title={
-                    isFinalizing
-                      ? "Finalizing previous recording…"
-                      : twoChannelNotReady
-                      ? "Waiting for two-channel capture…"
-                      : undefined
-                  }
-                >
-                  {isRecording ? (
-                    <div
-                      className="w-5 h-5 rounded-[3px]"
-                      style={{ background: "var(--rec)" }}
-                    />
-                  ) : (
-                    <div
-                      className="w-6 h-6 rounded-full"
-                      style={{ background: "var(--rec)" }}
-                    />
-                  )}
-                </button>
-              ) : (
-                // Non-host: passive indicator. Guests must not be able to
-                // start or stop the room recording (issue #74). They still
-                // see the elapsed time + upload progress below so they know
-                // their local capture is in sync with the host's lifecycle.
-                <div
-                  role="status"
-                  aria-label={isRecording ? "Recording in progress" : "Idle"}
-                  className={`w-[60px] h-[60px] rounded-full flex items-center justify-center border-2 ${
-                    isRecording ? "rec-ring" : ""
-                  }`}
-                  style={{
-                    background: isRecording ? "rgba(232,80,80,0.1)" : "var(--card)",
-                    borderColor: isRecording ? "var(--rec)" : "var(--border)",
-                    opacity: isRecording ? 1 : 0.6,
-                    transition: "all 200ms ease",
-                  }}
-                >
-                  <div
-                    className="w-6 h-6 rounded-full"
-                    style={{
-                      background: isRecording ? "var(--rec)" : "var(--text-3)",
-                      opacity: isRecording ? 1 : 0.4,
-                    }}
-                  />
-                </div>
-              )}
-            </div>
-            <span
-              className="font-mono text-[10px] font-medium tracking-[0.08em] text-center"
-              style={{
-                color: isRecording
-                  ? "var(--rec)"
-                  : isFinalizing
-                  ? "var(--text-2)"
-                  : "var(--text-3)",
-              }}
-            >
-              {isFinalizing
-                ? "FINALIZING…"
-                : isRecording
-                ? isHost
-                  ? "STOP"
-                  : "REC"
-                : isHost
-                ? "REC"
-                : "IDLE"}
-            </span>
-            <div
-              className="font-mono text-[13px] tracking-[0.06em]"
-              style={{
-                color:
-                  isRecording || isFinalizing ? "var(--text-2)" : "var(--text-3)",
-              }}
-            >
-              {formatElapsed(elapsedMs)}
-            </div>
-            {isFinalizing && (
-              <span className="font-sans text-[10px] text-text-3 text-center px-2 max-w-[100px] leading-tight">
-                Finalizing previous recording…
-              </span>
-            )}
-            {!isHost && (
-              <span className="font-sans text-[10px] text-text-3 text-center px-2 max-w-[100px] leading-tight">
-                Host controls recording
-              </span>
-            )}
-          </div>
-
-          <div className="w-10 h-px my-3" style={{ background: "var(--border)" }} />
-
           <UploadProgressBar
             progress={uploadTracker.progress}
             recordingStopped={studioState !== "recording"}
@@ -2776,7 +2688,461 @@ function RoomContent({
               </span>
             )}
         </div>
-      </div>
+      )}
+
+      {isHost ? (
+        <>
+          {/* Host 2a topbar — wordmark · session · connection · REC pill.
+              Elapsed time lives here now (moved from the old right sidebar). */}
+          <div className="absolute top-0 left-0 right-0 z-20 flex items-center px-8 py-[26px]">
+            <Wordmark size={15} />
+            <span className="text-[12px] text-text-3 ml-2.5 truncate">
+              · Session {sessionId.slice(0, 8)}…
+            </span>
+            <span className="ml-auto flex items-center gap-3.5">
+              <span
+                className="flex items-center gap-1.5 text-[12px]"
+                style={{ color: "var(--text-3)" }}
+              >
+                <span
+                  className="w-[7px] h-[7px] rounded-full"
+                  style={{ background: connectionTint.dot }}
+                />
+                {connectionTint.label}
+              </span>
+              {(isRecording || isFinalizing) && (
+                <span
+                  className="flex items-center gap-2 rounded-full border backdrop-blur-[6px] font-semibold text-[12px] text-text"
+                  style={{
+                    background: "rgba(25,19,56,0.7)",
+                    borderColor: isFinalizing
+                      ? "rgba(255,179,71,0.35)"
+                      : "rgba(255,59,77,0.35)",
+                    padding: "6px 12px",
+                  }}
+                >
+                  {isRecording ? (
+                    <span
+                      className="relative w-2 h-2 rounded-full ping-dot"
+                      style={{ background: "var(--rec)" }}
+                    />
+                  ) : (
+                    <span
+                      className="w-2 h-2 rounded-full"
+                      style={{ background: "var(--warn)" }}
+                    />
+                  )}
+                  {isRecording ? "REC" : "FINALIZING…"}
+                  <span className="font-mono font-medium">
+                    {formatElapsed(elapsedMs)}
+                  </span>
+                </span>
+              )}
+            </span>
+          </div>
+
+          {/* Bottom column: finalize flow, speaker chips, controls cluster.
+              One flex column anchored to the bottom edge so the pieces can
+              never overlap, however many chips wrap or which finalize state
+              is showing. Side padding clears the upload chip's bottom-left
+              corner (28px inset + 132px chip + gap), so wrapping chips rise
+              above it instead of sliding underneath. */}
+          <div className="absolute bottom-7 left-0 right-0 z-30 flex flex-col items-center gap-3 px-44">
+            {/* Post-stop finalize flow sits above the chips. */}
+            {studioState === "connected" && hasRecorded && (
+              <FinishRecordingButton
+                sessionId={sessionId}
+                waitForUploads={uploadTracker.waitForUploads}
+                departedParticipantNames={Array.from(
+                  departedParticipants.values(),
+                )}
+              />
+            )}
+
+            {/* Speaker chips — every track's proof-of-recording, always on. */}
+            <div className="flex justify-center items-center gap-3 flex-wrap">
+            {speakers.map((s, i) => (
+              <SpeakerChip
+                key={s.key}
+                name={s.name}
+                hue={speakerHue(i)}
+                level={speakerLevel(s)}
+                status={s.kind === "remote" ? getRemoteStatus(s.key) : localStatus}
+                clipping={speakerClipping(s)}
+              />
+            ))}
+            <InviteChip sessionId={sessionId} />
+            {studioState === "connected" && (
+              <span
+                className="flex items-center gap-2 rounded-full border border-dashed px-3.5 py-2 backdrop-blur-[6px]"
+                style={{
+                  borderColor: "rgba(210,190,255,0.22)",
+                  background: "rgba(25,19,56,0.35)",
+                }}
+              >
+                {/* Standalone input (not wrapped in a <label>) — a wrapping
+                    label re-forwards the click to its control, which recurses
+                    under happy-dom. aria-label carries the accessible name. */}
+                <input
+                  id="two-channel-toggle"
+                  type="checkbox"
+                  aria-label="Two-channel local mode"
+                  checked={twoChannelMode}
+                  disabled={studioState !== "connected"}
+                  onChange={(e) => setTwoChannelMode(e.target.checked)}
+                  className="accent-[var(--accent)] cursor-pointer"
+                />
+                <label
+                  htmlFor="two-channel-toggle"
+                  className="text-[12px] text-text-2 cursor-pointer whitespace-nowrap"
+                >
+                  Two-channel local mode
+                </label>
+                {twoChannelMode && twoChannelStatus === "ok" && (
+                  <span className="font-mono text-[10px] text-text-3 truncate max-w-[180px]">
+                    {selectedMicLabel ?? "selected interface"} → 2 channels
+                  </span>
+                )}
+              </span>
+            )}
+          </div>
+
+            {/* Controls cluster — rests at 0.45 opacity, wakes on pointer. */}
+            <div
+              className={`relative flex items-center gap-2.5 rounded-full border backdrop-blur-[8px] transition-opacity duration-[220ms] hover:opacity-100 focus-within:opacity-100 ${
+                controlsAwake || overflowOpen ? "opacity-100" : "opacity-[0.45]"
+              }`}
+              style={{
+                background: "rgba(25,19,56,0.85)",
+                borderColor: "rgba(210,190,255,0.12)",
+                padding: "8px 10px",
+              }}
+            >
+              <button
+                type="button"
+                onClick={toggleMute}
+                aria-pressed={micMuted}
+                aria-label={micMuted ? "Unmute microphone" : "Mute microphone"}
+                title={
+                  micMuted
+                    ? "Unmute microphone (room preview only — local recording keeps rolling)"
+                    : "Mute microphone (room preview only — local recording keeps rolling)"
+                }
+                className="relative w-9 h-9 rounded-full border flex items-center justify-center"
+                style={{
+                  background: micMuted ? "rgba(255,59,77,0.14)" : "var(--card)",
+                  borderColor: micMuted
+                    ? "rgba(255,59,77,0.4)"
+                    : "var(--border-hi)",
+                  color: micMuted ? "var(--rec)" : "var(--text)",
+                }}
+              >
+                <IcoMic size={16} color="currentColor" />
+                {micMuted && (
+                  <span
+                    aria-hidden
+                    className="absolute w-5 h-[1.5px] rotate-45 rounded-full"
+                    style={{ background: "var(--rec)" }}
+                  />
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={toggleMonitor}
+                aria-pressed={monitorEnabled}
+                className="flex items-center gap-[7px] rounded-full border px-[13px] py-2 text-[12px] text-text-2 hover:text-text"
+                style={{ background: "var(--card)", borderColor: "var(--border-hi)" }}
+              >
+                <span
+                  className="w-[7px] h-[7px] rounded-full"
+                  style={{
+                    background: monitorEnabled ? "var(--ok)" : "var(--text-3)",
+                  }}
+                />
+                Monitor
+              </button>
+              {isFinalizing ? (
+                <span
+                  className="flex items-center gap-2 px-4 py-[9px] rounded-full font-mono text-[11px] tracking-[0.06em]"
+                  style={{
+                    background: "rgba(255,179,71,0.10)",
+                    border: "1px solid rgba(255,179,71,0.35)",
+                    color: "var(--warn)",
+                  }}
+                >
+                  FINALIZING…
+                </span>
+              ) : isRecording ? (
+                <button
+                  type="button"
+                  onClick={() => handleStopRecording()}
+                  aria-label="Stop recording"
+                  className="flex items-center gap-2 px-4 py-[9px] rounded-full text-[12.5px] font-semibold"
+                  style={{
+                    background: "rgba(255,59,77,0.14)",
+                    border: "1px solid rgba(255,59,77,0.4)",
+                    color: "#ffb0b8",
+                  }}
+                >
+                  <span
+                    className="w-3 h-3 rounded-[3px]"
+                    style={{ background: "var(--rec)" }}
+                  />
+                  Stop recording
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => handleStartRecording()}
+                  disabled={startDisabled}
+                  aria-label="Start recording"
+                  title={
+                    twoChannelNotReady
+                      ? "Waiting for two-channel capture…"
+                      : undefined
+                  }
+                  className="px-4 py-[9px] rounded-full text-[12.5px] font-semibold text-accent-ink disabled:opacity-40 disabled:cursor-not-allowed"
+                  style={{
+                    background: "linear-gradient(100deg,#ff4d7d,#ff7a54)",
+                    boxShadow: "0 2px 18px rgba(255,77,125,0.35)",
+                  }}
+                >
+                  Start recording
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setOverflowOpen((v) => !v)}
+                aria-label="More options"
+                aria-expanded={overflowOpen}
+                className="w-9 h-9 rounded-full border flex items-center justify-center text-[15px] tracking-[1px] text-text-2 hover:text-text"
+                style={{ background: "var(--card)", borderColor: "var(--border-hi)" }}
+              >
+                ···
+              </button>
+              {overflowOpen && (
+                <div
+                  className="absolute bottom-[52px] right-0 rounded-[10px] border p-3.5 flex flex-col gap-3 w-64 shadow-2xl"
+                  style={{
+                    background: "rgba(34,26,69,0.95)",
+                    borderColor: "var(--border-hi)",
+                    backdropFilter: "blur(8px)",
+                  }}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[12px] text-text-2">Preview quality</span>
+                    <span
+                      className="font-mono text-[10px] uppercase tracking-[0.05em]"
+                      style={{
+                        color:
+                          audioQualityMode === "full" ? "var(--ok)" : "var(--warn)",
+                      }}
+                    >
+                      {audioQualityMode === "full" ? "Full" : "Saving"}
+                    </span>
+                  </div>
+                  {isRecording && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        switchAudioQuality(
+                          audioQualityMode === "full" ? "bandwidth-saving" : "full",
+                        )
+                      }
+                      className="text-left text-[11px] text-text-3 hover:text-text-2 underline underline-offset-2 font-sans"
+                    >
+                      {audioQualityMode === "full"
+                        ? "Switch to bandwidth-saving"
+                        : "Switch to full quality"}
+                    </button>
+                  )}
+                  {monitorEnabled && (
+                    <label className="flex items-center gap-2 text-[11px] text-text-3">
+                      Monitor volume
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={monitorVolume}
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          setStoredMonitorVolume(v);
+                          onMonitorVolumeChange(v);
+                        }}
+                        className="flex-1 accent-[var(--accent)]"
+                        aria-label="Monitor volume"
+                      />
+                    </label>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
+          {/* Guest 2b — chromeless: faint brand, clock only while capturing. */}
+          <div className="absolute top-[26px] left-8 z-20 flex flex-col gap-0.5">
+            <span className="flex items-center gap-2">
+              <Wordmark size={13} className="tracking-[0.01em] opacity-80" />
+              <span className="text-[11px] text-text-3">
+                · Session {sessionId.slice(0, 8)}…
+              </span>
+            </span>
+            <span className="font-sans text-[10px] text-text-3">
+              Host controls recording
+            </span>
+          </div>
+          {(isRecording || isFinalizing) && (
+            <div
+              role="status"
+              aria-label={
+                isRecording ? "Recording in progress" : "Recording finalizing"
+              }
+              className="absolute top-[26px] right-8 z-20 flex items-center gap-2 font-mono text-[11px] text-text-2"
+            >
+              {isRecording ? (
+                <span
+                  className="relative w-[7px] h-[7px] rounded-full ping-dot"
+                  style={{ background: "var(--rec)" }}
+                />
+              ) : (
+                <>
+                  <span
+                    className="w-[7px] h-[7px] rounded-full"
+                    style={{ background: "var(--warn)" }}
+                  />
+                  <span className="text-warn">FINALIZING…</span>
+                </>
+              )}
+              {formatElapsed(elapsedMs)}
+            </div>
+          )}
+
+          {/* Name dots — all participants equal, no meters, no statuses.
+              Side padding keeps the row clear of the overflow button's
+              corner (28px inset + 36px button + gap); since the row is
+              bottom-anchored, wrapping names grow upward, never under it. */}
+          <div className="absolute bottom-11 left-0 right-0 z-20 flex justify-center items-center gap-[22px] flex-wrap px-24">
+            {speakers.map((s, i) => (
+              <span key={s.key} className="flex items-center gap-2">
+                <TalkingDot
+                  hue={speakerHue(i)}
+                  level={speakerLevel(s)}
+                  clipping={speakerClipping(s)}
+                />
+                <span className="text-[12px] font-medium text-text-2 whitespace-nowrap">
+                  {s.name}
+                </span>
+              </span>
+            ))}
+          </div>
+
+          {/* Overflow — mute, monitor, and quality live behind it. */}
+          <div className="absolute bottom-7 right-7 z-30">
+            {overflowOpen && (
+              <div
+                className="absolute bottom-[46px] right-0 rounded-[10px] border p-3.5 flex flex-col gap-3 w-64 shadow-2xl"
+                style={{
+                  background: "rgba(34,26,69,0.95)",
+                  borderColor: "var(--border-hi)",
+                  backdropFilter: "blur(8px)",
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={toggleMute}
+                  aria-pressed={micMuted}
+                  className="flex items-center justify-between gap-3 text-[12px] text-text-2 hover:text-text"
+                >
+                  {/* Label follows the actual track state, mirroring the host
+                      control; the status chip is visual redundancy only. */}
+                  <span>{micMuted ? "Unmute microphone" : "Mute microphone"}</span>
+                  <span
+                    aria-hidden
+                    className="font-mono text-[10px] uppercase tracking-[0.05em]"
+                    style={{ color: micMuted ? "var(--rec)" : "var(--text-3)" }}
+                  >
+                    {micMuted ? "Muted" : "Live"}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={toggleMonitor}
+                  aria-pressed={monitorEnabled}
+                  className="flex items-center justify-between gap-3 text-[12px] text-text-2 hover:text-text"
+                >
+                  <span>Monitor my mic</span>
+                  <span
+                    className="w-[7px] h-[7px] rounded-full"
+                    style={{
+                      background: monitorEnabled ? "var(--ok)" : "var(--text-3)",
+                    }}
+                  />
+                </button>
+                {monitorEnabled && (
+                  <label className="flex items-center gap-2 text-[11px] text-text-3">
+                    Volume
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={monitorVolume}
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        setStoredMonitorVolume(v);
+                        onMonitorVolumeChange(v);
+                      }}
+                      className="flex-1 accent-[var(--accent)]"
+                      aria-label="Monitor volume"
+                    />
+                  </label>
+                )}
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[12px] text-text-2">Preview quality</span>
+                  <span
+                    className="font-mono text-[10px] uppercase tracking-[0.05em]"
+                    style={{
+                      color:
+                        audioQualityMode === "full" ? "var(--ok)" : "var(--warn)",
+                    }}
+                  >
+                    {audioQualityMode === "full" ? "Full" : "Saving"}
+                  </span>
+                </div>
+                {isRecording && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      switchAudioQuality(
+                        audioQualityMode === "full" ? "bandwidth-saving" : "full",
+                      )
+                    }
+                    className="text-left text-[11px] text-text-3 hover:text-text-2 underline underline-offset-2 font-sans"
+                  >
+                    {audioQualityMode === "full"
+                      ? "Switch to bandwidth-saving"
+                      : "Switch to full quality"}
+                  </button>
+                )}
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={() => setOverflowOpen((v) => !v)}
+              aria-label="More options"
+              aria-expanded={overflowOpen}
+              className="w-9 h-9 rounded-full border flex items-center justify-center text-[15px] tracking-[1px] text-text-2 backdrop-blur-[6px] hover:text-text"
+              style={{
+                background: "rgba(34,26,69,0.8)",
+                borderColor: "var(--border-hi)",
+              }}
+            >
+              ···
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -2970,19 +3336,21 @@ export default function StudioPage() {
             }}
           />
         )}
-        <div className="flex-1 flex items-center justify-center px-4">
-          <div className="w-full max-w-[360px] flex flex-col items-center">
-            <div className="mb-6 opacity-40">
-              <IcoMic size={32} color="var(--text)" />
+        <div className="relative flex-1 flex items-center justify-center px-4 overflow-hidden">
+          <Aurora variant="auth" />
+          <div className="relative w-full max-w-[360px] flex flex-col items-center">
+            {/* Idle lamp — the room rests until you join. */}
+            <div className="relative mb-1.5" style={{ height: 140, aspectRatio: "400 / 640" }}>
+              <LavaLamp idle seed={12} />
             </div>
-            <h1 className="text-[22px] font-bold text-text tracking-[-0.03em]">Join Studio</h1>
+            <h1 className="text-[22px] font-extrabold text-text tracking-[-0.03em]">Join Studio</h1>
             <p className="font-mono text-[11px] text-text-3 mt-1.5">
               Session {sessionId.slice(0, 8)}…
             </p>
 
             <div className="w-full mt-7 space-y-4">
               <div>
-                <label className="block font-sans text-[11px] font-medium text-text-3 uppercase tracking-[0.08em] mb-2">
+                <label className="block font-sans text-[11px] font-semibold text-text-3 uppercase tracking-[0.08em] mb-2">
                   Your Name
                 </label>
                 <input
@@ -2991,7 +3359,7 @@ export default function StudioPage() {
                   onChange={(e) => setParticipantName(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleJoin()}
                   placeholder="Enter your name"
-                  className="w-full px-3.5 py-2.5 text-sm rounded-md outline-none border font-sans text-text"
+                  className="w-full px-3.5 py-2.5 text-sm rounded-[8px] outline-none border font-sans text-text"
                   style={{
                     background: "var(--card)",
                     borderColor: "var(--border)",
@@ -3000,14 +3368,14 @@ export default function StudioPage() {
               </div>
 
               <div>
-                <label className="block font-sans text-[11px] font-medium text-text-3 uppercase tracking-[0.08em] mb-2">
+                <label className="block font-sans text-[11px] font-semibold text-text-3 uppercase tracking-[0.08em] mb-2">
                   Microphone
                 </label>
                 <select
                   ref={micSelectRef}
                   value={selectedMic}
                   onChange={(e) => setSelectedMic(e.target.value)}
-                  className="w-full px-3.5 py-2.5 text-sm rounded-md outline-none border font-sans text-text"
+                  className="w-full px-3.5 py-2.5 text-sm rounded-[8px] outline-none border font-sans text-text"
                   style={{
                     background: "var(--card)",
                     borderColor: "var(--border)",
@@ -3031,11 +3399,11 @@ export default function StudioPage() {
               <button
                 onClick={handleJoin}
                 disabled={!participantName.trim() || connecting}
-                className="w-full py-[11px] text-[15px] font-semibold font-sans rounded-md border disabled:cursor-not-allowed"
+                className="w-full py-[11px] text-[15px] font-semibold font-sans rounded-[10px] border disabled:cursor-not-allowed"
                 style={{
-                  background: !participantName.trim() || connecting ? "var(--card)" : "var(--amber)",
-                  color: !participantName.trim() || connecting ? "var(--text-3)" : "var(--bg)",
-                  borderColor: !participantName.trim() || connecting ? "var(--border)" : "var(--amber)",
+                  background: !participantName.trim() || connecting ? "var(--card)" : "var(--accent)",
+                  color: !participantName.trim() || connecting ? "var(--text-3)" : "#2b0b18",
+                  borderColor: !participantName.trim() || connecting ? "var(--border)" : "var(--accent)",
                   opacity: !participantName.trim() || connecting ? 0.8 : 1,
                 }}
               >
@@ -3051,11 +3419,7 @@ export default function StudioPage() {
   // ---------- Connected / Recording ----------
 
   return (
-    <StudioFrame
-      session={`Session ${sessionId.slice(0, 8)}…`}
-      showMobileWarning={isMobile && !mobileWarningDismissed}
-      onDismissMobileWarning={() => setMobileWarningDismissed(true)}
-    >
+    <div className="animate-page-enter min-h-screen bg-bg flex flex-col">
       <LiveKitRoom
         serverUrl={LIVEKIT_URL}
         token={token}
@@ -3090,8 +3454,10 @@ export default function StudioPage() {
           onMonitorEnabledChange={setMonitorEnabled}
           onMonitorVolumeChange={setMonitorVolume}
           isHost={isHost}
+          showMobileWarning={isMobile && !mobileWarningDismissed}
+          onDismissMobileWarning={() => setMobileWarningDismissed(true)}
         />
       </LiveKitRoom>
-    </StudioFrame>
+    </div>
   );
 }
