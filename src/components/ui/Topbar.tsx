@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { Wordmark } from "@/components/ui/Wordmark";
 
 interface TopbarProps {
   /** Optional session label shown next to the wordmark, e.g. the session name. */
@@ -23,10 +24,10 @@ export function Topbar({ session }: TopbarProps) {
       key={label}
       href={href}
       className={[
-        "text-xs font-medium font-sans capitalize rounded-[5px] px-3 py-1 border",
+        "text-xs font-medium font-sans rounded-[6px] px-3 py-1 border",
         active
-          ? "border-[color:var(--border-hi)] bg-card text-text"
-          : "border-transparent text-text-3 hover:bg-card hover:text-text-2",
+          ? "border-[color:var(--border-hi)] bg-card text-text-2"
+          : "border-transparent text-text-2 hover:bg-card hover:text-text",
       ].join(" ")}
     >
       {label}
@@ -35,21 +36,15 @@ export function Topbar({ session }: TopbarProps) {
 
   return (
     <div
-      className="h-[var(--topbar-height)] sticky top-0 z-50 flex items-center gap-4 px-5 border-b"
+      className="h-[var(--topbar-height)] sticky top-0 z-50 flex items-center gap-3.5 px-[18px] border-b"
       style={{
         background: "var(--surface)",
         borderBottomColor: "var(--border)",
       }}
     >
-      <Link
-        href="/"
-        className="text-[15px] font-bold tracking-[-0.03em] text-text font-sans"
-      >
-        cozy<span style={{ color: "var(--accent)" }}>track</span>
-      </Link>
-      <div className="w-px h-4" style={{ background: "var(--border)" }} />
+      <Wordmark size={16} />
       {session && (
-        <span className="text-[13px] font-medium text-text-2 truncate">{session}</span>
+        <span className="text-[13px] text-text-2 truncate">· {session}</span>
       )}
       <div className="ml-auto flex gap-2 items-center">
         {/* Studio is contextual — only meaningful when you're inside a specific session. */}

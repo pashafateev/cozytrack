@@ -58,7 +58,7 @@ export function BuiltInMicWarningModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby="builtin-mic-warning-title"
-        className="max-w-md w-full rounded-xl border p-6 shadow-2xl space-y-5"
+        className="max-w-md w-full rounded-[10px] border p-6 shadow-2xl space-y-5"
         style={{ background: "var(--card)", borderColor: "var(--border-hi)" }}
       >
         <div className="flex items-start gap-3">
@@ -92,7 +92,7 @@ export function BuiltInMicWarningModal({
         <div className="flex gap-3">
           <button
             onClick={onSwitchMic}
-            className="flex-1 px-4 py-2.5 rounded-md text-sm font-medium border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--card)]"
+            className="flex-1 px-4 py-2.5 rounded-[8px] text-sm font-medium border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--card)]"
             style={{ background: "var(--card-hi)", borderColor: "var(--border-hi)", color: "var(--text)" }}
           >
             Switch Microphone
@@ -100,7 +100,7 @@ export function BuiltInMicWarningModal({
           <button
             onClick={onAcknowledge}
             disabled={!checked}
-            className="flex-1 px-4 py-2.5 rounded-md text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--card)]"
+            className="flex-1 px-4 py-2.5 rounded-[8px] text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--card)]"
             style={{ background: checked ? "var(--accent)" : "var(--card-hi)", borderColor: checked ? "var(--accent)" : "var(--border-hi)", color: checked ? "#2b0b18" : "var(--text-3)" }}
           >
             Continue

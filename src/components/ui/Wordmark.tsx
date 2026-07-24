@@ -9,17 +9,18 @@ import Link from "next/link";
 export function Wordmark({
   size = 16,
   href = "/",
-  className = "",
+  className = "tracking-[0.01em]",
 }: {
   /** Font size in px. Weight is always 800. */
   size?: number;
   /** Set to null to render a plain <span> instead of a link. */
   href?: string | null;
+  /** Overrides the default letter-spacing class — pass your own tracking. */
   className?: string;
 }) {
   const mark = (
     <span
-      className={`wordmark-gradient font-extrabold tracking-[0.01em] font-sans ${className}`}
+      className={`wordmark-gradient font-extrabold font-sans ${className}`}
       style={{ fontSize: size }}
     >
       cozytrack

@@ -78,6 +78,7 @@ import { useUploadProgress } from "@/hooks/useUploadProgress";
 import { useNavigationGuard } from "@/hooks/useNavigationGuard";
 import { UploadProgressBar } from "@/components/UploadProgressBar";
 
+import { Aurora } from "@/components/ui/Aurora";
 import { Button } from "@/components/ui/Button";
 import { Topbar } from "@/components/ui/Topbar";
 import { VUMeter, DbScale } from "@/components/ui/VUMeter";
@@ -516,7 +517,7 @@ function InviteLinkModal({
         aria-modal="true"
         aria-labelledby="invite-link-title"
         onClick={(e) => e.stopPropagation()}
-        className="max-w-md w-full rounded-xl border p-6 shadow-2xl space-y-5"
+        className="max-w-md w-full rounded-[10px] border p-6 shadow-2xl space-y-5"
         style={{ background: "var(--card)", borderColor: "var(--border-hi)" }}
       >
         <div>
@@ -545,15 +546,15 @@ function InviteLinkModal({
             <button
               type="button"
               onClick={onClose}
-              className="text-[12px] px-3 py-1.5 rounded-md border hover:bg-card/50"
-              style={{ borderColor: "var(--border)", color: "var(--text-2)" }}
+              className="text-[12px] px-3 py-1.5 rounded-[8px] border hover:bg-card/50"
+              style={{ borderColor: "var(--border-hi)", color: "var(--text-2)" }}
             >
               Close
             </button>
             <button
               type="button"
               onClick={copy}
-              className="text-[12px] px-3 py-1.5 rounded-md font-medium"
+              className="text-[12px] px-3 py-1.5 rounded-[8px] font-semibold"
               style={{ background: "var(--accent)", color: "#2b0b18" }}
             >
               {copyState === "copied" ? "Copy again" : "Copy link"}
@@ -2748,19 +2749,20 @@ export default function StudioPage() {
             }}
           />
         )}
-        <div className="flex-1 flex items-center justify-center px-4">
-          <div className="w-full max-w-[360px] flex flex-col items-center">
+        <div className="relative flex-1 flex items-center justify-center px-4 overflow-hidden">
+          <Aurora variant="auth" />
+          <div className="relative w-full max-w-[360px] flex flex-col items-center">
             <div className="mb-6 opacity-40">
               <IcoMic size={32} color="var(--text)" />
             </div>
-            <h1 className="text-[22px] font-bold text-text tracking-[-0.03em]">Join Studio</h1>
+            <h1 className="text-[22px] font-extrabold text-text tracking-[-0.03em]">Join Studio</h1>
             <p className="font-mono text-[11px] text-text-3 mt-1.5">
               Session {sessionId.slice(0, 8)}…
             </p>
 
             <div className="w-full mt-7 space-y-4">
               <div>
-                <label className="block font-sans text-[11px] font-medium text-text-3 uppercase tracking-[0.08em] mb-2">
+                <label className="block font-sans text-[11px] font-semibold text-text-3 uppercase tracking-[0.08em] mb-2">
                   Your Name
                 </label>
                 <input
@@ -2769,7 +2771,7 @@ export default function StudioPage() {
                   onChange={(e) => setParticipantName(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleJoin()}
                   placeholder="Enter your name"
-                  className="w-full px-3.5 py-2.5 text-sm rounded-md outline-none border font-sans text-text"
+                  className="w-full px-3.5 py-2.5 text-sm rounded-[8px] outline-none border font-sans text-text"
                   style={{
                     background: "var(--card)",
                     borderColor: "var(--border)",
@@ -2778,14 +2780,14 @@ export default function StudioPage() {
               </div>
 
               <div>
-                <label className="block font-sans text-[11px] font-medium text-text-3 uppercase tracking-[0.08em] mb-2">
+                <label className="block font-sans text-[11px] font-semibold text-text-3 uppercase tracking-[0.08em] mb-2">
                   Microphone
                 </label>
                 <select
                   ref={micSelectRef}
                   value={selectedMic}
                   onChange={(e) => setSelectedMic(e.target.value)}
-                  className="w-full px-3.5 py-2.5 text-sm rounded-md outline-none border font-sans text-text"
+                  className="w-full px-3.5 py-2.5 text-sm rounded-[8px] outline-none border font-sans text-text"
                   style={{
                     background: "var(--card)",
                     borderColor: "var(--border)",
@@ -2809,7 +2811,7 @@ export default function StudioPage() {
               <button
                 onClick={handleJoin}
                 disabled={!participantName.trim() || connecting}
-                className="w-full py-[11px] text-[15px] font-semibold font-sans rounded-md border disabled:cursor-not-allowed"
+                className="w-full py-[11px] text-[15px] font-semibold font-sans rounded-[10px] border disabled:cursor-not-allowed"
                 style={{
                   background: !participantName.trim() || connecting ? "var(--card)" : "var(--accent)",
                   color: !participantName.trim() || connecting ? "var(--text-3)" : "#2b0b18",
