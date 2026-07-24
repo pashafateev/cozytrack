@@ -280,6 +280,7 @@ export function LavaLamp({
     let smix = 0;
     let scale = 1;
     let fieldReady = false;
+    let fieldTick = 0;
     let haloCol = "";
     let visible = true;
     let raf = 0;
@@ -367,9 +368,11 @@ export function LavaLamp({
       c.fillStyle = heat;
       c.fillRect(IB.x, IB.y, IB.w, IB.h);
       c.imageSmoothingEnabled = true;
-      // Metaball field is the CPU hot spot — recompute at ~2/3 of frames,
-      // composite every frame (30fps field under a 60fps composite).
-      if (fc !== 1 || !fieldReady) {
+      // Metaball field is the CPU hot spot — recompute on every other frame,
+      // composite every frame (30fps field under a 60fps composite). Kept on
+      // its own 2-frame tick; `fc`'s modulo-3 cycle drives the slower
+      // halo/badge throttles and would land at ~40fps here.
+      if (fieldTick++ % 2 === 0 || !fieldReady) {
         renderField(smix);
         fieldReady = true;
       }

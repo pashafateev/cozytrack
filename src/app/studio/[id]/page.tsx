@@ -2193,15 +2193,28 @@ function RoomContent({
   // Preview-level mute: disables the published LiveKit track so the room
   // stops hearing you. The local recorder consumes its own device stream and
   // keeps rolling — recording capture is deliberately unaffected.
-  const toggleMute = useCallback(() => {
-    setMicMuted((prev) => {
-      const next = !prev;
-      void Promise.resolve(localParticipant.setMicrophoneEnabled?.(!next)).catch(
-        (err) => console.error("Failed to toggle microphone:", err),
+  //
+  // State flips only after setMicrophoneEnabled resolves: an optimistic flip
+  // would let the UI claim "Muted" while a rejected call left the mic live.
+  const mutePendingRef = useRef(false);
+  const toggleMute = useCallback(async () => {
+    if (mutePendingRef.current) return;
+    mutePendingRef.current = true;
+    const next = !micMuted;
+    try {
+      await localParticipant.setMicrophoneEnabled?.(!next);
+      setMicMuted(next);
+    } catch (err) {
+      console.error("Failed to toggle microphone:", err);
+      showNotification(
+        next
+          ? "Couldn't mute your microphone"
+          : "Couldn't unmute your microphone",
       );
-      return next;
-    });
-  }, [localParticipant]);
+    } finally {
+      mutePendingRef.current = false;
+    }
+  }, [micMuted, localParticipant, showNotification]);
 
   const toggleMonitor = useCallback(() => {
     const next = !monitorEnabled;
@@ -2510,8 +2523,21 @@ function RoomContent({
             </span>
           </div>
 
-          {/* Speaker chips — every track's proof-of-recording, always on. */}
-          <div className="absolute bottom-[92px] left-0 right-0 z-20 flex justify-center items-center gap-3 flex-wrap px-4">
+          {/* Bottom column: finalize flow, speaker chips, controls cluster.
+              One flex column anchored to the bottom edge so the pieces can
+              never overlap, however many chips wrap or which finalize state
+              is showing. */}
+          <div className="absolute bottom-4 left-0 right-0 z-30 flex flex-col items-center gap-3 px-4">
+            {/* Post-stop finalize flow sits above the chips. */}
+            {studioState === "connected" && hasRecorded && (
+              <FinishRecordingButton
+                sessionId={sessionId}
+                waitForUploads={uploadTracker.waitForUploads}
+              />
+            )}
+
+            {/* Speaker chips — every track's proof-of-recording, always on. */}
+            <div className="flex justify-center items-center gap-3 flex-wrap">
             {speakers.map((s, i) => (
               <SpeakerChip
                 key={s.key}
@@ -2558,20 +2584,7 @@ function RoomContent({
             )}
           </div>
 
-          {/* Post-stop finalize flow floats above the cluster. */}
-          {studioState === "connected" && hasRecorded && (
-            <div className="absolute bottom-[76px] left-0 right-0 z-30 flex justify-center pointer-events-none">
-              <div className="pointer-events-auto">
-                <FinishRecordingButton
-                  sessionId={sessionId}
-                  waitForUploads={uploadTracker.waitForUploads}
-                />
-              </div>
-            </div>
-          )}
-
-          {/* Controls cluster — rests at 0.45 opacity, wakes on pointer. */}
-          <div className="absolute bottom-4 left-0 right-0 z-30 flex justify-center">
+            {/* Controls cluster — rests at 0.45 opacity, wakes on pointer. */}
             <div
               className={`relative flex items-center gap-2.5 rounded-full border backdrop-blur-[8px] transition-opacity duration-[220ms] hover:opacity-100 focus-within:opacity-100 ${
                 controlsAwake || overflowOpen ? "opacity-100" : "opacity-[0.45]"
