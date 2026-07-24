@@ -120,6 +120,16 @@ describe("createMonitorBus", () => {
 
     expect(harness.gains[0].gain.value).toBe(0.5);
     expect(harness.gains[1].gain.value).toBe(0.5);
+    expect(harness.gains[0]).toMatchObject({
+      channelCount: 1,
+      channelCountMode: "explicit",
+      channelInterpretation: "speakers",
+    });
+    expect(harness.gains[1]).toMatchObject({
+      channelCount: 1,
+      channelCountMode: "explicit",
+      channelInterpretation: "speakers",
+    });
     expect(harness.gains[0].connect).toHaveBeenCalledWith(
       harness.destinations[0],
     );

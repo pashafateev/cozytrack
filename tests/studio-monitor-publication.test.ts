@@ -74,6 +74,37 @@ describe("StudioPage realtime monitor publication", () => {
     });
   });
 
+  it("routes back to only the primary stream when the host disables the additional channel", async () => {
+    const channel1 = mediaStream();
+    const channel2 = mediaStream();
+    const studio = renderHostStudioPage();
+    studio.harness.splitStereoStream.mockReturnValue({
+      state: "ok",
+      channels: [channel1, channel2],
+      dispose: studio.harness.splitterDispose,
+    });
+
+    await studio.join();
+    const toggle = studio.screen.getByRole("checkbox", {
+      name: /additional channel/i,
+    });
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(studio.harness.createMonitorBus).toHaveBeenCalledWith(
+        channel1,
+        channel2,
+      );
+    });
+
+    studio.harness.createMonitorBus.mockClear();
+    fireEvent.click(toggle);
+
+    await waitFor(() => {
+      expect(studio.harness.createMonitorBus).toHaveBeenCalledTimes(1);
+      expect(studio.harness.createMonitorBus.mock.calls[0]).toHaveLength(1);
+    });
+  });
+
   it("never falls back to raw publication when monitor-bus creation fails", async () => {
     const studio = renderHostStudioPage();
     studio.harness.createMonitorBus.mockImplementationOnce(() => {
@@ -97,5 +128,45 @@ describe("StudioPage realtime monitor publication", () => {
       expect(studio.harness.createMonitorBus).toHaveBeenCalledTimes(1);
       expect(studio.harness.publishAudio).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("keeps one managed monitor publication through reconnect", async () => {
+    const studio = renderHostStudioPage();
+    await studio.join();
+    await waitFor(() => {
+      expect(studio.harness.publishAudio).toHaveBeenCalledTimes(1);
+    });
+    studio.harness.publishAudio.mockClear();
+
+    studio.setRoomConnectionState("reconnecting");
+    studio.setRoomConnectionState("connected");
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(studio.harness.publishAudio).not.toHaveBeenCalled();
+    expect(studio.harness.liveKitAudioProp).toBe(false);
+  });
+
+  it("keeps the managed mono publication through quality republishing", async () => {
+    const studio = renderHostStudioPage();
+    await studio.join();
+    await waitFor(() => {
+      expect(studio.harness.publishAudio).toHaveBeenCalledTimes(1);
+    });
+    studio.harness.publishAudio.mockClear();
+
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Start recording" }),
+    );
+
+    await waitFor(() => {
+      expect(studio.harness.republishAllTracks).toHaveBeenCalledWith(
+        {
+          audioPreset: { maxBitrate: 48_000 },
+          dtx: true,
+        },
+        false,
+      );
+    });
+    expect(studio.harness.publishAudio).not.toHaveBeenCalled();
   });
 });
