@@ -39,7 +39,10 @@ const studioPageHarness = vi.hoisted(() => ({
   autoConnectRoom: true,
   roomConnectionState: "connected" as MockRoomConnectionState,
   roomOnConnected: undefined as (() => void) | undefined,
+  liveKitAudioProp: undefined as unknown,
   republishAllTracks: vi.fn(async () => undefined),
+  publishAudio: vi.fn(async () => undefined),
+  unpublishAudio: vi.fn(async () => undefined),
   getUserMedia: vi.fn(),
   enumerateDevices: vi.fn(),
   listBackups: vi.fn(async () => []),
@@ -63,6 +66,8 @@ const studioPageHarness = vi.hoisted(() => ({
   syncMarkerDispose: vi.fn(),
   splitStereoStream: vi.fn(),
   splitterDispose: vi.fn(),
+  createMonitorBus: vi.fn(),
+  monitorBusDispose: vi.fn(),
   recordingBackupStore: {
     startBackup: vi.fn(),
     saveChunk: vi.fn(),
@@ -99,10 +104,13 @@ vi.mock("@livekit/components-react", () => {
     LiveKitRoom: ({
       children,
       onConnected,
+      audio,
     }: {
       children: ReactNode;
       onConnected?: () => void;
+      audio?: unknown;
     }) => {
+      studioPageHarness.liveKitAudioProp = audio;
       React.useEffect(() => {
         studioPageHarness.roomOnConnected = onConnected;
         if (studioPageHarness.autoConnectRoom) onConnected?.();
@@ -134,6 +142,8 @@ vi.mock("@/lib/transport", () => {
   const transport = {
     sendControlMessage: studioPageHarness.sendControlMessage,
     onControlMessage: studioPageHarness.onControlMessage,
+    publishAudio: studioPageHarness.publishAudio,
+    unpublishAudio: studioPageHarness.unpublishAudio,
   };
   return {
     useTransport: () => transport,
@@ -187,6 +197,10 @@ vi.mock("@/lib/audio-downmix", () => ({
 
 vi.mock("@/lib/audio-splitter", () => ({
   splitStereoStream: studioPageHarness.splitStereoStream,
+}));
+
+vi.mock("@/lib/monitor-bus", () => ({
+  createMonitorBus: studioPageHarness.createMonitorBus,
 }));
 
 vi.mock("@/lib/recording-backup", () => ({
@@ -282,7 +296,10 @@ beforeEach(() => {
   studioPageHarness.autoConnectRoom = true;
   studioPageHarness.roomConnectionState = "connected";
   studioPageHarness.roomOnConnected = undefined;
+  studioPageHarness.liveKitAudioProp = undefined;
   studioPageHarness.republishAllTracks.mockClear();
+  studioPageHarness.publishAudio.mockReset().mockResolvedValue(undefined);
+  studioPageHarness.unpublishAudio.mockReset().mockResolvedValue(undefined);
   studioPageHarness.getUserMedia.mockReset().mockResolvedValue(mediaStream());
   studioPageHarness.enumerateDevices
     .mockReset()
@@ -343,6 +360,11 @@ beforeEach(() => {
   studioPageHarness.syncMarkerPlay.mockReset().mockResolvedValue(undefined);
   studioPageHarness.syncMarkerDispose.mockReset();
   studioPageHarness.splitterDispose.mockReset();
+  studioPageHarness.monitorBusDispose.mockReset();
+  studioPageHarness.createMonitorBus.mockReset().mockImplementation(() => ({
+    stream: mediaStream(),
+    dispose: studioPageHarness.monitorBusDispose,
+  }));
   for (const fn of Object.values(studioPageHarness.recordingBackupStore)) {
     // These store methods are async in the real implementation; resolve so
     // chunk-pipeline code that chains .then/.catch on them behaves.
