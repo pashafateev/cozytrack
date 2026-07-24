@@ -1,6 +1,9 @@
 import { fireEvent, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { renderHostStudioPage } from "./helpers/studio-page";
+import {
+  renderGuestStudioPage,
+  renderHostStudioPage,
+} from "./helpers/studio-page";
 
 // The mute control only disables the published LiveKit preview track; the
 // local recorder keeps rolling. What matters here is that the UI never lies:
@@ -61,5 +64,37 @@ describe("StudioPage mute control", () => {
     expect(
       studio.screen.queryByRole("button", { name: "Unmute microphone" }),
     ).toBeNull();
+  });
+
+  it("guest overflow mute row follows the muted state like the host control", async () => {
+    const studio = renderGuestStudioPage();
+    await studio.join();
+
+    fireEvent.click(studio.screen.getByRole("button", { name: "More options" }));
+
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Mute microphone" }),
+    );
+
+    await waitFor(() => {
+      expect(studio.harness.setMicrophoneEnabled).toHaveBeenCalledWith(false);
+      expect(
+        studio.screen.getByRole("button", { name: "Unmute microphone" }),
+      ).toBeTruthy();
+    });
+    expect(
+      studio.screen.queryByRole("button", { name: "Mute microphone" }),
+    ).toBeNull();
+
+    fireEvent.click(
+      studio.screen.getByRole("button", { name: "Unmute microphone" }),
+    );
+
+    await waitFor(() => {
+      expect(studio.harness.setMicrophoneEnabled).toHaveBeenCalledWith(true);
+      expect(
+        studio.screen.getByRole("button", { name: "Mute microphone" }),
+      ).toBeTruthy();
+    });
   });
 });

@@ -2829,8 +2829,11 @@ function RoomContent({
                   aria-pressed={micMuted}
                   className="flex items-center justify-between gap-3 text-[12px] text-text-2 hover:text-text"
                 >
-                  <span>Mute microphone</span>
+                  {/* Label follows the actual track state, mirroring the host
+                      control; the status chip is visual redundancy only. */}
+                  <span>{micMuted ? "Unmute microphone" : "Mute microphone"}</span>
                   <span
+                    aria-hidden
                     className="font-mono text-[10px] uppercase tracking-[0.05em]"
                     style={{ color: micMuted ? "var(--rec)" : "var(--text-3)" }}
                   >
