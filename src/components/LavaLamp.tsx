@@ -20,7 +20,7 @@
  * ripples/bubbles/halo animation are disabled.
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useId, useRef } from "react";
 import { SPEAKER_WAX_RGB } from "@/lib/speaker-hues";
 
 // ---------- Constants ported verbatim from lava-lamp.js ----------
@@ -51,8 +51,6 @@ const ATTACK = 0.12;
 const RELEASE = 0.04;
 
 // ---------- SVG shells (bare variant: vessel + base + glass, no backdrop) ----------
-
-let lampInstanceCounter = 0;
 
 function backSvg(uid: string): string {
   return `<svg viewBox="0 0 400 640" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="position:absolute;inset:0;width:100%;height:100%;display:block">
@@ -105,13 +103,6 @@ function frontSvg(uid: string): string {
     <path d="M 174 30 L 226 30 C 231 30 233 32 234 37 L 247 90 Q 249 100 240 100 L 160 100 Q 151 100 153 90 L 166 37 C 167 32 169 30 174 30 Z" fill="url(#metalF-${uid})"/>
     <path d="M 174 30 L 226 30 C 231 30 233 32 234 37 L 247 90 Q 249 100 240 100 L 160 100 Q 151 100 153 90 L 166 37 C 167 32 169 30 174 30 Z" fill="url(#metalShadeF-${uid})" opacity="0.45"/>
     <line x1="156" y1="97" x2="244" y2="97" stroke="rgba(190,160,255,0.22)" stroke-width="1.5"/>
-    <g id="recBadge-${uid}">
-      <circle cx="200" cy="520" r="27" fill="rgba(255,77,125,0.10)" stroke="#ff5e8a" stroke-width="2.5"/>
-      <rect x="193" y="504" width="14" height="23" rx="7" fill="#ff5e8a"/>
-      <path d="M 186 519 a 14 14 0 0 0 28 0" fill="none" stroke="#ff8fb0" stroke-width="2.5" stroke-linecap="round"/>
-      <line x1="200" y1="533" x2="200" y2="539" stroke="#ff8fb0" stroke-width="2.5" stroke-linecap="round"/>
-      <line x1="192" y1="539" x2="208" y2="539" stroke="#ff8fb0" stroke-width="2.5" stroke-linecap="round"/>
-    </g>
   </svg>`;
 }
 
@@ -175,10 +166,17 @@ export function LavaLamp({
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const haloRef = useRef<HTMLDivElement>(null);
+  // React-managed badge group — the engine pulses its opacity through this
+  // ref while recording. Never queried out of the innerHTML shells: runtime
+  // lookups inside dangerouslySetInnerHTML break across hydration (the DOM
+  // keeps the server's ids) and reconciliation.
+  const badgeRef = useRef<SVGGElement>(null);
 
-  const uidRef = useRef<string | null>(null);
-  if (uidRef.current === null) uidRef.current = `ll${lampInstanceCounter++}`;
-  const uid = uidRef.current;
+  // Hydration-safe per-instance id for the inline SVG defs. A module counter
+  // would diverge between the server render and client hydration (React keeps
+  // the server innerHTML), leaving runtime lookups pointing at ids that don't
+  // exist in the DOM.
+  const uid = `ll${useId().replace(/[^a-zA-Z0-9]/g, "")}`;
 
   // Latest props, readable from the animation loop without re-subscribing.
   const levelsRef = useRef<ReadonlyArray<number>>(levels ?? []);
@@ -198,19 +196,13 @@ export function LavaLamp({
     tintRef.current = tint;
   }, [tint]);
 
-  // REC badge base state — red when recording, grayed otherwise. The pulse
-  // itself runs inside the frame loop.
+  // When recording stops, clear the engine's pulse (style.opacity) so the
+  // declarative opacity attribute below takes over again. The engine writes
+  // the style property, React owns the attribute — separate channels, no
+  // fighting over the same DOM slot.
   useEffect(() => {
-    const badge = rootRef.current?.querySelector<SVGGElement>(`#recBadge-${uid}`);
-    if (!badge) return;
-    if (rec) {
-      badge.style.filter = "";
-      badge.setAttribute("opacity", "1");
-    } else {
-      badge.style.filter = "grayscale(1)";
-      badge.setAttribute("opacity", "0.4");
-    }
-  }, [rec, uid]);
+    if (!rec && badgeRef.current) badgeRef.current.style.opacity = "";
+  }, [rec]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -237,7 +229,6 @@ export function LavaLamp({
     const coreCol = new Float32Array(gh * 3);
     const mid: number[] = [PAL_MID[0], PAL_MID[1], PAL_MID[2]];
     const interior = new Path2D(INTERIOR);
-    const badge = root.querySelector<SVGGElement>(`#recBadge-${uid}`);
 
     function buildRows() {
       for (let gy = 0; gy < gh; gy++) {
@@ -302,12 +293,16 @@ export function LavaLamp({
       const dpr = Math.min(1.5, window.devicePixelRatio || 1);
       const w = Math.round(r.width * dpr);
       const h = Math.round(r.height * dpr);
+      // Always recompute the paint scale — under StrictMode a remounted
+      // effect starts with scale=1 while the canvas keeps its size from the
+      // previous mount, so the resize guard below would otherwise leave the
+      // new closure painting far off-canvas.
+      scale = w / 400;
       // Guard: only touch canvas dims when the size actually changed —
       // setting .width clears the canvas and forces a full repaint.
       if (w === canvas!.width && h === canvas!.height) return;
       canvas!.width = w;
       canvas!.height = h;
-      scale = w / 400;
     }
 
     function renderField(level: number) {
@@ -484,8 +479,8 @@ export function LavaLamp({
       // Throttled non-canvas writes (halo, badge) — every 3rd frame.
       if (fc === 0) {
         setHalo(calm);
-        if (badge && recRef.current) {
-          badge.setAttribute("opacity", (0.8 + 0.2 * Math.sin(t * 1.6)).toFixed(3));
+        if (recRef.current && badgeRef.current) {
+          badgeRef.current.style.opacity = (0.8 + 0.2 * Math.sin(t * 1.6)).toFixed(3);
         }
       }
 
@@ -629,6 +624,54 @@ export function LavaLamp({
         className="absolute inset-0"
         dangerouslySetInnerHTML={{ __html: frontSvg(uid) }}
       />
+      {/* REC badge — React-managed so its recording/idle state is
+          declarative; the engine pulses opacity via badgeRef while rec. */}
+      <svg
+        viewBox="0 0 400 640"
+        className="absolute inset-0 w-full h-full block"
+        aria-hidden="true"
+      >
+        <g
+          ref={badgeRef}
+          opacity={rec ? undefined : 0.4}
+          style={{ filter: rec ? undefined : "grayscale(1)" }}
+        >
+          <circle
+            cx="200"
+            cy="520"
+            r="27"
+            fill="rgba(255,77,125,0.10)"
+            stroke="#ff5e8a"
+            strokeWidth="2.5"
+          />
+          <rect x="193" y="504" width="14" height="23" rx="7" fill="#ff5e8a" />
+          <path
+            d="M 186 519 a 14 14 0 0 0 28 0"
+            fill="none"
+            stroke="#ff8fb0"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+          />
+          <line
+            x1="200"
+            y1="533"
+            x2="200"
+            y2="539"
+            stroke="#ff8fb0"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+          />
+          <line
+            x1="192"
+            y1="539"
+            x2="208"
+            y2="539"
+            stroke="#ff8fb0"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+          />
+        </g>
+      </svg>
     </div>
   );
 }

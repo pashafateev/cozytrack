@@ -3,9 +3,9 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import Link from "next/link";
-import { IcoMic } from "@/components/ui/Icon";
 import { Aurora } from "@/components/ui/Aurora";
 import { Wordmark } from "@/components/ui/Wordmark";
+import { LavaLamp } from "@/components/LavaLamp";
 
 export default function HomePage() {
   const router = useRouter();
@@ -44,9 +44,9 @@ export default function HomePage() {
       <Aurora variant="home" />
 
       <div className="relative z-10 flex flex-col items-center w-[340px] text-center">
-        {/* Brand mark — becomes the idle lamp in the final migration step. */}
-        <div className="mb-5 opacity-40">
-          <IcoMic size={36} color="var(--text)" />
+        {/* Idle lamp as the brand mark — the room is quiet until you record. */}
+        <div className="relative mb-2" style={{ height: 130, aspectRatio: "400 / 640" }}>
+          <LavaLamp idle seed={21} />
         </div>
 
         <Wordmark size={28} href={null} className="tracking-[-0.04em]" />

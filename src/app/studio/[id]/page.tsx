@@ -2296,9 +2296,22 @@ function RoomContent({
       key: p.identity,
       name: remoteParticipantName(p.identity),
       kind: "remote" as const,
+      host: isHostSender(p.metadata),
     }));
-    return [...locals, ...remotes];
-  }, [twoChannelChipsActive, participantName, remoteParticipants, remoteParticipantName]);
+    // Hue slots follow the design's roster order: the host owns pink,
+    // guests take the following hues in join order. Guests therefore list
+    // the remote host first, then themselves, then the other guests.
+    if (isHost) return [...locals, ...remotes];
+    const remoteHosts = remotes.filter((r) => r.host);
+    const remoteGuests = remotes.filter((r) => !r.host);
+    return [...remoteHosts, ...locals, ...remoteGuests];
+  }, [
+    isHost,
+    twoChannelChipsActive,
+    participantName,
+    remoteParticipants,
+    remoteParticipantName,
+  ]);
 
   const speakerLevel = useCallback(
     (s: { key: string; kind: "slot" | "local" | "remote" }) =>
@@ -3084,8 +3097,9 @@ export default function StudioPage() {
         <div className="relative flex-1 flex items-center justify-center px-4 overflow-hidden">
           <Aurora variant="auth" />
           <div className="relative w-full max-w-[360px] flex flex-col items-center">
-            <div className="mb-6 opacity-40">
-              <IcoMic size={32} color="var(--text)" />
+            {/* Idle lamp — the room rests until you join. */}
+            <div className="relative mb-1.5" style={{ height: 140, aspectRatio: "400 / 640" }}>
+              <LavaLamp idle seed={12} />
             </div>
             <h1 className="text-[22px] font-extrabold text-text tracking-[-0.03em]">Join Studio</h1>
             <p className="font-mono text-[11px] text-text-3 mt-1.5">
