@@ -3,7 +3,9 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import Link from "next/link";
-import { IcoMic } from "@/components/ui/Icon";
+import { Aurora } from "@/components/ui/Aurora";
+import { Wordmark } from "@/components/ui/Wordmark";
+import { LavaLamp } from "@/components/LavaLamp";
 
 export default function HomePage() {
   const router = useRouter();
@@ -39,41 +41,18 @@ export default function HomePage() {
 
   return (
     <div className="animate-page-enter min-h-screen flex flex-col items-center justify-center relative overflow-hidden bg-bg">
-      {/* Ambient amber glow behind the wordmark — sets the mood on first load */}
-      <div
-        aria-hidden
-        className="absolute pointer-events-none"
-        style={{
-          top: "38%",
-          left: "50%",
-          transform: "translate(-50%, -50%)",
-          width: 500,
-          height: 500,
-          background:
-            "radial-gradient(ellipse, rgba(200,120,64,0.18) 0%, transparent 65%)",
-        }}
-      />
-      <div
-        aria-hidden
-        className="absolute inset-x-0 bottom-0 pointer-events-none"
-        style={{
-          height: 200,
-          background:
-            "linear-gradient(to top, rgba(13,11,8,0.8), transparent)",
-        }}
-      />
+      <Aurora variant="home" />
 
-      <div className="relative z-10 flex flex-col items-center w-[340px]">
-        <div className="mb-7 opacity-40">
-          <IcoMic size={36} color="var(--text)" />
+      <div className="relative z-10 flex flex-col items-center w-[340px] text-center">
+        {/* Idle lamp as the brand mark — the room is quiet until you record. */}
+        <div className="relative mb-2" style={{ height: 130, aspectRatio: "400 / 640" }}>
+          <LavaLamp idle seed={21} />
         </div>
 
-        <h1 className="text-[28px] font-bold tracking-[-0.04em] mb-2 text-text">
-          cozy<span style={{ color: "var(--amber)" }}>track</span>
-        </h1>
-        <p className="text-[13px] text-text-3 mb-9">a home for your recordings</p>
+        <Wordmark size={28} href={null} className="tracking-[-0.04em]" />
+        <p className="text-[13px] text-text-3 mt-1.5">a home for your recordings</p>
 
-        <div className="w-full mb-2.5">
+        <div className="w-full mt-[26px] mb-3">
           <input
             type="text"
             placeholder="Name this session…"
@@ -82,21 +61,24 @@ export default function HomePage() {
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
             onKeyDown={(e) => e.key === "Enter" && canSubmit && handleCreateSession()}
-            className="w-full px-3.5 py-[11px] text-sm font-sans bg-card text-text rounded-md outline-none border transition-[border-color] duration-150"
+            className="w-full px-3.5 py-[11px] text-sm text-left font-sans bg-card text-text placeholder:text-text-3 rounded-[8px] outline-none border transition-[border-color] duration-150"
             style={{
               borderColor: focused ? "var(--border-hi)" : "var(--border)",
             }}
           />
         </div>
 
+        {/* Record affordance — the reserved Sunset gradient lives here. */}
         <button
           onClick={handleCreateSession}
           disabled={!canSubmit}
-          className="w-full py-[11px] text-[15px] font-semibold font-sans rounded-md border transition-all duration-200"
+          className="w-full py-[11px] text-[15px] font-semibold font-sans rounded-[10px] transition-all duration-200"
           style={{
-            background: canSubmit ? "var(--amber)" : "var(--card)",
-            color: canSubmit ? "var(--bg)" : "var(--text-3)",
-            borderColor: canSubmit ? "var(--amber)" : "var(--border)",
+            background: canSubmit
+              ? "linear-gradient(100deg,#ff4d7d,#ff7a54)"
+              : "var(--card)",
+            color: canSubmit ? "#2b0b18" : "var(--text-3)",
+            boxShadow: canSubmit ? "0 2px 18px rgba(255,77,125,0.35)" : undefined,
             cursor: canSubmit ? "pointer" : "default",
           }}
         >
@@ -105,8 +87,8 @@ export default function HomePage() {
 
         <Link
           href="/dashboard"
-          className="mt-[18px] text-[12px] text-text-3 underline underline-offset-2 hover:text-text-2"
-          style={{ textDecorationColor: "rgba(87,79,68,0.6)" }}
+          className="mt-5 text-[12px] text-text-2 underline underline-offset-2 hover:text-text"
+          style={{ textDecorationColor: "rgba(154,144,194,0.6)" }}
         >
           past sessions
         </Link>

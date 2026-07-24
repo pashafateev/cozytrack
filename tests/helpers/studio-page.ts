@@ -35,6 +35,7 @@ const studioPageHarness = vi.hoisted(() => ({
   sendControlMessage: vi.fn(async (_message: { type: string }) => undefined),
   onControlMessage: vi.fn((_handler: ControlMessageHandler) => vi.fn()),
   isHostSender: vi.fn(),
+  setMicrophoneEnabled: vi.fn(async (_enabled: boolean) => undefined),
   autoConnectRoom: true,
   roomConnectionState: "connected" as MockRoomConnectionState,
   roomOnConnected: undefined as (() => void) | undefined,
@@ -90,6 +91,8 @@ vi.mock("@livekit/components-react", () => {
   const localParticipant = {
     localParticipant: {
       republishAllTracks: studioPageHarness.republishAllTracks,
+      setMicrophoneEnabled: (enabled: boolean) =>
+        studioPageHarness.setMicrophoneEnabled(enabled),
     },
   };
   return {
@@ -275,6 +278,7 @@ beforeEach(() => {
   studioPageHarness.sendControlMessage.mockReset().mockResolvedValue(undefined);
   studioPageHarness.onControlMessage.mockReset().mockReturnValue(vi.fn());
   studioPageHarness.isHostSender.mockReset().mockReturnValue(false);
+  studioPageHarness.setMicrophoneEnabled.mockReset().mockResolvedValue(undefined);
   studioPageHarness.autoConnectRoom = true;
   studioPageHarness.roomConnectionState = "connected";
   studioPageHarness.roomOnConnected = undefined;

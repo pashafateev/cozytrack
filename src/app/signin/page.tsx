@@ -2,6 +2,8 @@
 
 import { useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { Aurora } from "@/components/ui/Aurora";
+import { Wordmark } from "@/components/ui/Wordmark";
 
 function SignInForm() {
   const router = useRouter();
@@ -11,6 +13,7 @@ function SignInForm() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [focused, setFocused] = useState(false);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -41,42 +44,45 @@ function SignInForm() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-neutral-950 text-neutral-100 px-4">
-      <form onSubmit={onSubmit} className="w-full max-w-sm space-y-4">
-        <div className="space-y-1">
-          <h1 className="text-2xl font-semibold">Cozytrack</h1>
-          <p className="text-sm text-neutral-400">Host sign-in</p>
-        </div>
-        <div className="space-y-2">
-          <label htmlFor="password" className="block text-sm text-neutral-300">
-            Password
-          </label>
-          <input
-            id="password"
-            name="password"
-            type="password"
-            autoComplete="current-password"
-            autoFocus
-            required
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            className="w-full rounded-md border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm outline-none focus:border-neutral-600"
-          />
-        </div>
+    <div className="relative min-h-screen flex items-center justify-center overflow-hidden bg-bg px-4">
+      <Aurora variant="auth" />
+      <form onSubmit={onSubmit} className="relative w-full max-w-[360px] flex flex-col">
+        <Wordmark size={26} href={null} className="tracking-[-0.02em] w-fit" />
+        <p className="text-[13px] text-text-2 mt-[5px]">Host sign-in</p>
+        <label
+          htmlFor="password"
+          className="block text-[11px] font-semibold text-text-3 uppercase tracking-[0.08em] mt-[30px] mb-2"
+        >
+          Password
+        </label>
+        <input
+          id="password"
+          name="password"
+          type="password"
+          autoComplete="current-password"
+          autoFocus
+          required
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          className="w-full px-3.5 py-2.5 text-sm font-sans bg-card text-text rounded-[8px] outline-none border transition-[border-color] duration-150"
+          style={{ borderColor: focused ? "var(--border-hi)" : "var(--border)" }}
+        />
         {error && (
-          <p className="text-sm text-red-400" role="alert">
+          <p className="text-sm text-rec mt-3" role="alert">
             {error}
           </p>
         )}
         <button
           type="submit"
           disabled={pending || password.length === 0}
-          className="w-full rounded-md bg-neutral-100 px-3 py-2 text-sm font-medium text-neutral-900 hover:bg-white disabled:opacity-50 disabled:cursor-not-allowed"
+          className="w-full mt-4 py-[11px] text-[15px] font-semibold font-sans rounded-[10px] bg-accent text-accent-ink hover:bg-accent-hi disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {pending ? "Signing in…" : "Sign in"}
         </button>
-        <p className="text-xs text-neutral-500">
-          Guests: use the invite link you were sent. This page is for the host.
+        <p className="text-xs text-text-3 mt-[22px] leading-normal">
+          Guests: use the invite link from your host — no password needed.
         </p>
       </form>
     </div>

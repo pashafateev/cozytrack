@@ -171,22 +171,29 @@ export function FinishRecordingButton({
 
   if (state.kind === "ready") {
     return (
-      <div className="flex flex-col items-center gap-3 p-6 rounded-xl bg-cozy-900 border border-green-700">
-        <p className="text-green-400 font-medium">Ready for ingest</p>
+      <div
+        className="flex flex-col items-center gap-3 p-6 rounded-[10px] border"
+        style={{ background: "var(--card)", borderColor: "rgba(70,214,140,0.35)" }}
+      >
+        <p className="text-ok font-medium">Ready for ingest</p>
         <div className="flex items-center gap-2">
-          <code className="px-3 py-1.5 rounded bg-cozy-800 text-white font-mono text-sm select-all">
+          <code
+            className="px-3 py-1.5 rounded-[8px] border text-text font-mono text-sm select-all"
+            style={{ background: "var(--bg)", borderColor: "var(--border)" }}
+          >
             {sessionId}
           </code>
           <button
             onClick={copyId}
-            className="px-3 py-1.5 rounded bg-cozy-700 hover:bg-cozy-600 text-white text-xs"
+            className="px-3 py-1.5 rounded-[8px] border text-text-2 text-xs hover:text-text"
+            style={{ background: "var(--card-hi)", borderColor: "var(--border-hi)" }}
           >
             {copied ? "Copied" : "Copy"}
           </button>
         </div>
-        <p className="text-gray-400 text-xs">
+        <p className="text-text-3 text-xs">
           Run on your laptop:{" "}
-          <code className="text-gray-200">sd ct-ingest {sessionId}</code>
+          <code className="text-text-2">sd ct-ingest {sessionId}</code>
         </p>
       </div>
     );
@@ -194,13 +201,16 @@ export function FinishRecordingButton({
 
   if (state.kind === "timeout") {
     return (
-      <div className="flex flex-col items-center gap-3 p-4 rounded-xl bg-cozy-900 border border-yellow-700">
-        <p className="text-yellow-400 text-sm text-center">
+      <div
+        className="flex flex-col items-center gap-3 p-4 rounded-[10px] border"
+        style={{ background: "var(--card)", borderColor: "rgba(255,179,71,0.35)" }}
+      >
+        <p className="text-warn text-sm text-center">
           Some tracks haven&apos;t uploaded yet — check your network and retry.
         </p>
         <button
           onClick={runFinalize}
-          className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium"
+          className="px-4 py-2 rounded-[8px] bg-accent hover:bg-accent-hi text-accent-ink text-sm font-semibold"
         >
           Retry
         </button>
@@ -210,11 +220,14 @@ export function FinishRecordingButton({
 
   if (state.kind === "error") {
     return (
-      <div className="flex flex-col items-center gap-3 p-4 rounded-xl bg-cozy-900 border border-red-700">
-        <p className="text-red-400 text-sm">{state.message}</p>
+      <div
+        className="flex flex-col items-center gap-3 p-4 rounded-[10px] border"
+        style={{ background: "var(--card)", borderColor: "rgba(255,59,77,0.35)" }}
+      >
+        <p className="text-rec text-sm">{state.message}</p>
         <button
           onClick={runFinalize}
-          className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium"
+          className="px-4 py-2 rounded-[8px] bg-accent hover:bg-accent-hi text-accent-ink text-sm font-semibold"
         >
           Retry
         </button>
@@ -224,14 +237,22 @@ export function FinishRecordingButton({
 
   if (state.kind === "active_take") {
     return (
-      <div className="flex flex-col items-center gap-3 p-4 rounded-xl bg-cozy-900 border border-yellow-700">
-        <p className="text-yellow-400 text-sm text-center">{state.message}</p>
-        <p className="text-gray-400 text-xs">
+      <div
+        className="flex flex-col items-center gap-3 p-4 rounded-[10px] border"
+        style={{ background: "var(--card)", borderColor: "rgba(255,179,71,0.35)" }}
+      >
+        <p className="text-warn text-sm text-center">{state.message}</p>
+        <p className="text-text-3 text-xs">
           Started {new Date(state.activeTake.startedAt).toLocaleString()}
         </p>
         <button
           onClick={recoverActiveTake}
-          className="px-4 py-2 rounded-lg bg-yellow-600 hover:bg-yellow-700 text-white text-sm font-medium"
+          className="px-4 py-2 rounded-[8px] text-sm font-semibold border"
+          style={{
+            background: "rgba(255,179,71,0.14)",
+            borderColor: "rgba(255,179,71,0.4)",
+            color: "var(--warn)",
+          }}
         >
           End unfinished take and continue
         </button>
@@ -244,8 +265,11 @@ export function FinishRecordingButton({
       ? `Still uploading track: ${state.pendingName}…`
       : "Finalizing…";
     return (
-      <div className="flex flex-col items-center gap-2 p-4 rounded-xl bg-cozy-900 border border-cozy-700">
-        <p className="text-gray-300 text-sm animate-pulse">{label}</p>
+      <div
+        className="flex flex-col items-center gap-2 p-4 rounded-[10px] border"
+        style={{ background: "var(--card)", borderColor: "var(--border-hi)" }}
+      >
+        <p className="text-text-2 text-sm animate-pulse">{label}</p>
       </div>
     );
   }
@@ -253,7 +277,11 @@ export function FinishRecordingButton({
   return (
     <button
       onClick={runFinalize}
-      className="px-6 py-3 rounded-lg bg-green-600 hover:bg-green-700 text-white font-medium transition-colors"
+      className="px-4 py-[9px] rounded-full text-[12.5px] font-semibold text-accent-ink transition-opacity hover:opacity-90"
+      style={{
+        background: "linear-gradient(100deg,#ff4d7d,#ff7a54)",
+        boxShadow: "0 2px 18px rgba(255,77,125,0.35)",
+      }}
     >
       Finish recording
     </button>

@@ -44,7 +44,7 @@ export function Waveform({ seed = 0, height = 28, played = 0, className }: Wavef
               width={2}
               height={Math.max(2, amp)}
               rx={1}
-              fill={isPlayed ? "var(--amber)" : "rgba(255,240,210,0.2)"}
+              fill={isPlayed ? "var(--accent)" : "rgba(210,190,255,0.18)"}
             />
           );
         })}
