@@ -2459,7 +2459,7 @@ function RoomContent({
       {/* Upload progress — transient corner chip, only while it matters. */}
       {uploadPhase !== "idle" && (
         <div
-          className="absolute bottom-5 left-5 z-30 w-[132px] rounded-[10px] border px-2 py-2 backdrop-blur-[6px]"
+          className="absolute bottom-7 left-7 z-30 w-[132px] rounded-[10px] border px-2 py-2 backdrop-blur-[6px]"
           style={{
             background: "rgba(34,26,69,0.85)",
             borderColor: "var(--border-hi)",
@@ -2476,7 +2476,7 @@ function RoomContent({
         <>
           {/* Host 2a topbar — wordmark · session · connection · REC pill.
               Elapsed time lives here now (moved from the old right sidebar). */}
-          <div className="absolute top-0 left-0 right-0 z-20 flex items-center px-[18px] py-3.5">
+          <div className="absolute top-0 left-0 right-0 z-20 flex items-center px-8 py-[26px]">
             <Wordmark size={15} />
             <span className="text-[12px] text-text-3 ml-2.5 truncate">
               · Session {sessionId.slice(0, 8)}…
@@ -2526,8 +2526,10 @@ function RoomContent({
           {/* Bottom column: finalize flow, speaker chips, controls cluster.
               One flex column anchored to the bottom edge so the pieces can
               never overlap, however many chips wrap or which finalize state
-              is showing. */}
-          <div className="absolute bottom-4 left-0 right-0 z-30 flex flex-col items-center gap-3 px-4">
+              is showing. Side padding clears the upload chip's bottom-left
+              corner (28px inset + 132px chip + gap), so wrapping chips rise
+              above it instead of sliding underneath. */}
+          <div className="absolute bottom-7 left-0 right-0 z-30 flex flex-col items-center gap-3 px-44">
             {/* Post-stop finalize flow sits above the chips. */}
             {studioState === "connected" && hasRecorded && (
               <FinishRecordingButton
@@ -2759,7 +2761,7 @@ function RoomContent({
       ) : (
         <>
           {/* Guest 2b — chromeless: faint brand, clock only while capturing. */}
-          <div className="absolute top-[17px] left-[18px] z-20 flex flex-col gap-0.5">
+          <div className="absolute top-[26px] left-8 z-20 flex flex-col gap-0.5">
             <span className="flex items-center gap-2">
               <Wordmark size={13} className="tracking-[0.01em] opacity-80" />
               <span className="text-[11px] text-text-3">
@@ -2776,7 +2778,7 @@ function RoomContent({
               aria-label={
                 isRecording ? "Recording in progress" : "Recording finalizing"
               }
-              className="absolute top-4 right-[18px] z-20 flex items-center gap-2 font-mono text-[11px] text-text-2"
+              className="absolute top-[26px] right-8 z-20 flex items-center gap-2 font-mono text-[11px] text-text-2"
             >
               {isRecording ? (
                 <span
@@ -2796,8 +2798,11 @@ function RoomContent({
             </div>
           )}
 
-          {/* Name dots — all participants equal, no meters, no statuses. */}
-          <div className="absolute bottom-[34px] left-0 right-0 z-20 flex justify-center items-center gap-[22px] flex-wrap px-4">
+          {/* Name dots — all participants equal, no meters, no statuses.
+              Side padding keeps the row clear of the overflow button's
+              corner (28px inset + 36px button + gap); since the row is
+              bottom-anchored, wrapping names grow upward, never under it. */}
+          <div className="absolute bottom-11 left-0 right-0 z-20 flex justify-center items-center gap-[22px] flex-wrap px-24">
             {speakers.map((s, i) => (
               <span key={s.key} className="flex items-center gap-2">
                 <TalkingDot
@@ -2813,7 +2818,7 @@ function RoomContent({
           </div>
 
           {/* Overflow — mute, monitor, and quality live behind it. */}
-          <div className="absolute bottom-[22px] right-[18px] z-30">
+          <div className="absolute bottom-7 right-7 z-30">
             {overflowOpen && (
               <div
                 className="absolute bottom-[46px] right-0 rounded-[10px] border p-3.5 flex flex-col gap-3 w-64 shadow-2xl"
