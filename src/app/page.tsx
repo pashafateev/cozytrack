@@ -50,7 +50,7 @@ export default function HomePage() {
           width: 500,
           height: 500,
           background:
-            "radial-gradient(ellipse, rgba(200,120,64,0.18) 0%, transparent 65%)",
+            "radial-gradient(ellipse, rgba(150,90,255,0.14) 0%, transparent 65%)",
         }}
       />
       <div
@@ -59,7 +59,7 @@ export default function HomePage() {
         style={{
           height: 200,
           background:
-            "linear-gradient(to top, rgba(13,11,8,0.8), transparent)",
+            "linear-gradient(to top, rgba(18,14,38,0.8), transparent)",
         }}
       />
 
@@ -69,7 +69,7 @@ export default function HomePage() {
         </div>
 
         <h1 className="text-[28px] font-bold tracking-[-0.04em] mb-2 text-text">
-          cozy<span style={{ color: "var(--amber)" }}>track</span>
+          cozy<span style={{ color: "var(--accent)" }}>track</span>
         </h1>
         <p className="text-[13px] text-text-3 mb-9">a home for your recordings</p>
 
@@ -94,9 +94,9 @@ export default function HomePage() {
           disabled={!canSubmit}
           className="w-full py-[11px] text-[15px] font-semibold font-sans rounded-md border transition-all duration-200"
           style={{
-            background: canSubmit ? "var(--amber)" : "var(--card)",
+            background: canSubmit ? "var(--accent)" : "var(--card)",
             color: canSubmit ? "var(--bg)" : "var(--text-3)",
-            borderColor: canSubmit ? "var(--amber)" : "var(--border)",
+            borderColor: canSubmit ? "var(--accent)" : "var(--border)",
             cursor: canSubmit ? "pointer" : "default",
           }}
         >
@@ -106,7 +106,7 @@ export default function HomePage() {
         <Link
           href="/dashboard"
           className="mt-[18px] text-[12px] text-text-3 underline underline-offset-2 hover:text-text-2"
-          style={{ textDecorationColor: "rgba(87,79,68,0.6)" }}
+          style={{ textDecorationColor: "rgba(111,101,160,0.6)" }}
         >
           past sessions
         </Link>

@@ -37,42 +37,29 @@ const config: Config = {
         "blink":         "blink 1s step-end infinite",
       },
       colors: {
-        // Cozytrack design system v1
-        bg:       "#0d0b08", // studio floor
-        surface:  "#141209", // panels / topbar
-        card:     "#1c1812", // tiles / cards
-        "card-hi":"#231f16", // hover / elevated
+        // Cozytrack design system v2 — "Sunset"
+        bg:       "#120e26", // studio floor
+        surface:  "#191338", // panels / topbar
+        card:     "#221a45", // tiles / cards
+        "card-hi":"#2b2154", // hover / elevated
         text: {
-          DEFAULT: "#ede7db",
-          2:       "#9a8f7e",
-          3:       "#574f44",
+          DEFAULT: "#efeaff",
+          2:       "#9a90c2",
+          3:       "#6f65a0",
         },
-        amber: {
-          DEFAULT: "#c87840",
-          hi:      "#dc9050",
+        accent: {
+          DEFAULT: "#ff4d7d",
+          hi:      "#ff6b9d",
+          // Dark text used on solid-accent and gradient record surfaces
+          ink:     "#2b0b18",
         },
-        ok:   "#52c97a", // connected / healthy
-        warn: "#e8a830", // warning
-        rec:  "#e85050", // recording / error
-
-        // Legacy `cozy` palette kept for backward-compat while we migrate callers
-        cozy: {
-          50:  "#f5f5f6",
-          100: "#e5e5e8",
-          200: "#cfd0d4",
-          300: "#adaeb5",
-          400: "#84858f",
-          500: "#696a74",
-          600: "#5a5a63",
-          700: "#4c4d54",
-          800: "#434349",
-          900: "#3b3b40",
-          950: "#1e1e21",
-        },
+        ok:   "#46d68c", // connected / uploaded
+        warn: "#ffb347", // built-in mic / processing
+        rec:  "#ff3b4d", // record / clipping
       },
       borderColor: {
-        subtle: "rgba(255,240,210,0.07)",
-        strong: "rgba(255,240,210,0.13)",
+        subtle: "rgba(210,190,255,0.10)",
+        strong: "rgba(210,190,255,0.14)",
       },
       borderRadius: {
         panel: "10px",

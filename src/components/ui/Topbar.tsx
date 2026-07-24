@@ -45,7 +45,7 @@ export function Topbar({ session }: TopbarProps) {
         href="/"
         className="text-[15px] font-bold tracking-[-0.03em] text-text font-sans"
       >
-        cozy<span style={{ color: "var(--amber)" }}>track</span>
+        cozy<span style={{ color: "var(--accent)" }}>track</span>
       </Link>
       <div className="w-px h-4" style={{ background: "var(--border)" }} />
       {session && (

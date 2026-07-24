@@ -55,9 +55,9 @@ export function MicMonitorToggle({
         aria-labelledby="mic-monitor-label"
         onClick={handleToggle}
         className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-          enabled ? "bg-amber" : ""
+          enabled ? "bg-accent" : ""
         }`}
-        style={{ background: enabled ? "var(--amber)" : "var(--card-hi)" }}
+        style={{ background: enabled ? "var(--accent)" : "var(--card-hi)" }}
       >
         <span
           className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
@@ -76,7 +76,7 @@ export function MicMonitorToggle({
           max={100}
           value={volume}
           onChange={handleVolume}
-          className="w-24 accent-amber"
+          className="w-24 accent-[var(--accent)]"
           aria-label="Monitor volume"
         />
       )}

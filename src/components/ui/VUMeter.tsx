@@ -151,13 +151,13 @@ export function VUMeter({
           const el = segRefs.current[i];
           if (!el) continue;
           const on = i < nextLit || i === nextPeak;
-          el.style.background = on ? segColors[i] : "rgba(255,240,210,0.05)";
+          el.style.background = on ? segColors[i] : "rgba(210,190,255,0.06)";
           el.style.boxShadow = on && isActive ? `0 0 4px ${segColors[i]}60` : "none";
         }
         if (prevPeak >= 0 && prevPeak !== nextPeak && prevPeak >= nextLit) {
           const el = segRefs.current[prevPeak];
           if (el) {
-            el.style.background = "rgba(255,240,210,0.05)";
+            el.style.background = "rgba(210,190,255,0.06)";
             el.style.boxShadow = "none";
           }
         }
@@ -196,7 +196,7 @@ export function VUMeter({
             }}
             className="flex-1 rounded-[2px]"
             style={{
-              background: on ? segColors[i] : "rgba(255,240,210,0.05)",
+              background: on ? segColors[i] : "rgba(210,190,255,0.06)",
               opacity: active ? 1 : 0.35,
               transition: "background 60ms ease",
               boxShadow: on && active ? `0 0 4px ${segColors[i]}60` : "none",

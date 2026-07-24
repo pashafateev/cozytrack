@@ -16,14 +16,14 @@ export function UploadProgressBar({
   // Colors per phase.
   const barColor: Record<UploadPhase, string> = {
     idle: "var(--border)",
-    uploading: "var(--amber)",
+    uploading: "var(--accent)",
     done: "var(--ok)",
     error: "var(--rec)",
   };
 
   const labelColor: Record<UploadPhase, string> = {
     idle: "var(--text-3)",
-    uploading: "var(--amber)",
+    uploading: "var(--accent)",
     done: "var(--ok)",
     error: "var(--rec)",
   };

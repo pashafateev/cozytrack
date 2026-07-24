@@ -199,8 +199,8 @@ function MobileBrowserWarningBanner({
       aria-live="polite"
       className="sticky top-[var(--topbar-height)] z-40 flex items-start gap-3 px-5 py-3 border-b"
       style={{
-        background: "rgba(232,168,48,0.09)",
-        borderBottomColor: "rgba(232,168,48,0.22)",
+        background: "rgba(255,179,71,0.09)",
+        borderBottomColor: "rgba(255,179,71,0.22)",
       }}
     >
       <span className="mt-0.5 flex-shrink-0">
@@ -274,7 +274,7 @@ function ParticipantStrip({
       style={{
         background: "var(--card)",
         borderColor: clipping ? "var(--rec)" : "var(--border)",
-        boxShadow: clipping ? "0 0 0 1px var(--rec), 0 0 12px rgba(232,80,80,0.45)" : undefined,
+        boxShadow: clipping ? "0 0 0 1px var(--rec), 0 0 12px rgba(255,59,77,0.45)" : undefined,
         transition: "border-color 80ms ease, box-shadow 80ms ease",
       }}
     >
@@ -297,9 +297,9 @@ function ParticipantStrip({
               <span
                 className="inline-flex items-center font-mono text-[11px] font-semibold px-2 py-0.5 rounded-[4px]"
                 style={{
-                  background: "rgba(200,120,64,0.09)",
-                  color: "var(--amber)",
-                  border: "1px solid rgba(200,120,64,0.16)",
+                  background: "rgba(255,77,125,0.09)",
+                  color: "var(--accent)",
+                  border: "1px solid rgba(255,77,125,0.16)",
                   letterSpacing: "0.03em",
                 }}
               >
@@ -321,9 +321,9 @@ function ParticipantStrip({
                 aria-label="Audio is clipping"
                 className="inline-flex items-center font-mono text-[10px] font-semibold px-1.5 py-0.5 rounded-[4px]"
                 style={{
-                  background: "rgba(232,80,80,0.16)",
+                  background: "rgba(255,59,77,0.16)",
                   color: "var(--rec)",
-                  border: "1px solid rgba(232,80,80,0.3)",
+                  border: "1px solid rgba(255,59,77,0.3)",
                   letterSpacing: "0.04em",
                 }}
               >
@@ -554,7 +554,7 @@ function InviteLinkModal({
               type="button"
               onClick={copy}
               className="text-[12px] px-3 py-1.5 rounded-md font-medium"
-              style={{ background: "var(--amber)", color: "var(--bg)" }}
+              style={{ background: "var(--accent)", color: "#2b0b18" }}
             >
               {copyState === "copied" ? "Copy again" : "Copy link"}
             </button>
@@ -599,8 +599,8 @@ function LocalRecordingBackupPanel({
       role="alert"
       className="rounded-lg border px-4 py-3.5 flex flex-col gap-3"
       style={{
-        background: "rgba(232,168,48,0.08)",
-        borderColor: "rgba(232,168,48,0.28)",
+        background: "rgba(255,179,71,0.08)",
+        borderColor: "rgba(255,179,71,0.28)",
       }}
     >
       <div className="flex items-start gap-3">
@@ -2243,8 +2243,8 @@ function RoomContent({
         <div
           className="flex items-center gap-2.5 py-2.5 px-5 border-b"
           style={{
-            background: "rgba(232,168,48,0.07)",
-            borderBottomColor: "rgba(232,168,48,0.18)",
+            background: "rgba(255,179,71,0.07)",
+            borderBottomColor: "rgba(255,179,71,0.18)",
           }}
         >
           <IcoAlert size={14} color="var(--warn)" />
@@ -2266,8 +2266,8 @@ function RoomContent({
           className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium border font-mono"
           style={{
             color: audioQualityMode === "full" ? "var(--ok)" : "var(--warn)",
-            borderColor: audioQualityMode === "full" ? "rgba(82,201,122,0.3)" : "rgba(232,168,48,0.3)",
-            background: audioQualityMode === "full" ? "rgba(82,201,122,0.08)" : "rgba(232,168,48,0.08)",
+            borderColor: audioQualityMode === "full" ? "rgba(82,201,122,0.3)" : "rgba(255,179,71,0.3)",
+            background: audioQualityMode === "full" ? "rgba(82,201,122,0.08)" : "rgba(255,179,71,0.08)",
           }}
         >
           <span
@@ -2314,7 +2314,7 @@ function RoomContent({
                 checked={twoChannelMode}
                 disabled={studioState !== "connected"}
                 onChange={(e) => setTwoChannelMode(e.target.checked)}
-                className="accent-[var(--amber)] cursor-pointer"
+                className="accent-[var(--accent)] cursor-pointer"
               />
               <label
                 htmlFor="two-channel-toggle"
@@ -2348,8 +2348,8 @@ function RoomContent({
                 role="status"
                 className="rounded-lg px-4 py-3.5 border flex items-start gap-2.5"
                 style={{
-                  background: "rgba(232,168,48,0.08)",
-                  borderColor: "rgba(232,168,48,0.28)",
+                  background: "rgba(255,179,71,0.08)",
+                  borderColor: "rgba(255,179,71,0.28)",
                 }}
               >
                 <span className="mt-0.5 flex-shrink-0">
@@ -2446,7 +2446,7 @@ function RoomContent({
                     isRecording ? "rec-ring" : ""
                   } ${startDisabled ? "cursor-not-allowed" : "cursor-pointer"}`}
                   style={{
-                    background: isRecording ? "rgba(232,80,80,0.1)" : "var(--card)",
+                    background: isRecording ? "rgba(255,59,77,0.1)" : "var(--card)",
                     borderColor: isRecording ? "var(--rec)" : "var(--border-hi)",
                     opacity: startDisabled ? 0.5 : 1,
                     transition: "all 200ms ease",
@@ -2490,7 +2490,7 @@ function RoomContent({
                     isRecording ? "rec-ring" : ""
                   }`}
                   style={{
-                    background: isRecording ? "rgba(232,80,80,0.1)" : "var(--card)",
+                    background: isRecording ? "rgba(255,59,77,0.1)" : "var(--card)",
                     borderColor: isRecording ? "var(--rec)" : "var(--border)",
                     opacity: isRecording ? 1 : 0.6,
                     transition: "all 200ms ease",
@@ -2811,9 +2811,9 @@ export default function StudioPage() {
                 disabled={!participantName.trim() || connecting}
                 className="w-full py-[11px] text-[15px] font-semibold font-sans rounded-md border disabled:cursor-not-allowed"
                 style={{
-                  background: !participantName.trim() || connecting ? "var(--card)" : "var(--amber)",
-                  color: !participantName.trim() || connecting ? "var(--text-3)" : "var(--bg)",
-                  borderColor: !participantName.trim() || connecting ? "var(--border)" : "var(--amber)",
+                  background: !participantName.trim() || connecting ? "var(--card)" : "var(--accent)",
+                  color: !participantName.trim() || connecting ? "var(--text-3)" : "#2b0b18",
+                  borderColor: !participantName.trim() || connecting ? "var(--border)" : "var(--accent)",
                   opacity: !participantName.trim() || connecting ? 0.8 : 1,
                 }}
               >
