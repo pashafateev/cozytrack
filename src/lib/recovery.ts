@@ -154,6 +154,15 @@ async function stitchSegmentChunks(input: {
   const missing = merged.missingPartNumbers;
   const partial = missing.length > 0 || forcePartial;
 
+  if (partial) {
+    // Make partialness durable before any S3, segment, or materialization
+    // failure can make a retry skip the gap that established it.
+    await db.track.update({
+      where: { id: trackId },
+      data: { partial: true },
+    });
+  }
+
   const recordingKey = trackSegmentRecordingKey(sessionId, trackId, segmentId);
   await putObjectBytes(recordingKey, merged.bytes);
 
@@ -417,8 +426,15 @@ export async function recoverTrack(
           data: { status: "complete", completedAt: new Date() },
         });
       }
+      if (newerSegmentLost && !track.partial) {
+        await db.track.update({
+          where: { id: trackId },
+          data: { partial: true },
+        });
+      }
+      const partial = track.partial || newerSegmentLost;
       const materialized = await materializeTrack(trackId, {
-        partial: newerSegmentLost,
+        partial,
         skipMissingSegments: true,
         ...(newerSegmentLost ? { allowIncompleteLatest: true } : {}),
       });
@@ -426,7 +442,7 @@ export async function recoverTrack(
         return {
           trackId,
           outcome: "failed_materialization",
-          partial: newerSegmentLost,
+          partial,
           status: materialized.status,
           chunkCount: 0,
           missingPartNumbers: [],
@@ -435,7 +451,7 @@ export async function recoverTrack(
       return {
         trackId,
         outcome: "recovered_from_recording",
-        partial: newerSegmentLost,
+        partial,
         status: "complete",
         chunkCount: 0,
         missingPartNumbers: [],
@@ -457,7 +473,7 @@ export async function recoverTrack(
     return {
       trackId,
       outcome: "recovered_from_recording",
-      partial: false,
+      partial: track.partial,
       status: "complete",
       chunkCount: 0,
       missingPartNumbers: [],

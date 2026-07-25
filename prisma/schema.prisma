@@ -80,9 +80,9 @@ model Track {
   // recording triggered from the same click (originator's local clock). Plumbed
   // now for future multi-track alignment; not yet used to align audio.
   sessionStartedAt DateTime?
-  // True when this track was recovered server-side from orphaned chunks and
-  // at least one chunk was missing from the partNumber sequence. Audio plays
-  // but has a gap. See issue #56 (server-side recovery).
+  // True when the logical artifact is known incomplete after server recovery,
+  // including missing chunk numbers or an interrupted segment left recoverable
+  // because it exceeded the automatic stitch cap. See issue #56.
   partial          Boolean        @default(false)
   createdAt        DateTime       @default(now())
   updatedAt        DateTime       @updatedAt
