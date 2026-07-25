@@ -12,7 +12,7 @@ describe("StudioPage two-channel local mode", () => {
     await studio.join();
 
     expect(
-      studio.screen.queryByRole("checkbox", { name: /two-channel local/i }),
+      studio.screen.queryByRole("checkbox", { name: /additional channel/i }),
     ).toBeNull();
   });
 
@@ -21,7 +21,7 @@ describe("StudioPage two-channel local mode", () => {
     await studio.join();
 
     fireEvent.click(
-      studio.screen.getByRole("checkbox", { name: /two-channel local/i }),
+      studio.screen.getByRole("checkbox", { name: /additional channel/i }),
     );
 
     await waitFor(() => {
@@ -51,7 +51,7 @@ describe("StudioPage two-channel local mode", () => {
     );
 
     fireEvent.click(
-      studio.screen.getByRole("checkbox", { name: /two-channel local/i }),
+      studio.screen.getByRole("checkbox", { name: /additional channel/i }),
     );
     await studio.screen.findByText("Local Ch 1");
 
@@ -93,7 +93,7 @@ describe("StudioPage two-channel local mode", () => {
     );
 
     fireEvent.click(
-      studio.screen.getByRole("checkbox", { name: /two-channel local/i }),
+      studio.screen.getByRole("checkbox", { name: /additional channel/i }),
     );
     await studio.screen.findByText("Local Ch 1");
 
@@ -147,7 +147,7 @@ describe("StudioPage two-channel local mode", () => {
     );
 
     fireEvent.click(
-      studio.screen.getByRole("checkbox", { name: /two-channel local/i }),
+      studio.screen.getByRole("checkbox", { name: /additional channel/i }),
     );
     await studio.screen.findByText("Local Ch 1");
 
@@ -185,7 +185,7 @@ describe("StudioPage two-channel local mode", () => {
     });
 
     fireEvent.click(
-      studio.screen.getByRole("checkbox", { name: /two-channel local/i }),
+      studio.screen.getByRole("checkbox", { name: /additional channel/i }),
     );
 
     await waitFor(() => {
@@ -235,7 +235,7 @@ describe("StudioPage two-channel local mode", () => {
     );
 
     fireEvent.click(
-      studio.screen.getByRole("checkbox", { name: /two-channel local/i }),
+      studio.screen.getByRole("checkbox", { name: /additional channel/i }),
     );
     await studio.screen.findByText("Local Ch 1");
 
@@ -289,7 +289,7 @@ describe("StudioPage two-channel local mode", () => {
       args[1] === drivenChunk ? chunkUpload : undefined) as unknown as () => Promise<undefined>);
 
     fireEvent.click(
-      studio.screen.getByRole("checkbox", { name: /two-channel local/i }),
+      studio.screen.getByRole("checkbox", { name: /additional channel/i }),
     );
     await studio.screen.findByText("Local Ch 1");
 
@@ -375,7 +375,7 @@ describe("StudioPage two-channel local mode", () => {
     });
 
     fireEvent.click(
-      studio.screen.getByRole("checkbox", { name: /two-channel local/i }),
+      studio.screen.getByRole("checkbox", { name: /additional channel/i }),
     );
     await studio.screen.findByText("Local Ch 1");
 

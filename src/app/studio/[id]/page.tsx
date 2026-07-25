@@ -29,6 +29,7 @@ import {
 import { CozyRecorder } from "@/lib/recorder";
 import { forceMonoStream, getTrackChannelCount } from "@/lib/audio-downmix";
 import { splitStereoStream } from "@/lib/audio-splitter";
+import { createMonitorBus, type MonitorBus } from "@/lib/monitor-bus";
 import {
   getPresignedUploadTarget,
   getPresignedUploadUrl,
@@ -773,6 +774,15 @@ function RoomContent({
   const [slotLevels, setSlotLevels] = useState<Map<string, number>>(new Map());
   const splitterDisposeRef = useRef<(() => void) | null>(null);
   const splitRawStreamRef = useRef<MediaStream | null>(null);
+  const monitorBusRef = useRef<MonitorBus | null>(null);
+  const monitorBusInputsRef = useRef<{
+    primary: MediaStream;
+    secondary?: MediaStream;
+  } | null>(null);
+  const monitorBusGenerationRef = useRef(0);
+  const monitorPublicationOperationRef = useRef<Promise<void>>(
+    Promise.resolve(),
+  );
   const setSlotCapturesSync = useCallback((next: SlotCapture[]) => {
     slotCapturesRef.current = next;
     setSlotCaptures(next);
@@ -1118,20 +1128,9 @@ function RoomContent({
 
     return () => {
       cancelled = true;
-      // Mirror the on-switch teardown: stop both raw and mono tracks. The
-      // guard avoids a double-stop in the fallback path where
-      // forceMonoStream failed and streamRef === rawStreamRef.
-      const previousRawStream = rawStreamRef.current;
-      const previousStream = streamRef.current;
-      downmixDisposeRef.current?.();
-      downmixDisposeRef.current = null;
-      previousRawStream?.getTracks().forEach((track) => track.stop());
-      if (previousStream && previousStream !== previousRawStream) {
-        previousStream.getTracks().forEach((track) => track.stop());
-      }
-      rawStreamRef.current = null;
-      streamRef.current = null;
-      setRecordingStream(null);
+      // Keep the current stream alive while a replacement device is acquired.
+      // The successful acquisition above swaps and tears it down atomically;
+      // component teardown is handled by the dedicated unmount cleanup.
     };
   }, [selectedMic]);
 
@@ -1277,6 +1276,127 @@ function RoomContent({
       setTwoChannelStatus("idle");
     };
   }, [isHost, twoChannelMode, selectedMic, setSlotCapturesSync]);
+
+  const queueMonitorBus = useCallback(
+    (nextBus: MonitorBus | null) => {
+      const generation = ++monitorBusGenerationRef.current;
+      monitorPublicationOperationRef.current =
+        monitorPublicationOperationRef.current
+          .catch(() => undefined)
+          .then(async () => {
+            if (generation !== monitorBusGenerationRef.current) {
+              nextBus?.dispose();
+              return;
+            }
+            if (!nextBus) {
+              try {
+                await transport.unpublishAudio();
+              } finally {
+                monitorBusInputsRef.current = null;
+                monitorBusRef.current?.dispose();
+                monitorBusRef.current = null;
+              }
+              return;
+            }
+
+            try {
+              await transport.publishAudio(nextBus.stream, {
+                audioBitrate: 128_000,
+                dtx: false,
+              });
+            } catch (error) {
+              console.error(
+                "Failed to publish realtime mono monitor bus:",
+                error,
+              );
+              try {
+                await transport.unpublishAudio();
+              } finally {
+                monitorBusInputsRef.current = null;
+                nextBus.dispose();
+                monitorBusRef.current?.dispose();
+                monitorBusRef.current = null;
+              }
+              return;
+            }
+
+            const previousBus = monitorBusRef.current;
+            monitorBusRef.current = nextBus;
+            previousBus?.dispose();
+          })
+          .catch((error) => {
+            console.error(
+              "Realtime monitor publication lifecycle failed:",
+              error,
+            );
+          });
+    },
+    [transport],
+  );
+
+  // Build and publish the realtime conversation bus independently from the
+  // recorder inputs. The host toggle is the only routing decision:
+  //   off -> primary mono stream at unity gain
+  //   on  -> split channel 1 + channel 2 at 0.5 each
+  // Guests use the same one-input bus around their processed mono stream.
+  //
+  // Operations are serialized and generation-gated so rapid device/mode
+  // changes cannot publish duplicates or dispose a bus before LiveKit replaces
+  // it. Any graph/publication failure unpublishes rather than exposing raw
+  // capture as a fallback.
+  useEffect(() => {
+    if (!roomConnected) return;
+
+    let primary: MediaStream;
+    let secondary: MediaStream | undefined;
+    if (isHost && twoChannelMode) {
+      if (slotCaptures.length !== LOCAL_TRACK_SLOTS.length) {
+        // While a new split graph is still being acquired, retain the existing
+        // mono publication. A proven capture failure below fails closed.
+        if (twoChannelStatus === "idle") return;
+        monitorBusInputsRef.current = null;
+        queueMonitorBus(null);
+        return;
+      }
+
+      primary = slotCaptures[0].stream;
+      secondary = slotCaptures[1].stream;
+    } else {
+      if (!recordingStream) return;
+      primary = recordingStream;
+    }
+
+    const previousInputs = monitorBusInputsRef.current;
+    if (
+      previousInputs?.primary === primary &&
+      previousInputs.secondary === secondary
+    ) {
+      return;
+    }
+    monitorBusInputsRef.current = { primary, secondary };
+
+    let nextBus: MonitorBus;
+    try {
+      nextBus = secondary
+        ? createMonitorBus(primary, secondary)
+        : createMonitorBus(primary);
+    } catch (error) {
+      console.error("Failed to create realtime mono monitor bus:", error);
+      monitorBusInputsRef.current = null;
+      queueMonitorBus(null);
+      return;
+    }
+
+    queueMonitorBus(nextBus);
+  }, [
+    isHost,
+    queueMonitorBus,
+    recordingStream,
+    roomConnected,
+    slotCaptures,
+    twoChannelMode,
+    twoChannelStatus,
+  ]);
 
   // Per-slot level meters. One analyser per split channel, feeding slotLevels
   // keyed by slot id (kept separate from the shared audioLevels map, whose
@@ -2136,6 +2256,7 @@ function RoomContent({
 
   useEffect(() => {
     return () => {
+      queueMonitorBus(null);
       downmixDisposeRef.current?.();
       downmixDisposeRef.current = null;
       const rawStream = rawStreamRef.current;
@@ -2154,7 +2275,7 @@ function RoomContent({
       splitRawStreamRef.current?.getTracks().forEach((t) => t.stop());
       splitRawStreamRef.current = null;
     };
-  }, []);
+  }, [queueMonitorBus]);
 
   // Dismissable warning banner — surfaces when the local mic is built-in.
   // Remote-participant warnings will reuse this banner once #28 propagates
@@ -2563,19 +2684,19 @@ function RoomContent({
                     label re-forwards the click to its control, which recurses
                     under happy-dom. aria-label carries the accessible name. */}
                 <input
-                  id="two-channel-toggle"
+                  id="additional-channel-toggle"
                   type="checkbox"
-                  aria-label="Two-channel local mode"
+                  aria-label="Additional channel"
                   checked={twoChannelMode}
                   disabled={studioState !== "connected"}
                   onChange={(e) => setTwoChannelMode(e.target.checked)}
                   className="accent-[var(--accent)] cursor-pointer"
                 />
                 <label
-                  htmlFor="two-channel-toggle"
+                  htmlFor="additional-channel-toggle"
                   className="text-[12px] text-text-2 cursor-pointer whitespace-nowrap"
                 >
-                  Two-channel local mode
+                  Additional channel
                 </label>
                 {twoChannelMode && twoChannelStatus === "ok" && (
                   <span className="font-mono text-[10px] text-text-3 truncate max-w-[180px]">
@@ -3202,18 +3323,12 @@ export default function StudioPage() {
       <LiveKitRoom
         serverUrl={LIVEKIT_URL}
         token={token}
-        audio={{
-          deviceId: selectedMic ? { exact: selectedMic } : undefined,
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          sampleRate: 48000,
-          channelCount: 1,
-        }}
+        audio={false}
         options={{
           publishDefaults: {
             audioPreset: { maxBitrate: 128_000 },
             dtx: false,
+            forceStereo: false,
           },
         }}
         connect={true}
