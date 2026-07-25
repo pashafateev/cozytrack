@@ -296,6 +296,14 @@ export async function recoverInterruptedTrackSegments(
     }
 
     if (!sourceReady) continue;
+    // Once another completed segment will be added to the source set, the
+    // existing logical artifact is stale. Invalidate it before committing the
+    // segment transition so a crash or remux failure leaves a durable retry
+    // signal for either upload completion or stopped-take recovery.
+    await db.track.updateMany({
+      where: { id: trackId, status: "complete" },
+      data: { status: "uploading" },
+    });
     const updated = await db.trackSegment.updateMany({
       where: {
         id: segment.id,
@@ -352,15 +360,6 @@ export async function recoverStoppedTakeTracks(
       partial: false,
     };
     if (hasInterruptedOlderSegment) {
-      // Invalidate an already-complete logical artifact before changing any
-      // segment to complete. If recovery or remuxing then fails (or the
-      // process exits between those steps), the next stop retry sees a
-      // non-complete track and rematerializes instead of trusting the old,
-      // truncated artifact.
-      await db.track.updateMany({
-        where: { id: track.id, status: "complete" },
-        data: { status: "uploading" },
-      });
       recovered = await recoverInterruptedTrackSegments(
         track.id,
         latestSegment.segmentIndex,
