@@ -396,4 +396,21 @@ describe("materializeTrack", () => {
       partial: true,
     });
   });
+
+  it("preserves an existing partial marker when rematerialization succeeds", async () => {
+    seedTrack({ status: "failed", partial: true });
+    seedSegment({ id: "track-1", durationMs: 12345 });
+
+    const result = await materializeTrack("track-1", {
+      readObjectBytes: mocks.readObjectBytes,
+      writeObjectBytes: mocks.writeObjectBytes,
+      remuxSegments: mocks.remuxSegments,
+    });
+
+    expect(result.status).toBe("complete");
+    expect(mocks.tracks.get("track-1")).toMatchObject({
+      status: "complete",
+      partial: true,
+    });
+  });
 });

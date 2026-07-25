@@ -821,4 +821,57 @@ describe("recoverInterruptedTrackSegments", () => {
     });
     expect(materializationMocks.materializeTrack).not.toHaveBeenCalled();
   });
+
+  it("marks an oversized interrupted segment partial while preserving its chunks", async () => {
+    seedTrack({ status: "recording" });
+    seedSegment({ id: "t1", segmentIndex: 0, status: "recording" });
+    seedSegment({
+      id: "seg-2",
+      segmentIndex: 1,
+      status: "complete",
+      durationMs: 5000,
+    });
+    putS3("sessions/s1/tracks/t1/0.webm", new Uint8Array(600));
+    putS3("sessions/s1/tracks/t1/1.webm", new Uint8Array(600));
+
+    const result = await recoverInterruptedTrackSegments("t1", 1, {
+      maxStitchBytes: 1000,
+    });
+
+    expect(result).toEqual({
+      recoveredSegmentIds: [],
+      partial: true,
+    });
+    expect(trackStore.get("t1")?.partial).toBe(true);
+    expect(segmentStore.get("t1")?.status).toBe("recording");
+    expect(
+      s3Objects.has("sessions/s1/tracks/t1/segments/t1/recording.webm"),
+    ).toBe(false);
+    expect(s3Objects.has("sessions/s1/tracks/t1/0.webm")).toBe(true);
+    expect(s3Objects.has("sessions/s1/tracks/t1/1.webm")).toBe(true);
+  });
+
+  it("preserves a gapped interrupted segment's partial state across retries", async () => {
+    seedTrack({ status: "recording" });
+    seedSegment({ id: "t1", segmentIndex: 0, status: "recording" });
+    seedSegment({
+      id: "seg-2",
+      segmentIndex: 1,
+      status: "complete",
+      durationMs: 5000,
+    });
+    putS3("sessions/s1/tracks/t1/0.webm", new Uint8Array([0xaa]));
+    putS3("sessions/s1/tracks/t1/2.webm", new Uint8Array([0xbb]));
+
+    const recovered = await recoverInterruptedTrackSegments("t1", 1);
+    const retried = await recoverInterruptedTrackSegments("t1", 1);
+
+    expect(recovered.partial).toBe(true);
+    expect(trackStore.get("t1")?.partial).toBe(true);
+    expect(segmentStore.get("t1")?.status).toBe("complete");
+    expect(retried).toEqual({
+      recoveredSegmentIds: [],
+      partial: true,
+    });
+  });
 });
