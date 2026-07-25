@@ -312,6 +312,73 @@ export async function recoverInterruptedTrackSegments(
   return { recoveredSegmentIds, partial };
 }
 
+// A participant can finish its replacement segment before the host stops the
+// take. Upload completion cannot recover older attempts while the take is
+// active, so the authoritative stop transition provides the second trigger.
+// Re-running this after a failed stop response is safe: already recovered
+// segments are skipped, while failed materialization remains retryable.
+export async function recoverStoppedTakeTracks(
+  takeId: string,
+): Promise<string[]> {
+  const tracks = await db.track.findMany({
+    where: { takeId },
+    select: {
+      id: true,
+      status: true,
+      segments: {
+        orderBy: { segmentIndex: "asc" },
+        select: {
+          id: true,
+          status: true,
+          segmentIndex: true,
+        },
+      },
+    },
+  });
+  const rematerializedTrackIds: string[] = [];
+
+  for (const track of tracks) {
+    const latestSegment = track.segments[track.segments.length - 1];
+    if (!latestSegment || latestSegment.status !== "complete") continue;
+
+    const hasInterruptedOlderSegment = track.segments.some(
+      (segment) =>
+        segment.segmentIndex < latestSegment.segmentIndex &&
+        segment.status !== "complete" &&
+        segment.status !== "failed",
+    );
+    let recovered: InterruptedTrackSegmentRecoveryResult = {
+      recoveredSegmentIds: [],
+      partial: false,
+    };
+    if (hasInterruptedOlderSegment) {
+      recovered = await recoverInterruptedTrackSegments(
+        track.id,
+        latestSegment.segmentIndex,
+      );
+    }
+
+    const shouldMaterialize =
+      recovered.recoveredSegmentIds.length > 0 ||
+      recovered.partial ||
+      track.status !== "complete";
+    if (!shouldMaterialize) continue;
+
+    const materialized = await materializeTrack(
+      track.id,
+      recovered.partial ? { partial: true } : {},
+    );
+    if (materialized.status !== "complete") {
+      throw new Error(
+        `Stopped take ${takeId} failed to materialize track ${track.id}: ${materialized.status}`,
+      );
+    }
+    rematerializedTrackIds.push(track.id);
+  }
+
+  return rematerializedTrackIds;
+}
+
 // Recovery preserves chunk objects in S3 even after producing recording.webm.
 // The byte-concat stitch is a best-effort fallback; keeping the chunks gives
 // an operator the option to re-stitch manually with ffmpeg if needed.

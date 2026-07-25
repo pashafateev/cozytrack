@@ -298,6 +298,7 @@ describe("/api/sessions/[id]/recording-state", () => {
     expect(stopBody.sessionStartedAt).toBeNull();
     expect(stopBody.take.id).toBe("take-1");
     expect(stopBody.take.stoppedAt).toEqual(expect.any(String));
+    expect(mocks.recoverStoppedTakeTracks).toHaveBeenCalledWith("take-1");
 
     const inactiveRead = await getRecordingState(request("GET"), params());
     await expect(inactiveRead.json()).resolves.toMatchObject({

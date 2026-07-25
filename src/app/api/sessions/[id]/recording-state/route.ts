@@ -6,6 +6,9 @@ import {
   resolvePrincipal,
   type Principal,
 } from "@/lib/auth";
+import { recoverStoppedTakeTracks } from "@/lib/recovery";
+
+export const maxDuration = 300;
 
 type RecordingTakeWithStatuses = {
   id: string;
@@ -277,17 +280,6 @@ export async function POST(
           });
         }
 
-        const remainingActive = await tx.recordingTake.findFirst({
-          where: { sessionId: id, status: "recording" },
-          orderBy: { startedAt: "desc" },
-          include: {
-            participantStatuses: { orderBy: { participantName: "asc" } },
-          },
-        });
-        if (remainingActive) {
-          return { kind: "active" as const, take: remainingActive };
-        }
-
         const stoppedTarget = target
           ? await tx.recordingTake.findUnique({
               where: { id: requestedTakeId },
@@ -296,11 +288,36 @@ export async function POST(
               },
             })
           : null;
-        return { kind: "inactive" as const, take: stoppedTarget };
+        const recoveryTakeId =
+          stoppedTarget?.status === "stopped" ? stoppedTarget.id : null;
+
+        const remainingActive = await tx.recordingTake.findFirst({
+          where: { sessionId: id, status: "recording" },
+          orderBy: { startedAt: "desc" },
+          include: {
+            participantStatuses: { orderBy: { participantName: "asc" } },
+          },
+        });
+        if (remainingActive) {
+          return {
+            kind: "active" as const,
+            take: remainingActive,
+            recoveryTakeId,
+          };
+        }
+
+        return {
+          kind: "inactive" as const,
+          take: stoppedTarget,
+          recoveryTakeId,
+        };
       });
 
       if (outcome.kind === "forbidden") {
         return NextResponse.json({ error: "forbidden" }, { status: 403 });
+      }
+      if (outcome.recoveryTakeId) {
+        await recoverStoppedTakeTracks(outcome.recoveryTakeId);
       }
       if (outcome.kind === "active") {
         return NextResponse.json(
@@ -316,29 +333,44 @@ export async function POST(
     // initial presigns. Otherwise a delayed presign can validate the active
     // take, lose the race to this stop, and create writable artifacts for a
     // take that is already stopped.
-    const stopped = await withSessionLock(id, async (tx) => {
+    const stopOutcome = await withSessionLock(id, async (tx) => {
       const current = await tx.recordingTake.findFirst({
         where: { sessionId: id, status: "recording" },
         orderBy: { startedAt: "desc" },
       });
-      if (!current) return null;
+      if (!current) {
+        const recentStopped = await tx.recordingTake.findFirst({
+          where: { sessionId: id, status: "stopped" },
+          orderBy: { stoppedAt: "desc" },
+        });
+        return {
+          stopped: null,
+          recoveryTakeId: recentStopped?.id ?? null,
+        };
+      }
 
-      return await tx.recordingTake.update({
+      const stopped = await tx.recordingTake.update({
         where: { id: current.id },
         data: { stoppedAt: new Date(), status: "stopped" },
         include: {
           participantStatuses: { orderBy: { participantName: "asc" } },
         },
       });
+      return { stopped, recoveryTakeId: stopped.id };
     });
+    if (stopOutcome.recoveryTakeId) {
+      await recoverStoppedTakeTracks(stopOutcome.recoveryTakeId);
+    }
 
     // Keep the existing idempotent behavior: if there's no active take
     // (already stopped, or a retry after the first stop landed), report
     // inactive so a retrying client converges.
-    if (!stopped) {
+    if (!stopOutcome.stopped) {
       return NextResponse.json(serializeRecordingState(null, false));
     }
-    return NextResponse.json(serializeRecordingState(stopped, false));
+    return NextResponse.json(
+      serializeRecordingState(stopOutcome.stopped, false),
+    );
   } catch (error) {
     console.error("Failed to update recording state:", error);
     return NextResponse.json(
