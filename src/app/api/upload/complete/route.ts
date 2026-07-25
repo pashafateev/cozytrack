@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { deleteTrackSegmentChunks } from "@/lib/s3";
 import { resolvePrincipal, verifyRecordingUploadToken } from "@/lib/auth";
 import { materializeTrack } from "@/lib/track-materialization";
+import { recoverInterruptedTrackSegments } from "@/lib/recovery";
 
 export async function POST(req: NextRequest) {
   try {
@@ -49,7 +50,7 @@ export async function POST(req: NextRequest) {
 
     const existingSegment = await db.trackSegment.findUnique({
       where: { id: segmentId },
-      select: { trackId: true, status: true },
+      select: { trackId: true, status: true, segmentIndex: true },
     });
     if (!existingSegment) {
       return NextResponse.json({ error: "Track segment not found" }, { status: 404 });
@@ -92,10 +93,42 @@ export async function POST(req: NextRequest) {
     // segment, but a newer in-flight segment keeps the logical track pending.
     const latestSegment = segments[segments.length - 1];
     const latestSegmentComplete = latestSegment.status === "complete";
+    let recoveredPartial = false;
+
+    if (
+      latestSegmentComplete &&
+      latestSegment.id === segmentId &&
+      existingTrack.takeId
+    ) {
+      const take = await db.recordingTake.findUnique({
+        where: { id: existingTrack.takeId },
+        select: { status: true },
+      });
+      if (take?.status === "stopped") {
+        try {
+          const recovered = await recoverInterruptedTrackSegments(
+            trackId,
+            existingSegment.segmentIndex,
+          );
+          recoveredPartial = recovered.partial;
+        } catch (error) {
+          // The newest completed segment remains usable. Preserve older chunks
+          // for a later/manual recovery rather than failing this completion.
+          console.error(
+            `[complete] failed to recover interrupted segments for track=${trackId}:`,
+            error,
+          );
+        }
+      }
+    }
 
     let track;
     if (latestSegmentComplete) {
-      await materializeTrack(trackId);
+      if (recoveredPartial) {
+        await materializeTrack(trackId, { partial: true });
+      } else {
+        await materializeTrack(trackId);
+      }
       track = await db.track.findUnique({ where: { id: trackId } });
     } else {
       // Conditional write: an older segment's completion can read the
