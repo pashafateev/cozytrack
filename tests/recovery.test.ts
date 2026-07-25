@@ -905,6 +905,24 @@ describe("recoverTrack", () => {
 });
 
 describe("recoverInterruptedTrackSegments", () => {
+  it("invalidates a completed logical artifact before completing an interrupted segment", async () => {
+    seedTrack({ status: "complete" });
+    seedSegment({ id: "t1", segmentIndex: 0, status: "recording" });
+    seedSegment({
+      id: "seg-2",
+      segmentIndex: 1,
+      status: "complete",
+      durationMs: 5000,
+    });
+    putS3("sessions/s1/tracks/t1/0.webm", new Uint8Array([0xaa]));
+
+    const result = await recoverInterruptedTrackSegments("t1", 1);
+
+    expect(result.recoveredSegmentIds).toEqual(["t1"]);
+    expect(segmentStore.get("t1")?.status).toBe("complete");
+    expect(trackStore.get("t1")?.status).toBe("uploading");
+  });
+
   it("stitches older interrupted chunks into an immutable segment source", async () => {
     seedTrack({ status: "recording" });
     seedSegment({ id: "t1", segmentIndex: 0, status: "recording" });
