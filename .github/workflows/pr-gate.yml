@@ -56,14 +56,44 @@ jobs:
               name === ".github/workflows/browser-smoke.yml" ||
               name === "package.json" ||
               name === "package-lock.json" ||
+              name === "next.config.ts" ||
               name === "playwright.config.ts" ||
+              name === "docker-compose.yml" ||
+              name === "livekit.yaml" ||
+              name.startsWith("prisma/") ||
+              name === "scripts/minio-bucket.sh" ||
               name === "scripts/test-browser-smoke.sh" ||
+              name === "src/middleware.ts" ||
+              name.startsWith("src/app/api/auth/") ||
+              name.startsWith("src/app/api/livekit-token/") ||
+              name.startsWith("src/app/api/sessions/") ||
+              name.startsWith("src/app/api/upload/") ||
+              name.startsWith("src/app/join/") ||
+              name.startsWith("src/app/signin/") ||
+              name === "src/app/page.tsx" ||
               name.startsWith("src/app/session/") ||
               name.startsWith("src/app/studio/") ||
               name.startsWith("src/components/") ||
               name.startsWith("src/hooks/") ||
+              name === "src/lib/api-auth.ts" ||
+              name === "src/lib/audio-downmix.ts" ||
+              name === "src/lib/audio-meter.ts" ||
+              name === "src/lib/audio-splitter.ts" ||
+              name === "src/lib/auth-password.ts" ||
+              name === "src/lib/auth.ts" ||
+              name === "src/lib/db.ts" ||
+              name === "src/lib/devices.ts" ||
+              name === "src/lib/livekit.ts" ||
+              name === "src/lib/monitor-bus.ts" ||
+              /^src\/lib\/recording-.*\.ts$/.test(name) ||
               name === "src/lib/recorder.ts" ||
+              name === "src/lib/recovery.ts" ||
+              name === "src/lib/s3.ts" ||
+              name === "src/lib/session-lock.ts" ||
+              name === "src/lib/sessions.ts" ||
+              name === "src/lib/track-materialization.ts" ||
               name.startsWith("src/lib/transport/") ||
+              /^src\/lib\/upload.*\.ts$/.test(name) ||
               name.startsWith("tests/browser/");
 
             const docsOnly = names.length > 0 && names.every(isDocsOnlyFile);
