@@ -6,6 +6,9 @@ import {
   resolvePrincipal,
   type Principal,
 } from "@/lib/auth";
+import { recoverStoppedTakeTracks } from "@/lib/recovery";
+
+export const maxDuration = 300;
 
 type RecordingTakeWithStatuses = {
   id: string;
@@ -116,12 +119,33 @@ function serializeTake(take: RecordingTakeWithStatuses | null) {
 function serializeRecordingState(
   take: RecordingTakeWithStatuses | null,
   active: boolean,
+  recoveryPending = false,
 ) {
   return {
     active,
     sessionStartedAt: active ? take?.startedAt.toISOString() ?? null : null,
     take: serializeTake(take),
+    ...(recoveryPending ? { recoveryPending: true } : {}),
   };
+}
+
+async function recoverStoppedTakeForResponse(
+  takeId: string | null,
+): Promise<boolean> {
+  if (!takeId) return false;
+  try {
+    await recoverStoppedTakeTracks(takeId);
+    return false;
+  } catch (error) {
+    // The take transition is already committed. Media recovery can be retried
+    // by later stopped-take/upload recovery paths, but it must not make the
+    // host believe the authoritative stop failed and leave the room recording.
+    console.error(
+      `[recording-state] take=${takeId} stopped with media recovery pending:`,
+      error,
+    );
+    return true;
+  }
 }
 
 function serializeParticipantStatus(status: {
@@ -277,17 +301,6 @@ export async function POST(
           });
         }
 
-        const remainingActive = await tx.recordingTake.findFirst({
-          where: { sessionId: id, status: "recording" },
-          orderBy: { startedAt: "desc" },
-          include: {
-            participantStatuses: { orderBy: { participantName: "asc" } },
-          },
-        });
-        if (remainingActive) {
-          return { kind: "active" as const, take: remainingActive };
-        }
-
         const stoppedTarget = target
           ? await tx.recordingTake.findUnique({
               where: { id: requestedTakeId },
@@ -296,19 +309,44 @@ export async function POST(
               },
             })
           : null;
-        return { kind: "inactive" as const, take: stoppedTarget };
+        const recoveryTakeId =
+          stoppedTarget?.status === "stopped" ? stoppedTarget.id : null;
+
+        const remainingActive = await tx.recordingTake.findFirst({
+          where: { sessionId: id, status: "recording" },
+          orderBy: { startedAt: "desc" },
+          include: {
+            participantStatuses: { orderBy: { participantName: "asc" } },
+          },
+        });
+        if (remainingActive) {
+          return {
+            kind: "active" as const,
+            take: remainingActive,
+            recoveryTakeId,
+          };
+        }
+
+        return {
+          kind: "inactive" as const,
+          take: stoppedTarget,
+          recoveryTakeId,
+        };
       });
 
       if (outcome.kind === "forbidden") {
         return NextResponse.json({ error: "forbidden" }, { status: 403 });
       }
+      const recoveryPending = await recoverStoppedTakeForResponse(
+        outcome.recoveryTakeId,
+      );
       if (outcome.kind === "active") {
         return NextResponse.json(
-          serializeRecordingState(outcome.take, true),
+          serializeRecordingState(outcome.take, true, recoveryPending),
         );
       }
       return NextResponse.json(
-        serializeRecordingState(outcome.take, false),
+        serializeRecordingState(outcome.take, false, recoveryPending),
       );
     }
 
@@ -316,29 +354,46 @@ export async function POST(
     // initial presigns. Otherwise a delayed presign can validate the active
     // take, lose the race to this stop, and create writable artifacts for a
     // take that is already stopped.
-    const stopped = await withSessionLock(id, async (tx) => {
+    const stopOutcome = await withSessionLock(id, async (tx) => {
       const current = await tx.recordingTake.findFirst({
         where: { sessionId: id, status: "recording" },
         orderBy: { startedAt: "desc" },
       });
-      if (!current) return null;
+      if (!current) {
+        const recentStopped = await tx.recordingTake.findFirst({
+          where: { sessionId: id, status: "stopped" },
+          orderBy: { stoppedAt: "desc" },
+        });
+        return {
+          stopped: null,
+          recoveryTakeId: recentStopped?.id ?? null,
+        };
+      }
 
-      return await tx.recordingTake.update({
+      const stopped = await tx.recordingTake.update({
         where: { id: current.id },
         data: { stoppedAt: new Date(), status: "stopped" },
         include: {
           participantStatuses: { orderBy: { participantName: "asc" } },
         },
       });
+      return { stopped, recoveryTakeId: stopped.id };
     });
+    const recoveryPending = await recoverStoppedTakeForResponse(
+      stopOutcome.recoveryTakeId,
+    );
 
     // Keep the existing idempotent behavior: if there's no active take
     // (already stopped, or a retry after the first stop landed), report
     // inactive so a retrying client converges.
-    if (!stopped) {
-      return NextResponse.json(serializeRecordingState(null, false));
+    if (!stopOutcome.stopped) {
+      return NextResponse.json(
+        serializeRecordingState(null, false, recoveryPending),
+      );
     }
-    return NextResponse.json(serializeRecordingState(stopped, false));
+    return NextResponse.json(
+      serializeRecordingState(stopOutcome.stopped, false, recoveryPending),
+    );
   } catch (error) {
     console.error("Failed to update recording state:", error);
     return NextResponse.json(

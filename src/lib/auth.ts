@@ -202,8 +202,10 @@ export async function verifyInviteToken(token: string): Promise<{ sessionId: str
 export async function issueGuestSessionCookie(
   sessionId: string,
   name: string,
+  existingParticipantId?: string,
 ): Promise<{ cookieName: string; value: string; ttl: number; participantId: string }> {
-  const participantId = `guest_${globalThis.crypto.randomUUID()}`;
+  const participantId =
+    existingParticipantId ?? `guest_${globalThis.crypto.randomUUID()}`;
   const issuedAt = nowSeconds();
   const value = await signGuestSession(
     { sessionId, name, participantId },

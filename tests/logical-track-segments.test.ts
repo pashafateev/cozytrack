@@ -43,6 +43,7 @@ const mocks = vi.hoisted(() => ({
   deleteTrackChunks: vi.fn(async () => undefined),
   deleteTrackSegmentChunks: vi.fn(async () => undefined),
   materializeTrack: vi.fn(),
+  recoverInterruptedTrackSegments: vi.fn(),
   resolvePrincipal: vi.fn<() => Promise<Principal | null>>(),
 }));
 
@@ -259,6 +260,10 @@ vi.mock("@/lib/track-materialization", () => ({
   materializeTrack: mocks.materializeTrack,
 }));
 
+vi.mock("@/lib/recovery", () => ({
+  recoverInterruptedTrackSegments: mocks.recoverInterruptedTrackSegments,
+}));
+
 vi.mock("@/lib/auth", async () => {
   const actual = await vi.importActual<typeof import("@/lib/auth")>(
     "@/lib/auth",
@@ -299,7 +304,14 @@ beforeEach(() => {
   mocks.sessions.add("s1");
   vi.clearAllMocks();
   mocks.resolvePrincipal.mockResolvedValue(null);
-  mocks.materializeTrack.mockImplementation(async (trackId: string) => {
+  mocks.recoverInterruptedTrackSegments.mockResolvedValue({
+    recoveredSegmentIds: [],
+    partial: false,
+  });
+  mocks.materializeTrack.mockImplementation(async (
+    trackId: string,
+    options?: { partial?: boolean },
+  ) => {
     const track = mocks.tracks.get(trackId);
     if (!track) throw new Error("track not found");
     const segments = Array.from(mocks.segments.values())
@@ -327,7 +339,7 @@ beforeEach(() => {
       status: "complete",
       s3Key,
       durationMs,
-      partial: false,
+      partial: options?.partial ?? false,
     });
     return {
       trackId,
@@ -1196,5 +1208,316 @@ describe("logical track segments", () => {
       s3Key: "sessions/s1/tracks/logical-track/recording.webm",
       durationMs: 5000,
     });
+  });
+
+  it("recovers older interrupted segments when the stopped take completes its latest segment", async () => {
+    mocks.recordingTakes.set("take-1", {
+      id: "take-1",
+      sessionId: "s1",
+      startedAt: new Date("2026-06-11T00:00:00.000Z"),
+      stoppedAt: new Date("2026-06-11T00:05:00.000Z"),
+      status: "stopped",
+    });
+    mocks.tracks.set("logical-track", {
+      id: "logical-track",
+      sessionId: "s1",
+      takeId: "take-1",
+      participantName: "Alice",
+      participantId: "guest_alice",
+      s3Key: "sessions/s1/tracks/logical-track/recording.webm",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("logical-track", {
+      id: "logical-track",
+      trackId: "logical-track",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/logical-track/",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("browser-seg-2", {
+      id: "browser-seg-2",
+      trackId: "logical-track",
+      segmentIndex: 1,
+      s3Prefix: "sessions/s1/tracks/logical-track/segments/browser-seg-2/",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.recoverInterruptedTrackSegments.mockImplementationOnce(
+      async () => {
+        const interrupted = mocks.segments.get("logical-track");
+        if (interrupted) {
+          mocks.segments.set("logical-track", {
+            ...interrupted,
+            status: "complete",
+          });
+        }
+        return {
+          recoveredSegmentIds: ["logical-track"],
+          partial: true,
+        };
+      },
+    );
+    const recordingToken = await issueRecordingUploadToken(
+      "s1",
+      "logical-track",
+      "browser-seg-2",
+    );
+
+    const res = await completeUpload(
+      postJson(
+        "/api/upload/complete",
+        {
+          sessionId: "s1",
+          trackId: "logical-track",
+          segmentId: "browser-seg-2",
+          durationMs: 5000,
+        },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    expect(mocks.recoverInterruptedTrackSegments).toHaveBeenCalledWith(
+      "logical-track",
+      1,
+    );
+    expect(mocks.segments.get("logical-track")?.status).toBe("complete");
+    expect(mocks.segments.get("browser-seg-2")?.status).toBe("complete");
+    expect(mocks.materializeTrack).toHaveBeenCalledWith("logical-track", {
+      partial: true,
+    });
+    expect(mocks.tracks.get("logical-track")?.partial).toBe(true);
+  });
+
+  it("retries stopped-take recovery before completing the logical track", async () => {
+    mocks.recordingTakes.set("take-1", {
+      id: "take-1",
+      sessionId: "s1",
+      startedAt: new Date("2026-06-11T00:00:00.000Z"),
+      stoppedAt: new Date("2026-06-11T00:05:00.000Z"),
+      status: "stopped",
+    });
+    mocks.tracks.set("logical-track", {
+      id: "logical-track",
+      sessionId: "s1",
+      takeId: "take-1",
+      participantName: "Alice",
+      participantId: "guest_alice",
+      s3Key: "sessions/s1/tracks/logical-track/recording.webm",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("logical-track", {
+      id: "logical-track",
+      trackId: "logical-track",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/logical-track/",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("browser-seg-2", {
+      id: "browser-seg-2",
+      trackId: "logical-track",
+      segmentIndex: 1,
+      s3Prefix: "sessions/s1/tracks/logical-track/segments/browser-seg-2/",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.recoverInterruptedTrackSegments
+      .mockRejectedValueOnce(new Error("transient S3 failure"))
+      .mockImplementationOnce(async () => {
+        const interrupted = mocks.segments.get("logical-track");
+        if (interrupted) {
+          mocks.segments.set("logical-track", {
+            ...interrupted,
+            status: "complete",
+          });
+        }
+        return {
+          recoveredSegmentIds: ["logical-track"],
+          partial: false,
+        };
+      });
+    const recordingToken = await issueRecordingUploadToken(
+      "s1",
+      "logical-track",
+      "browser-seg-2",
+    );
+    const request = () =>
+      completeUpload(
+        postJson(
+          "/api/upload/complete",
+          {
+            sessionId: "s1",
+            trackId: "logical-track",
+            segmentId: "browser-seg-2",
+            durationMs: 5000,
+          },
+          { "x-cozytrack-recording-token": recordingToken },
+        ),
+      );
+
+    const failed = await request();
+
+    expect(failed.status).toBe(500);
+    expect(mocks.materializeTrack).not.toHaveBeenCalled();
+    expect(mocks.deleteTrackSegmentChunks).not.toHaveBeenCalled();
+    expect(mocks.tracks.get("logical-track")?.status).toBe("recording");
+    expect(mocks.segments.get("browser-seg-2")?.status).toBe("complete");
+
+    const retried = await request();
+
+    expect(retried.status).toBe(200);
+    expect(mocks.recoverInterruptedTrackSegments).toHaveBeenCalledTimes(2);
+    expect(mocks.segments.get("logical-track")?.status).toBe("complete");
+    expect(mocks.materializeTrack).toHaveBeenCalledTimes(1);
+    expect(mocks.tracks.get("logical-track")?.status).toBe("complete");
+    expect(mocks.deleteTrackSegmentChunks).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries stopped-take recovery when the logical track is already complete", async () => {
+    mocks.recordingTakes.set("take-1", {
+      id: "take-1",
+      sessionId: "s1",
+      startedAt: new Date("2026-06-11T00:00:00.000Z"),
+      stoppedAt: new Date("2026-06-11T00:05:00.000Z"),
+      status: "stopped",
+    });
+    mocks.tracks.set("logical-track", {
+      id: "logical-track",
+      sessionId: "s1",
+      takeId: "take-1",
+      participantName: "Alice",
+      participantId: "guest_alice",
+      s3Key: "sessions/s1/tracks/logical-track/recording.webm",
+      status: "complete",
+      durationMs: 5000,
+    });
+    mocks.segments.set("logical-track", {
+      id: "logical-track",
+      trackId: "logical-track",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/logical-track/",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("browser-seg-2", {
+      id: "browser-seg-2",
+      trackId: "logical-track",
+      segmentIndex: 1,
+      s3Prefix: "sessions/s1/tracks/logical-track/segments/browser-seg-2/",
+      status: "complete",
+      durationMs: 5000,
+    });
+    mocks.recoverInterruptedTrackSegments
+      .mockRejectedValueOnce(new Error("transient S3 failure"))
+      .mockImplementationOnce(async () => {
+        const interrupted = mocks.segments.get("logical-track");
+        if (interrupted) {
+          mocks.segments.set("logical-track", {
+            ...interrupted,
+            status: "complete",
+          });
+        }
+        return {
+          recoveredSegmentIds: ["logical-track"],
+          partial: false,
+        };
+      });
+    const recordingToken = await issueRecordingUploadToken(
+      "s1",
+      "logical-track",
+      "browser-seg-2",
+    );
+    const request = () =>
+      completeUpload(
+        postJson(
+          "/api/upload/complete",
+          {
+            sessionId: "s1",
+            trackId: "logical-track",
+            segmentId: "browser-seg-2",
+            durationMs: 5000,
+          },
+          { "x-cozytrack-recording-token": recordingToken },
+        ),
+      );
+
+    const failed = await request();
+
+    expect(failed.status).toBe(500);
+    expect(mocks.recoverInterruptedTrackSegments).toHaveBeenCalledTimes(1);
+    expect(mocks.materializeTrack).not.toHaveBeenCalled();
+    expect(mocks.tracks.get("logical-track")?.status).toBe("complete");
+    expect(mocks.segments.get("browser-seg-2")?.status).toBe("complete");
+
+    const retried = await request();
+
+    expect(retried.status).toBe(200);
+    expect(mocks.recoverInterruptedTrackSegments).toHaveBeenCalledTimes(2);
+    expect(mocks.segments.get("logical-track")?.status).toBe("complete");
+    expect(mocks.materializeTrack).toHaveBeenCalledTimes(1);
+    expect(mocks.tracks.get("logical-track")?.status).toBe("complete");
+    expect(mocks.deleteTrackSegmentChunks).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not recover sibling segments while the take is still active", async () => {
+    mocks.recordingTakes.set("take-1", {
+      id: "take-1",
+      sessionId: "s1",
+      startedAt: new Date("2026-06-11T00:00:00.000Z"),
+      stoppedAt: null,
+      status: "recording",
+    });
+    mocks.tracks.set("logical-track", {
+      id: "logical-track",
+      sessionId: "s1",
+      takeId: "take-1",
+      participantName: "Alice",
+      participantId: "guest_alice",
+      s3Key: "sessions/s1/tracks/logical-track/recording.webm",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("logical-track", {
+      id: "logical-track",
+      trackId: "logical-track",
+      segmentIndex: 0,
+      s3Prefix: "sessions/s1/tracks/logical-track/",
+      status: "recording",
+      durationMs: null,
+    });
+    mocks.segments.set("browser-seg-2", {
+      id: "browser-seg-2",
+      trackId: "logical-track",
+      segmentIndex: 1,
+      s3Prefix: "sessions/s1/tracks/logical-track/segments/browser-seg-2/",
+      status: "recording",
+      durationMs: null,
+    });
+    const recordingToken = await issueRecordingUploadToken(
+      "s1",
+      "logical-track",
+      "browser-seg-2",
+    );
+
+    const res = await completeUpload(
+      postJson(
+        "/api/upload/complete",
+        {
+          sessionId: "s1",
+          trackId: "logical-track",
+          segmentId: "browser-seg-2",
+          durationMs: 5000,
+        },
+        { "x-cozytrack-recording-token": recordingToken },
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    expect(mocks.recoverInterruptedTrackSegments).not.toHaveBeenCalled();
+    expect(mocks.segments.get("logical-track")?.status).toBe("recording");
   });
 });

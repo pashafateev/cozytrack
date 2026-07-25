@@ -8,6 +8,8 @@ import {
   trackRecordingKey,
   trackSegmentRecordingExists,
   trackSegmentRecordingKey,
+  trackSegmentSourceRecordingExists,
+  trackSegmentSourceRecordingKey,
 } from "@/lib/s3";
 import { materializeTrack } from "@/lib/track-materialization";
 
@@ -51,47 +53,33 @@ type ChunkPart = {
   lastModified?: Date;
 };
 
-// Byte-concats a segment's chunk objects into its recording key and marks the
-// segment and track complete. Chunks are preserved in S3 for manual ffmpeg
-// re-stitching. `forcePartial` flags the track partial even without chunk
-// gaps, for when a newer attempt's audio is known to be unrecoverable.
-async function stitchSegmentChunks(input: {
-  sessionId: string;
-  trackId: string;
-  segmentId: string;
-  parts: ChunkPart[];
-  maxStitchBytes?: number;
-  forcePartial: boolean;
-}): Promise<RecoveryResult> {
-  const { sessionId, trackId, segmentId, parts, forcePartial } = input;
-
-  const totalSize = parts.reduce((sum, p) => sum + p.size, 0);
-  const cap = input.maxStitchBytes ?? DEFAULT_MAX_STITCH_BYTES;
-  if (totalSize > cap) {
-    console.warn(
-      `[recovery] track=${trackId} chunks total ${totalSize} bytes exceeds cap ${cap}; marking failed (chunks preserved)`
-    );
-    await db.track.update({
-      where: { id: trackId },
-      data: { status: "failed" },
-    });
-    return {
-      trackId,
-      outcome: "failed_too_large",
-      partial: false,
-      status: "failed",
-      chunkCount: parts.length,
-      missingPartNumbers: [],
+type MergedChunkParts =
+  | {
+      ok: true;
+      bytes: Uint8Array;
+      missingPartNumbers: number[];
+    }
+  | {
+      ok: false;
+      totalSize: number;
     };
+
+async function mergeChunkParts(
+  parts: ChunkPart[],
+  maxStitchBytes?: number,
+): Promise<MergedChunkParts> {
+  const totalSize = parts.reduce((sum, part) => sum + part.size, 0);
+  const cap = maxStitchBytes ?? DEFAULT_MAX_STITCH_BYTES;
+  if (totalSize > cap) {
+    return { ok: false, totalSize };
   }
 
-  const missing: number[] = [];
+  const missingPartNumbers: number[] = [];
   const maxPart = parts[parts.length - 1].partNumber;
-  const present = new Set(parts.map((p) => p.partNumber));
-  for (let i = 0; i <= maxPart; i++) {
-    if (!present.has(i)) missing.push(i);
+  const present = new Set(parts.map((part) => part.partNumber));
+  for (let partNumber = 0; partNumber <= maxPart; partNumber += 1) {
+    if (!present.has(partNumber)) missingPartNumbers.push(partNumber);
   }
-  const partial = missing.length > 0 || forcePartial;
 
   const chunkBytes: Uint8Array[] = [];
   for (
@@ -110,7 +98,10 @@ async function stitchSegmentChunks(input: {
     chunkBytes.push(...batch);
   }
 
-  const totalBytes = chunkBytes.reduce((sum, b) => sum + b.byteLength, 0);
+  const totalBytes = chunkBytes.reduce(
+    (sum, bytes) => sum + bytes.byteLength,
+    0,
+  );
   const merged = new Uint8Array(totalBytes);
   let offset = 0;
   for (const bytes of chunkBytes) {
@@ -118,8 +109,62 @@ async function stitchSegmentChunks(input: {
     offset += bytes.byteLength;
   }
 
+  return {
+    ok: true,
+    bytes: merged,
+    missingPartNumbers,
+  };
+}
+
+// Byte-concats a segment's chunk objects into its recording key and marks the
+// segment and track complete. Chunks are preserved in S3 for manual ffmpeg
+// re-stitching. `forcePartial` flags the track partial even without chunk
+// gaps, for when a newer attempt's audio is known to be unrecoverable.
+async function stitchSegmentChunks(input: {
+  sessionId: string;
+  trackId: string;
+  segmentId: string;
+  parts: ChunkPart[];
+  maxStitchBytes?: number;
+  forcePartial: boolean;
+}): Promise<RecoveryResult> {
+  const { sessionId, trackId, segmentId, parts, forcePartial } = input;
+
+  const merged = await mergeChunkParts(parts, input.maxStitchBytes);
+  if (!merged.ok) {
+    console.warn(
+      `[recovery] track=${trackId} chunks total ${merged.totalSize} bytes exceeds cap ${
+        input.maxStitchBytes ?? DEFAULT_MAX_STITCH_BYTES
+      }; marking failed (chunks preserved)`
+    );
+    await db.track.update({
+      where: { id: trackId },
+      data: { status: "failed" },
+    });
+    return {
+      trackId,
+      outcome: "failed_too_large",
+      partial: false,
+      status: "failed",
+      chunkCount: parts.length,
+      missingPartNumbers: [],
+    };
+  }
+
+  const missing = merged.missingPartNumbers;
+  const partial = missing.length > 0 || forcePartial;
+
+  if (partial) {
+    // Make partialness durable before any S3, segment, or materialization
+    // failure can make a retry skip the gap that established it.
+    await db.track.update({
+      where: { id: trackId },
+      data: { partial: true },
+    });
+  }
+
   const recordingKey = trackSegmentRecordingKey(sessionId, trackId, segmentId);
-  await putObjectBytes(recordingKey, merged);
+  await putObjectBytes(recordingKey, merged.bytes);
 
   // Keep the segment row in sync so later segment completions don't see it
   // as forever-pending; updateMany tolerates legacy tracks without rows.
@@ -158,6 +203,189 @@ async function stitchSegmentChunks(input: {
     chunkCount: parts.length,
     missingPartNumbers: missing,
   };
+}
+
+export interface InterruptedTrackSegmentRecoveryResult {
+  recoveredSegmentIds: string[];
+  partial: boolean;
+}
+
+// A later segment completing after the take is authoritatively stopped proves
+// that older attempts for the same participant are no longer active. Recover
+// any chunk-backed older attempts into immutable per-segment sources before
+// the caller materializes the logical track once.
+export async function recoverInterruptedTrackSegments(
+  trackId: string,
+  beforeSegmentIndex: number,
+  options: Pick<RecoverTrackOptions, "maxStitchBytes"> = {},
+): Promise<InterruptedTrackSegmentRecoveryResult> {
+  const track = await db.track.findUnique({
+    where: { id: trackId },
+    select: { id: true, sessionId: true, partial: true },
+  });
+  if (!track) {
+    throw new Error(`Track ${trackId} not found`);
+  }
+
+  const segments = await db.trackSegment.findMany({
+    where: { trackId },
+    orderBy: { segmentIndex: "asc" },
+    select: {
+      id: true,
+      status: true,
+      segmentIndex: true,
+    },
+  });
+  const interrupted = segments.filter(
+    (segment) =>
+      segment.segmentIndex < beforeSegmentIndex &&
+      segment.status !== "complete" &&
+      segment.status !== "failed",
+  );
+
+  const recoveredSegmentIds: string[] = [];
+  let partial = track.partial;
+  const persistPartial = async () => {
+    if (partial) return;
+    await db.track.update({
+      where: { id: trackId },
+      data: { partial: true },
+    });
+    partial = true;
+  };
+
+  for (const segment of interrupted) {
+    const sourceKey = trackSegmentSourceRecordingKey(
+      track.sessionId,
+      trackId,
+      segment.id,
+    );
+    let sourceReady = await trackSegmentSourceRecordingExists(
+      track.sessionId,
+      trackId,
+      segment.id,
+    );
+
+    if (!sourceReady) {
+      const parts = await listTrackSegmentChunkParts(
+        track.sessionId,
+        trackId,
+        segment.id,
+      );
+      if (parts.length === 0) continue;
+
+      const merged = await mergeChunkParts(parts, options.maxStitchBytes);
+      if (!merged.ok) {
+        await persistPartial();
+        console.warn(
+          `[recovery] track=${trackId} interrupted segment=${segment.id} chunks total ${merged.totalSize} bytes exceeds cap ${
+            options.maxStitchBytes ?? DEFAULT_MAX_STITCH_BYTES
+          }; marking track partial and leaving chunks recoverable`,
+        );
+        continue;
+      }
+
+      if (merged.missingPartNumbers.length > 0) {
+        // Persist the gap before writing the immutable source. If a later S3,
+        // database, or materialization step fails, retry must retain the
+        // partial marker after this segment becomes complete.
+        await persistPartial();
+      }
+      await putObjectBytes(sourceKey, merged.bytes);
+      sourceReady = true;
+    }
+
+    if (!sourceReady) continue;
+    // Once another completed segment will be added to the source set, the
+    // existing logical artifact is stale. Invalidate it before committing the
+    // segment transition so a crash or remux failure leaves a durable retry
+    // signal for either upload completion or stopped-take recovery.
+    await db.track.updateMany({
+      where: { id: trackId, status: "complete" },
+      data: { status: "uploading" },
+    });
+    const updated = await db.trackSegment.updateMany({
+      where: {
+        id: segment.id,
+        trackId,
+        status: { notIn: ["complete", "failed"] },
+      },
+      data: { status: "complete", completedAt: new Date() },
+    });
+    if (updated.count > 0) {
+      recoveredSegmentIds.push(segment.id);
+    }
+  }
+
+  return { recoveredSegmentIds, partial };
+}
+
+// A participant can finish its replacement segment before the host stops the
+// take. Upload completion cannot recover older attempts while the take is
+// active, so the authoritative stop transition provides the second trigger.
+// Re-running this after a failed stop response is safe: already recovered
+// segments are skipped, while failed materialization remains retryable.
+export async function recoverStoppedTakeTracks(
+  takeId: string,
+): Promise<string[]> {
+  const tracks = await db.track.findMany({
+    where: { takeId },
+    select: {
+      id: true,
+      status: true,
+      segments: {
+        orderBy: { segmentIndex: "asc" },
+        select: {
+          id: true,
+          status: true,
+          segmentIndex: true,
+        },
+      },
+    },
+  });
+  const rematerializedTrackIds: string[] = [];
+
+  for (const track of tracks) {
+    const latestSegment = track.segments[track.segments.length - 1];
+    if (!latestSegment || latestSegment.status !== "complete") continue;
+
+    const hasInterruptedOlderSegment = track.segments.some(
+      (segment) =>
+        segment.segmentIndex < latestSegment.segmentIndex &&
+        segment.status !== "complete" &&
+        segment.status !== "failed",
+    );
+    let recovered: InterruptedTrackSegmentRecoveryResult = {
+      recoveredSegmentIds: [],
+      partial: false,
+    };
+    if (hasInterruptedOlderSegment) {
+      recovered = await recoverInterruptedTrackSegments(
+        track.id,
+        latestSegment.segmentIndex,
+      );
+    }
+
+    const shouldMaterialize =
+      hasInterruptedOlderSegment ||
+      recovered.recoveredSegmentIds.length > 0 ||
+      recovered.partial ||
+      track.status !== "complete";
+    if (!shouldMaterialize) continue;
+
+    const materialized = await materializeTrack(
+      track.id,
+      recovered.partial ? { partial: true } : {},
+    );
+    if (materialized.status !== "complete") {
+      throw new Error(
+        `Stopped take ${takeId} failed to materialize track ${track.id}: ${materialized.status}`,
+      );
+    }
+    rematerializedTrackIds.push(track.id);
+  }
+
+  return rematerializedTrackIds;
 }
 
 // Recovery preserves chunk objects in S3 even after producing recording.webm.
@@ -274,8 +502,15 @@ export async function recoverTrack(
           data: { status: "complete", completedAt: new Date() },
         });
       }
+      if (newerSegmentLost && !track.partial) {
+        await db.track.update({
+          where: { id: trackId },
+          data: { partial: true },
+        });
+      }
+      const partial = track.partial || newerSegmentLost;
       const materialized = await materializeTrack(trackId, {
-        partial: newerSegmentLost,
+        partial,
         skipMissingSegments: true,
         ...(newerSegmentLost ? { allowIncompleteLatest: true } : {}),
       });
@@ -283,7 +518,7 @@ export async function recoverTrack(
         return {
           trackId,
           outcome: "failed_materialization",
-          partial: newerSegmentLost,
+          partial,
           status: materialized.status,
           chunkCount: 0,
           missingPartNumbers: [],
@@ -292,7 +527,7 @@ export async function recoverTrack(
       return {
         trackId,
         outcome: "recovered_from_recording",
-        partial: newerSegmentLost,
+        partial,
         status: "complete",
         chunkCount: 0,
         missingPartNumbers: [],
@@ -314,7 +549,7 @@ export async function recoverTrack(
     return {
       trackId,
       outcome: "recovered_from_recording",
-      partial: false,
+      partial: track.partial,
       status: "complete",
       chunkCount: 0,
       missingPartNumbers: [],

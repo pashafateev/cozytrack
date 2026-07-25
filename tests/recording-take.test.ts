@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   takes: new Map<string, RecordingTake>(),
   participantStatuses: new Map<string, RecordingTakeParticipantStatus>(),
   resolvePrincipal: vi.fn(),
+  recoverStoppedTakeTracks: vi.fn(),
   nextTakeId: 1,
 }));
 
@@ -190,6 +191,10 @@ vi.mock("@/lib/auth", async () => {
   };
 });
 
+vi.mock("@/lib/recovery", () => ({
+  recoverStoppedTakeTracks: mocks.recoverStoppedTakeTracks,
+}));
+
 import { NextRequest } from "next/server";
 import {
   GET as getRecordingState,
@@ -221,9 +226,56 @@ beforeEach(() => {
     kind: "host",
     participantId: "host",
   });
+  mocks.recoverStoppedTakeTracks.mockResolvedValue([]);
 });
 
 describe("/api/sessions/[id]/recording-state", () => {
+  it("acknowledges a durable stop while track recovery remains pending", async () => {
+    mocks.takes.set("take-1", {
+      id: "take-1",
+      sessionId: "s1",
+      startedAt: new Date("2026-06-01T12:00:00.000Z"),
+      stoppedAt: null,
+      status: "recording",
+    });
+    mocks.recoverStoppedTakeTracks.mockRejectedValue(
+      new Error("transient recovery failure"),
+    );
+
+    const stopped = await setRecordingState(
+      request("POST", { active: false, takeId: "take-1" }),
+      params(),
+    );
+
+    expect(stopped.status).toBe(200);
+    await expect(stopped.json()).resolves.toMatchObject({
+      active: false,
+      recoveryPending: true,
+      take: {
+        id: "take-1",
+        status: "stopped",
+      },
+    });
+    expect(mocks.takes.get("take-1")?.status).toBe("stopped");
+
+    const retried = await setRecordingState(
+      request("POST", { active: false, takeId: "take-1" }),
+      params(),
+    );
+
+    expect(retried.status).toBe(200);
+    await expect(retried.json()).resolves.toMatchObject({
+      active: false,
+      recoveryPending: true,
+      take: {
+        id: "take-1",
+        status: "stopped",
+      },
+    });
+    expect(mocks.recoverStoppedTakeTracks).toHaveBeenCalledTimes(2);
+    expect(mocks.recoverStoppedTakeTracks).toHaveBeenCalledWith("take-1");
+  });
+
   it("lets hosts create, read, and close an active recording take", async () => {
     const startedAt = "2026-06-01T12:00:00.000Z";
 
@@ -262,6 +314,7 @@ describe("/api/sessions/[id]/recording-state", () => {
     expect(stopBody.sessionStartedAt).toBeNull();
     expect(stopBody.take.id).toBe("take-1");
     expect(stopBody.take.stoppedAt).toEqual(expect.any(String));
+    expect(mocks.recoverStoppedTakeTracks).toHaveBeenCalledWith("take-1");
 
     const inactiveRead = await getRecordingState(request("GET"), params());
     await expect(inactiveRead.json()).resolves.toMatchObject({

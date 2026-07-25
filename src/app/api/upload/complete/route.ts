@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { deleteTrackSegmentChunks } from "@/lib/s3";
 import { resolvePrincipal, verifyRecordingUploadToken } from "@/lib/auth";
 import { materializeTrack } from "@/lib/track-materialization";
+import { recoverInterruptedTrackSegments } from "@/lib/recovery";
 
 export async function POST(req: NextRequest) {
   try {
@@ -49,7 +50,7 @@ export async function POST(req: NextRequest) {
 
     const existingSegment = await db.trackSegment.findUnique({
       where: { id: segmentId },
-      select: { trackId: true, status: true },
+      select: { trackId: true, status: true, segmentIndex: true },
     });
     if (!existingSegment) {
       return NextResponse.json({ error: "Track segment not found" }, { status: 404 });
@@ -57,12 +58,9 @@ export async function POST(req: NextRequest) {
     if (existingSegment.trackId !== trackId) {
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
-    if (
+    const alreadyComplete =
       existingSegment.status === "complete" &&
-      existingTrack.status === "complete"
-    ) {
-      return NextResponse.json(existingTrack);
-    }
+      existingTrack.status === "complete";
     if (existingSegment.status === "failed") {
       return NextResponse.json(
         { error: "Track segment is terminal" },
@@ -92,10 +90,43 @@ export async function POST(req: NextRequest) {
     // segment, but a newer in-flight segment keeps the logical track pending.
     const latestSegment = segments[segments.length - 1];
     const latestSegmentComplete = latestSegment.status === "complete";
+    let recoveredPartial = false;
+    let recoveredStoppedTake = false;
+
+    if (
+      latestSegmentComplete &&
+      latestSegment.id === segmentId &&
+      existingTrack.takeId
+    ) {
+      const take = await db.recordingTake.findUnique({
+        where: { id: existingTrack.takeId },
+        select: { status: true },
+      });
+      if (take?.status === "stopped") {
+        const recovered = await recoverInterruptedTrackSegments(
+          trackId,
+          existingSegment.segmentIndex,
+        );
+        recoveredPartial = recovered.partial;
+        recoveredStoppedTake = true;
+      }
+    }
+
+    // A completed logical track is normally idempotent, but the latest
+    // segment of a stopped take must still retry interrupted sibling recovery.
+    // A previous attempt can fail after the replacement segment completed but
+    // before invalidating/rematerializing the stale logical artifact.
+    if (alreadyComplete && !recoveredStoppedTake) {
+      return NextResponse.json(existingTrack);
+    }
 
     let track;
     if (latestSegmentComplete) {
-      await materializeTrack(trackId);
+      if (recoveredPartial) {
+        await materializeTrack(trackId, { partial: true });
+      } else {
+        await materializeTrack(trackId);
+      }
       track = await db.track.findUnique({ where: { id: trackId } });
     } else {
       // Conditional write: an older segment's completion can read the

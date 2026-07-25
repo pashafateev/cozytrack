@@ -2003,7 +2003,9 @@ function RoomContent({
         console.error("Failed to broadcast recording_start:", err);
         showNotification("Couldn't tell the room to start recording");
         try {
-          await stopRecordingTake(sessionId);
+          await stopRecordingTake(sessionId, {
+            takeId: takeId ?? undefined,
+          });
         } catch (stopErr) {
           console.error("Failed to close recording take after broadcast failure:", stopErr);
         }
@@ -2020,7 +2022,9 @@ function RoomContent({
           console.error("Failed to broadcast recording_stop after start failure:", err);
         }
         try {
-          await stopRecordingTake(sessionId);
+          await stopRecordingTake(sessionId, {
+            takeId: takeId ?? undefined,
+          });
         } catch (stopErr) {
           console.error("Failed to close recording take after local start failure:", stopErr);
         }
@@ -2048,7 +2052,9 @@ function RoomContent({
         // stopRecordingTake retries transient failures internally, so reaching
         // this catch means the stop genuinely could not be persisted after
         // several attempts (not just a single blip).
-        await stopRecordingTake(sessionId);
+        await stopRecordingTake(sessionId, {
+          takeId: recordingTakeIdRef.current ?? undefined,
+        });
       } catch (err) {
         console.error("Failed to close recording take:", err);
         showNotification("Couldn't update recording state");

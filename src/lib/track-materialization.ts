@@ -352,7 +352,9 @@ export async function materializeTrack(
   }
 
   const durationMs = totalDurationMs(sourceSegments);
-  const partial = deps.partial || skippedMissingSegment;
+  // Recovery partialness is monotonic. Only write true; omitting false avoids
+  // clearing a marker persisted concurrently after this materialization read.
+  const newlyPartial = Boolean(deps.partial || skippedMissingSegment);
   const updated = await db.track.updateMany({
     where: {
       id: trackId,
@@ -364,7 +366,7 @@ export async function materializeTrack(
       status: "complete",
       s3Key: finalKey,
       durationMs,
-      partial,
+      ...(newlyPartial ? { partial: true } : {}),
     },
   });
 
