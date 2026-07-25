@@ -10,6 +10,7 @@ type Track = {
   takeId?: string | null;
   s3Key: string;
   status: string;
+  durationMs: number | null;
   partial: boolean;
 };
 
@@ -82,6 +83,48 @@ vi.mock("@/lib/db", () => ({
           trackStore.set(id, updated);
           return structuredClone(updated);
         }
+      ),
+      updateMany: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: {
+            id: string;
+            status?: string | { not?: string };
+            segments?: { none: { segmentIndex: { gt: number } } };
+          };
+          data: Partial<Track>;
+        }) => {
+          const existing = trackStore.get(where.id);
+          if (!existing) return { count: 0 };
+          if (
+            typeof where.status === "string" &&
+            existing.status !== where.status
+          ) {
+            return { count: 0 };
+          }
+          if (
+            typeof where.status === "object" &&
+            where.status.not !== undefined &&
+            existing.status === where.status.not
+          ) {
+            return { count: 0 };
+          }
+          const noneGt = where.segments?.none.segmentIndex.gt;
+          if (
+            noneGt !== undefined &&
+            Array.from(segmentStore.values()).some(
+              (segment) =>
+                segment.trackId === where.id &&
+                segment.segmentIndex > noneGt,
+            )
+          ) {
+            return { count: 0 };
+          }
+          trackStore.set(where.id, { ...existing, ...data });
+          return { count: 1 };
+        },
       ),
     },
     trackSegment: {
@@ -285,6 +328,7 @@ function seedTrack(overrides: Partial<Track> = {}): Track {
     sessionId: "s1",
     s3Key: "sessions/s1/tracks/t1/recording.webm",
     status: "recording",
+    durationMs: null,
     partial: false,
     ...overrides,
   };
@@ -952,7 +996,7 @@ describe("recoverInterruptedTrackSegments", () => {
 });
 
 describe("recoverStoppedTakeTracks", () => {
-  it("rematerializes a completed latest segment after stopped-take recovery and retries failures", async () => {
+  it("keeps failed stopped-take rematerialization retryable after recovering a completed track", async () => {
     seedTrack({
       takeId: "take-1",
       status: "complete",
@@ -966,20 +1010,31 @@ describe("recoverStoppedTakeTracks", () => {
     });
     putS3("sessions/s1/tracks/t1/0.webm", new Uint8Array([0xaa]));
     putS3("sessions/s1/tracks/t1/1.webm", new Uint8Array([0xbb]));
-    materializationMocks.materializeTrack.mockImplementationOnce(
-      async (trackId: string) => {
-        const track = trackStore.get(trackId);
-        if (track) {
-          trackStore.set(trackId, { ...track, status: "failed" });
-        }
-        return {
-          trackId,
-          status: "failed",
-          s3Key: "sessions/s1/tracks/t1/recording.webm",
-          segmentCount: 2,
-          durationMs: null,
-        };
-      },
+    putS3(
+      "sessions/s1/tracks/t1/segments/seg-2/recording.webm",
+      new Uint8Array([0xcc]),
+    );
+    const remuxSegments = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("ffmpeg failed"))
+      .mockResolvedValue(undefined);
+    const { materializeTrack: realMaterializeTrack } = await vi.importActual<
+      typeof import("@/lib/track-materialization")
+    >("@/lib/track-materialization");
+    materializationMocks.materializeTrack.mockImplementation(
+      async (trackId, options) =>
+        await realMaterializeTrack(trackId, {
+          ...options,
+          readObjectBytes: async (key) => {
+            const bytes = s3Objects.get(key);
+            if (!bytes) throw new Error(`missing object ${key}`);
+            return bytes;
+          },
+          writeObjectBytes: async (key, bytes) => {
+            putS3(key, bytes);
+          },
+          remuxSegments,
+        }),
     );
 
     await expect(recoverStoppedTakeTracks("take-1")).rejects.toThrow(
@@ -992,6 +1047,7 @@ describe("recoverStoppedTakeTracks", () => {
 
     expect(retried).toEqual(["t1"]);
     expect(materializationMocks.materializeTrack).toHaveBeenCalledTimes(2);
+    expect(remuxSegments).toHaveBeenCalledTimes(2);
     expect(trackStore.get("t1")?.status).toBe("complete");
   });
 });
