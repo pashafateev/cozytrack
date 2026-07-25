@@ -131,6 +131,20 @@ vi.mock("@/lib/s3", () => ({
           : `sessions/${sessionId}/tracks/${trackId}/segments/${segmentId}/recording.webm`
       )
   ),
+  trackSegmentSourceRecordingKey: (
+    sessionId: string,
+    trackId: string,
+    segmentId: string
+  ) =>
+    segmentId === trackId
+      ? `sessions/${sessionId}/tracks/${trackId}/segments/${segmentId}/recording.webm`
+      : `sessions/${sessionId}/tracks/${trackId}/segments/${segmentId}/recording.webm`,
+  trackSegmentSourceRecordingExists: vi.fn(
+    async (sessionId: string, trackId: string, segmentId: string) =>
+      s3Objects.has(
+        `sessions/${sessionId}/tracks/${trackId}/segments/${segmentId}/recording.webm`
+      )
+  ),
   listTrackSegmentChunkParts: vi.fn(
     async (sessionId: string, trackId: string, segmentId: string) => {
       const prefix =
@@ -202,7 +216,10 @@ vi.mock("@/lib/track-materialization", () => ({
   materializeTrack: materializationMocks.materializeTrack,
 }));
 
-import { recoverTrack } from "@/lib/recovery";
+import {
+  recoverInterruptedTrackSegments,
+  recoverTrack,
+} from "@/lib/recovery";
 
 beforeEach(() => {
   trackStore.clear();
@@ -765,5 +782,43 @@ describe("recoverTrack", () => {
     expect(s3Objects.has("sessions/s1/tracks/t1/0.webm")).toBe(true);
     expect(s3Objects.has("sessions/s1/tracks/t1/1.webm")).toBe(true);
     expect(putCalls).toHaveLength(0);
+  });
+});
+
+describe("recoverInterruptedTrackSegments", () => {
+  it("stitches older interrupted chunks into an immutable segment source", async () => {
+    seedTrack({ status: "recording" });
+    seedSegment({ id: "t1", segmentIndex: 0, status: "recording" });
+    seedSegment({
+      id: "seg-2",
+      segmentIndex: 1,
+      status: "complete",
+      durationMs: 5000,
+    });
+    putS3(
+      "sessions/s1/tracks/t1/0.webm",
+      new Uint8Array([0xaa, 0xaa]),
+    );
+    putS3(
+      "sessions/s1/tracks/t1/1.webm",
+      new Uint8Array([0xbb, 0xbb]),
+    );
+
+    const result = await recoverInterruptedTrackSegments("t1", 1);
+
+    expect(result).toEqual({
+      recoveredSegmentIds: ["t1"],
+      partial: false,
+    });
+    expect(
+      s3Objects.get(
+        "sessions/s1/tracks/t1/segments/t1/recording.webm",
+      ),
+    ).toEqual(new Uint8Array([0xaa, 0xaa, 0xbb, 0xbb]));
+    expect(segmentStore.get("t1")).toMatchObject({
+      status: "complete",
+      durationMs: null,
+    });
+    expect(materializationMocks.materializeTrack).not.toHaveBeenCalled();
   });
 });

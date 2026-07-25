@@ -306,6 +306,13 @@ async function assertStoredRecording(
   track: { durationMs: number | null; s3Key: string | null },
 ) {
   expect(track.durationMs ?? 0).toBeGreaterThan(0);
+  await assertStoredWebM(sessionId, track);
+}
+
+async function assertStoredWebM(
+  sessionId: string,
+  track: { s3Key: string | null },
+) {
   expect(track.s3Key).toEqual(
     expect.stringMatching(
       new RegExp(`^sessions/${sessionId}/tracks/[^/]+/recording\\.webm$`),
@@ -784,8 +791,34 @@ test("keeps a returning guest in one logical track during an active recording", 
         )
         .toBe(1);
 
-      // Let the first timeslice upload before simulating the abrupt tab loss.
-      await firstGuestPage.waitForTimeout(6_000);
+      const firstSegment = await db.trackSegment.findFirstOrThrow({
+        where: {
+          track: { sessionId, participantName: guestName },
+        },
+        select: { s3Prefix: true },
+      });
+      await expect
+        .poll(
+          async () => {
+            const listed = await createS3Client().send(
+              new ListObjectsV2Command({
+                Bucket: requiredEnv("S3_BUCKET_NAME"),
+                Prefix: firstSegment.s3Prefix,
+              }),
+            );
+            return (listed.Contents ?? []).some((object) => {
+              const suffix = object.Key?.slice(firstSegment.s3Prefix.length);
+              return (
+                typeof suffix === "string" &&
+                /^\d+\.webm$/.test(suffix) &&
+                (object.Size ?? 0) > 0
+              );
+            });
+          },
+          { timeout: 30_000 },
+        )
+        .toBe(true);
+
       await firstGuestPage.close();
       await expect(page.getByText(guestName, { exact: true })).toBeHidden({
         timeout: 30_000,
@@ -872,9 +905,9 @@ test("keeps a returning guest in one logical track during an active recording", 
 
       const guestTrack = await db.track.findFirstOrThrow({
         where: { sessionId, participantName: guestName },
-        select: { durationMs: true, s3Key: true },
+        select: { s3Key: true },
       });
-      await assertStoredRecording(sessionId, guestTrack);
+      await assertStoredWebM(sessionId, guestTrack);
     });
   } finally {
     await guestContext.close();
