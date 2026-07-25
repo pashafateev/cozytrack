@@ -210,6 +210,7 @@ export async function materializeTrack(
       id: true,
       sessionId: true,
       s3Key: true,
+      partial: true,
     },
   });
 
@@ -352,7 +353,9 @@ export async function materializeTrack(
   }
 
   const durationMs = totalDurationMs(sourceSegments);
-  const partial = deps.partial || skippedMissingSegment;
+  // Recovery partialness is monotonic: rematerializing a failed or superseded
+  // artifact must not clear a previously observed gap or skipped segment.
+  const partial = track.partial || deps.partial || skippedMissingSegment;
   const updated = await db.track.updateMany({
     where: {
       id: trackId,

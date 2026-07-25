@@ -212,7 +212,7 @@ export async function recoverInterruptedTrackSegments(
 ): Promise<InterruptedTrackSegmentRecoveryResult> {
   const track = await db.track.findUnique({
     where: { id: trackId },
-    select: { id: true, sessionId: true },
+    select: { id: true, sessionId: true, partial: true },
   });
   if (!track) {
     throw new Error(`Track ${trackId} not found`);
@@ -235,7 +235,15 @@ export async function recoverInterruptedTrackSegments(
   );
 
   const recoveredSegmentIds: string[] = [];
-  let partial = false;
+  let partial = track.partial;
+  const persistPartial = async () => {
+    if (partial) return;
+    await db.track.update({
+      where: { id: trackId },
+      data: { partial: true },
+    });
+    partial = true;
+  };
 
   for (const segment of interrupted) {
     const sourceKey = trackSegmentSourceRecordingKey(
@@ -259,17 +267,23 @@ export async function recoverInterruptedTrackSegments(
 
       const merged = await mergeChunkParts(parts, options.maxStitchBytes);
       if (!merged.ok) {
+        await persistPartial();
         console.warn(
           `[recovery] track=${trackId} interrupted segment=${segment.id} chunks total ${merged.totalSize} bytes exceeds cap ${
             options.maxStitchBytes ?? DEFAULT_MAX_STITCH_BYTES
-          }; leaving chunks recoverable`,
+          }; marking track partial and leaving chunks recoverable`,
         );
         continue;
       }
 
+      if (merged.missingPartNumbers.length > 0) {
+        // Persist the gap before writing the immutable source. If a later S3,
+        // database, or materialization step fails, retry must retain the
+        // partial marker after this segment becomes complete.
+        await persistPartial();
+      }
       await putObjectBytes(sourceKey, merged.bytes);
       sourceReady = true;
-      partial ||= merged.missingPartNumbers.length > 0;
     }
 
     if (!sourceReady) continue;
