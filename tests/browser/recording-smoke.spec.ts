@@ -34,6 +34,76 @@ function assertSafeBrowserSmokeEnv() {
   }
 }
 
+async function installSyntheticMicrophone(
+  page: Page,
+  availableChannels: 1 | 2,
+) {
+  await page.addInitScript((channelCount) => {
+    const contexts: AudioContext[] = [];
+    Object.defineProperty(navigator.mediaDevices, "getUserMedia", {
+      configurable: true,
+      writable: true,
+      value: async (constraints: MediaStreamConstraints) => {
+        if (!constraints.audio) {
+          throw new DOMException("Synthetic smoke input is audio-only", "NotFoundError");
+        }
+
+        const context = new AudioContext({ sampleRate: 48_000 });
+        contexts.push(context);
+        const destination = new MediaStreamAudioDestinationNode(context, {
+          channelCount,
+        });
+        const merger =
+          channelCount === 2 ? context.createChannelMerger(2) : undefined;
+        const oscillators: OscillatorNode[] = [];
+
+        for (let channel = 0; channel < channelCount; channel += 1) {
+          const oscillator = context.createOscillator();
+          const gain = context.createGain();
+          oscillator.frequency.value = channel === 0 ? 440 : 880;
+          gain.gain.value = 0.08;
+          oscillator.connect(gain);
+          if (merger) {
+            gain.connect(merger, 0, channel);
+          } else {
+            gain.connect(destination);
+          }
+          oscillator.start();
+          oscillators.push(oscillator);
+        }
+        merger?.connect(destination);
+
+        const [track] = destination.stream.getAudioTracks();
+        const getSettings = track.getSettings.bind(track);
+        Object.defineProperty(track, "getSettings", {
+          configurable: true,
+          value: () => ({ ...getSettings(), channelCount }),
+        });
+        track.addEventListener(
+          "ended",
+          () => {
+            for (const oscillator of oscillators) {
+              try {
+                oscillator.stop();
+              } catch {
+                // Already stopped.
+              }
+            }
+            void context.close();
+          },
+          { once: true },
+        );
+
+        return destination.stream;
+      },
+    });
+    Object.defineProperty(window, "__cozytrackSyntheticMicContexts", {
+      configurable: true,
+      value: contexts,
+    });
+  }, availableChannels);
+}
+
 function createS3Client(): S3Client {
   return new S3Client({
     region: requiredEnv("AWS_REGION"),
@@ -186,6 +256,48 @@ async function joinGuestStudio(
   await expect(page).toHaveURL(new RegExp(`/studio/${sessionId}$`));
   await joinStudioWithFakeMicrophone(page, participantName, {
     expectHostControls: false,
+  });
+}
+
+async function measureRemoteAudioRms(page: Page): Promise<number> {
+  return page.evaluate(async () => {
+    const remoteAudio = Array.from(document.querySelectorAll("audio")).find(
+      (element) => {
+        const stream = element.srcObject as MediaStream | null;
+        return stream?.getAudioTracks().some(
+          (track) => track.readyState === "live",
+        );
+      },
+    );
+    const stream = remoteAudio?.srcObject as MediaStream | null;
+    if (!stream) throw new Error("remote audio stream unavailable");
+
+    const context = new AudioContext();
+    await context.resume();
+    const source = context.createMediaStreamSource(stream);
+    const analyser = context.createAnalyser();
+    const sink = context.createGain();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0;
+    sink.gain.value = 0;
+    source.connect(analyser);
+    analyser.connect(sink).connect(context.destination);
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const samples = new Float32Array(analyser.fftSize);
+      analyser.getFloatTimeDomainData(samples);
+      let squares = 0;
+      for (const sample of samples) {
+        squares += sample * sample;
+      }
+      return Math.sqrt(squares / samples.length);
+    } finally {
+      source.disconnect();
+      analyser.disconnect();
+      sink.disconnect();
+      await context.close();
+    }
   });
 }
 
@@ -622,5 +734,203 @@ test("records host plus two guests and stores three completed WebMs", async ({
     });
   } finally {
     await Promise.all(guestContexts.map((context) => context.close()));
+  }
+});
+
+test("publishes the additional host channel as one centered remote track while recording both host channels", async ({
+  browser,
+  page,
+}) => {
+  const guestContext = await browser.newContext({
+    permissions: ["microphone"],
+    viewport: { width: 1280, height: 720 },
+  });
+
+  try {
+    await installSyntheticMicrophone(page, 2);
+    const sessionId = await createAndJoinHostStudio(
+      page,
+      `Additional channel smoke ${Date.now()}`,
+      "Additional Channel Host",
+    );
+    const inviteUrl = await createInviteUrl(page, sessionId);
+
+    const guestPage = await guestContext.newPage();
+    await installSyntheticMicrophone(guestPage, 1);
+    await joinGuestStudio(
+      guestPage,
+      inviteUrl,
+      sessionId,
+      "Additional Channel Guest",
+    );
+
+    await page
+      .getByRole("checkbox", { name: "Additional channel" })
+      .check();
+    await expect(page.getByText("Local Ch 1", { exact: true })).toBeVisible();
+    await expect(page.getByText("Local Ch 2", { exact: true })).toBeVisible();
+
+    await expect
+      .poll(
+        () =>
+          guestPage.locator("audio").evaluateAll((elements) =>
+            elements.some((element) => {
+              const stream = (element as HTMLAudioElement)
+                .srcObject as MediaStream | null;
+              return stream?.getAudioTracks().some(
+                (track) => track.readyState === "live",
+              );
+            }),
+          ),
+        { timeout: 30_000 },
+      )
+      .toBe(true);
+
+    const receivedChannels = await guestPage.evaluate(async () => {
+      const remoteAudio = Array.from(document.querySelectorAll("audio")).find(
+        (element) => {
+          const stream = element.srcObject as MediaStream | null;
+          return stream?.getAudioTracks().some(
+            (track) => track.readyState === "live",
+          );
+        },
+      );
+      const stream = remoteAudio?.srcObject as MediaStream | null;
+      if (!stream) throw new Error("remote audio stream unavailable");
+
+      const context = new AudioContext();
+      await context.resume();
+      const source = context.createMediaStreamSource(stream);
+      const splitter = context.createChannelSplitter(2);
+      const left = context.createAnalyser();
+      const right = context.createAnalyser();
+      const leftSink = context.createGain();
+      const rightSink = context.createGain();
+      left.fftSize = 2048;
+      right.fftSize = 2048;
+      left.smoothingTimeConstant = 0;
+      right.smoothingTimeConstant = 0;
+      leftSink.gain.value = 0;
+      rightSink.gain.value = 0;
+      source.connect(splitter);
+      splitter.connect(left, 0);
+      splitter.connect(right, 1);
+      left.connect(leftSink).connect(context.destination);
+      right.connect(rightSink).connect(context.destination);
+
+      try {
+        for (let attempt = 0; attempt < 50; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          const leftSamples = new Float32Array(left.fftSize);
+          const rightSamples = new Float32Array(right.fftSize);
+          left.getFloatTimeDomainData(leftSamples);
+          right.getFloatTimeDomainData(rightSamples);
+
+          let leftSquares = 0;
+          let rightSquares = 0;
+          let differenceSquares = 0;
+          let dotProduct = 0;
+          for (let i = 0; i < leftSamples.length; i += 1) {
+            const leftSample = leftSamples[i];
+            const rightSample = rightSamples[i];
+            leftSquares += leftSample * leftSample;
+            rightSquares += rightSample * rightSample;
+            differenceSquares +=
+              (leftSample - rightSample) * (leftSample - rightSample);
+            dotProduct += leftSample * rightSample;
+          }
+
+          const leftRms = Math.sqrt(leftSquares / leftSamples.length);
+          const rightRms = Math.sqrt(rightSquares / rightSamples.length);
+          if (leftRms < 0.001 || rightRms < 0.001) continue;
+          return {
+            correlation:
+              dotProduct / Math.sqrt(leftSquares * rightSquares),
+            differenceRms: Math.sqrt(
+              differenceSquares / leftSamples.length,
+            ),
+            leftRms,
+            rightRms,
+          };
+        }
+        throw new Error("remote audio stayed silent");
+      } finally {
+        source.disconnect();
+        splitter.disconnect();
+        left.disconnect();
+        right.disconnect();
+        leftSink.disconnect();
+        rightSink.disconnect();
+        await context.close();
+      }
+    });
+    expect(receivedChannels.leftRms).toBeGreaterThan(0.001);
+    expect(receivedChannels.rightRms).toBeGreaterThan(0.001);
+    expect(receivedChannels.correlation).toBeGreaterThan(0.999);
+    expect(receivedChannels.differenceRms).toBeLessThan(
+      Math.max(receivedChannels.leftRms, receivedChannels.rightRms) * 0.01,
+    );
+
+    await test.step("mute and unmute the monitor publication as microphone audio", async () => {
+      await page.getByRole("button", { name: "Mute microphone" }).click();
+      await expect(
+        page.getByRole("button", { name: "Unmute microphone" }),
+      ).toBeVisible();
+      await expect
+        .poll(() => measureRemoteAudioRms(guestPage), { timeout: 30_000 })
+        .toBeLessThan(0.000_1);
+
+      await page.getByRole("button", { name: "Unmute microphone" }).click();
+      await expect(
+        page.getByRole("button", { name: "Mute microphone" }),
+      ).toBeVisible();
+      await expect
+        .poll(() => measureRemoteAudioRms(guestPage), { timeout: 30_000 })
+        .toBeGreaterThan(0.001);
+    });
+
+    await page.getByRole("button", { name: "Start recording" }).click();
+    await expect(
+      guestPage.getByRole("status", { name: "Recording in progress" }),
+    ).toBeVisible({ timeout: 30_000 });
+    await page.waitForTimeout(2_000);
+    await page.getByRole("button", { name: "Stop recording" }).click();
+    await expect(
+      page.getByRole("button", { name: "Start recording" }),
+    ).toBeVisible({ timeout: 60_000 });
+
+    await expect
+      .poll(
+        async () => {
+          const tracks = await db.track.findMany({
+            where: { sessionId },
+            select: {
+              participantId: true,
+              participantName: true,
+              status: true,
+            },
+          });
+          return tracks
+            .map((track) =>
+              [
+                track.participantId?.startsWith("host-local-ch-")
+                  ? track.participantId
+                  : track.participantName,
+                track.status,
+              ].join(":"),
+            )
+            .sort();
+        },
+        { timeout: 60_000 },
+      )
+      .toEqual(
+        [
+          "Additional Channel Guest:complete",
+          "host-local-ch-1:complete",
+          "host-local-ch-2:complete",
+        ].sort(),
+      );
+  } finally {
+    await guestContext.close();
   }
 });

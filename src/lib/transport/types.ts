@@ -57,6 +57,12 @@ export interface Transport {
   publishAudio(stream: MediaStream, options?: { audioBitrate?: number; dtx?: boolean }): Promise<void>;
 
   /**
+   * Remove the manually-managed microphone publication without stopping the
+   * caller-owned source track.
+   */
+  unpublishAudio(): Promise<void>;
+
+  /**
    * Subscribe to lifecycle events. Returns an unsubscribe function.
    */
   on<K extends keyof TransportEvents>(event: K, handler: TransportEvents[K]): () => void;

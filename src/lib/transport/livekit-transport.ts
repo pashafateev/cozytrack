@@ -12,6 +12,8 @@ import {
   ConnectionState,
   Room,
   RoomEvent,
+  Track,
+  type LocalAudioTrack,
   type RemoteParticipant as LKRemoteParticipant,
   type TrackPublishOptions,
 } from "livekit-client";
@@ -94,6 +96,11 @@ export class LiveKitTransport implements Transport {
   // When wrapping an externally-managed Room (e.g. from <LiveKitRoom>),
   // connect/disconnect are no-ops.
   private ownsRoom: boolean;
+  // The same LocalAudioTrack survives LiveKit's reconnect/quality republish
+  // cycle. Replacing its MediaStreamTrack preserves one publication instead of
+  // accumulating a new publication for every input or topology change.
+  private publishedAudioTrack?: LocalAudioTrack;
+  private audioOperation: Promise<void> = Promise.resolve();
 
   constructor(room?: Room) {
     if (room) {
@@ -124,7 +131,10 @@ export class LiveKitTransport implements Transport {
       throw new Error("publishAudio: MediaStream has no audio tracks");
     }
 
-    const publishOptions: TrackPublishOptions = {};
+    const publishOptions: TrackPublishOptions = {
+      forceStereo: false,
+      source: Track.Source.Microphone,
+    };
     if (options?.audioBitrate !== undefined) {
       publishOptions.audioPreset = { maxBitrate: options.audioBitrate };
     }
@@ -132,7 +142,47 @@ export class LiveKitTransport implements Transport {
       publishOptions.dtx = options.dtx;
     }
 
-    await this.room.localParticipant.publishTrack(track, publishOptions);
+    const operation = this.audioOperation
+      .catch(() => {
+        // A failed replace must not poison later fail-closed cleanup.
+      })
+      .then(async () => {
+        if (this.publishedAudioTrack) {
+          await this.publishedAudioTrack.replaceTrack(track, {
+            userProvidedTrack: true,
+          });
+          return;
+        }
+
+        const publication = await this.room.localParticipant.publishTrack(
+          track,
+          publishOptions,
+        );
+        const publishedTrack = publication.audioTrack;
+        if (!publishedTrack) {
+          throw new Error(
+            "publishAudio: LiveKit did not return an audio publication",
+          );
+        }
+        this.publishedAudioTrack = publishedTrack;
+      });
+    this.audioOperation = operation;
+    await operation;
+  }
+
+  async unpublishAudio(): Promise<void> {
+    const operation = this.audioOperation
+      .catch(() => {
+        // Allow cleanup to proceed after a failed initial publish or replace.
+      })
+      .then(async () => {
+        const track = this.publishedAudioTrack;
+        if (!track) return;
+        await this.room.localParticipant.unpublishTrack(track, false);
+        this.publishedAudioTrack = undefined;
+      });
+    this.audioOperation = operation;
+    await operation;
   }
 
   on<K extends keyof TransportEvents>(event: K, handler: TransportEvents[K]): () => void {
