@@ -737,6 +737,150 @@ test("records host plus two guests and stores three completed WebMs", async ({
   }
 });
 
+test("keeps a returning guest in one logical track during an active recording", async ({
+  browser,
+  page,
+}) => {
+  const hostName = "Reconnect Host";
+  const guestName = "Reconnect Guest";
+  const guestContext = await browser.newContext({
+    permissions: ["microphone"],
+    viewport: { width: 1280, height: 720 },
+  });
+
+  try {
+    const sessionId = await createAndJoinHostStudio(
+      page,
+      `Guest reconnect smoke ${Date.now()}`,
+      hostName,
+    );
+    const inviteUrl = await createInviteUrl(page, sessionId);
+    const firstGuestPage = await guestContext.newPage();
+    await joinGuestStudio(firstGuestPage, inviteUrl, sessionId, guestName);
+
+    await test.step("start recording with the guest present", async () => {
+      await page.waitForTimeout(1_000);
+      await page.getByRole("button", { name: "Start recording" }).click();
+      await expect(
+        page.getByRole("button", { name: "Stop recording" }),
+      ).toBeVisible();
+      await expect(
+        firstGuestPage.getByRole("status", {
+          name: "Recording in progress",
+        }),
+      ).toBeVisible({ timeout: 30_000 });
+    });
+
+    await test.step("close the guest tab after its first segment begins", async () => {
+      await expect
+        .poll(
+          async () =>
+            await db.trackSegment.count({
+              where: {
+                track: { sessionId, participantName: guestName },
+              },
+            }),
+          { timeout: 30_000 },
+        )
+        .toBe(1);
+
+      // Let the first timeslice upload before simulating the abrupt tab loss.
+      await firstGuestPage.waitForTimeout(6_000);
+      await firstGuestPage.close();
+      await expect(page.getByText(guestName, { exact: true })).toBeHidden({
+        timeout: 30_000,
+      });
+    });
+
+    const returningGuestPage = await guestContext.newPage();
+    await joinGuestStudio(
+      returningGuestPage,
+      inviteUrl,
+      sessionId,
+      guestName,
+    );
+
+    await test.step("returning guest catches up to the active take", async () => {
+      await expect(
+        returningGuestPage.getByRole("status", {
+          name: "Recording in progress",
+        }),
+      ).toBeVisible({ timeout: 45_000 });
+
+      await expect
+        .poll(
+          async () => {
+            const tracks = await db.track.findMany({
+              where: { sessionId, participantName: guestName },
+              select: {
+                participantId: true,
+                segments: { select: { id: true } },
+              },
+            });
+            return {
+              trackCount: tracks.length,
+              participantIds: tracks.map((track) => track.participantId),
+              segmentCount: tracks.reduce(
+                (total, track) => total + track.segments.length,
+                0,
+              ),
+            };
+          },
+          { timeout: 30_000 },
+        )
+        .toMatchObject({
+          trackCount: 1,
+          participantIds: [expect.stringMatching(/^guest_[0-9a-f-]+$/)],
+          segmentCount: 2,
+        });
+    });
+
+    await test.step("stop and materialize both guest segments once", async () => {
+      await page.waitForTimeout(2_000);
+      await page.getByRole("button", { name: "Stop recording" }).click();
+      await expect(page.getByText("FINALIZING").first()).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "Start recording" }),
+      ).toBeVisible({ timeout: 60_000 });
+
+      await expect
+        .poll(
+          async () => {
+            const tracks = await db.track.findMany({
+              where: { sessionId, participantName: guestName },
+              select: {
+                status: true,
+                segments: {
+                  select: { status: true },
+                  orderBy: { segmentIndex: "asc" },
+                },
+              },
+            });
+            return tracks.map((track) => ({
+              status: track.status,
+              segmentStatuses: track.segments.map((segment) => segment.status),
+            }));
+          },
+          { timeout: 60_000 },
+        )
+        .toEqual([
+          {
+            status: "complete",
+            segmentStatuses: ["complete", "complete"],
+          },
+        ]);
+
+      const guestTrack = await db.track.findFirstOrThrow({
+        where: { sessionId, participantName: guestName },
+        select: { durationMs: true, s3Key: true },
+      });
+      await assertStoredRecording(sessionId, guestTrack);
+    });
+  } finally {
+    await guestContext.close();
+  }
+});
+
 test("publishes the additional host channel as one centered remote track while recording both host channels", async ({
   browser,
   page,
