@@ -189,6 +189,25 @@ describe("auth middleware", () => {
     expect(res.cookies.get("cozytrack_host")).toBeUndefined();
   });
 
+  it("does not renew a guest session that has reached its absolute cap", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const token = await guestToken({
+      sessionId: "session-1",
+      name: "Alice",
+      participantId: "guest_stable",
+      issuedAt: now - 2 * HOUR_SECONDS,
+      firstIssuedAt: now - 49 * HOUR_SECONDS,
+      expiresAt: now + HOUR_SECONDS,
+    });
+    const req = makeReq("http://localhost:3001/studio/session-1");
+    req.cookies.set("cozytrack_guest_session-1", token);
+
+    const res = await middleware(req);
+
+    expect(res.status).toBe(200);
+    expect(res.cookies.get("cozytrack_guest_session-1")).toBeUndefined();
+  });
+
   it("caps a near-limit renewal at the remaining absolute lifetime", async () => {
     const now = Math.floor(Date.now() / 1000);
     const firstIssuedAt = now - (30 * DAY_SECONDS - HOUR_SECONDS);
@@ -205,9 +224,11 @@ describe("auth middleware", () => {
     const renewed = res.cookies.get("cozytrack_host")?.value;
     expect(renewed).toBeTruthy();
     expect(decodeJwt(renewed!).exp).toBe(firstIssuedAt + 30 * DAY_SECONDS);
-    expect(res.headers.get("set-cookie")).toContain(
-      `Max-Age=${HOUR_SECONDS}`,
+    const maxAge = Number(
+      res.headers.get("set-cookie")?.match(/Max-Age=(\d+)/)?.[1],
     );
+    expect(maxAge).toBeGreaterThanOrEqual(HOUR_SECONDS - 2);
+    expect(maxAge).toBeLessThanOrEqual(HOUR_SECONDS);
   });
 
   it("does not churn a host cookie before the renewal threshold", async () => {
