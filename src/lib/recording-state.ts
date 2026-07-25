@@ -11,6 +11,7 @@ export type ParticipantRecordingStatus =
 export type RecordingTakeState = {
   active: boolean;
   sessionStartedAt: string | null;
+  recoveryPending?: boolean;
   take: {
     id: string;
     sessionId: string;

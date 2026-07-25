@@ -119,12 +119,33 @@ function serializeTake(take: RecordingTakeWithStatuses | null) {
 function serializeRecordingState(
   take: RecordingTakeWithStatuses | null,
   active: boolean,
+  recoveryPending = false,
 ) {
   return {
     active,
     sessionStartedAt: active ? take?.startedAt.toISOString() ?? null : null,
     take: serializeTake(take),
+    ...(recoveryPending ? { recoveryPending: true } : {}),
   };
+}
+
+async function recoverStoppedTakeForResponse(
+  takeId: string | null,
+): Promise<boolean> {
+  if (!takeId) return false;
+  try {
+    await recoverStoppedTakeTracks(takeId);
+    return false;
+  } catch (error) {
+    // The take transition is already committed. Media recovery can be retried
+    // by later stopped-take/upload recovery paths, but it must not make the
+    // host believe the authoritative stop failed and leave the room recording.
+    console.error(
+      `[recording-state] take=${takeId} stopped with media recovery pending:`,
+      error,
+    );
+    return true;
+  }
 }
 
 function serializeParticipantStatus(status: {
@@ -316,16 +337,16 @@ export async function POST(
       if (outcome.kind === "forbidden") {
         return NextResponse.json({ error: "forbidden" }, { status: 403 });
       }
-      if (outcome.recoveryTakeId) {
-        await recoverStoppedTakeTracks(outcome.recoveryTakeId);
-      }
+      const recoveryPending = await recoverStoppedTakeForResponse(
+        outcome.recoveryTakeId,
+      );
       if (outcome.kind === "active") {
         return NextResponse.json(
-          serializeRecordingState(outcome.take, true),
+          serializeRecordingState(outcome.take, true, recoveryPending),
         );
       }
       return NextResponse.json(
-        serializeRecordingState(outcome.take, false),
+        serializeRecordingState(outcome.take, false, recoveryPending),
       );
     }
 
@@ -358,18 +379,20 @@ export async function POST(
       });
       return { stopped, recoveryTakeId: stopped.id };
     });
-    if (stopOutcome.recoveryTakeId) {
-      await recoverStoppedTakeTracks(stopOutcome.recoveryTakeId);
-    }
+    const recoveryPending = await recoverStoppedTakeForResponse(
+      stopOutcome.recoveryTakeId,
+    );
 
     // Keep the existing idempotent behavior: if there's no active take
     // (already stopped, or a retry after the first stop landed), report
     // inactive so a retrying client converges.
     if (!stopOutcome.stopped) {
-      return NextResponse.json(serializeRecordingState(null, false));
+      return NextResponse.json(
+        serializeRecordingState(null, false, recoveryPending),
+      );
     }
     return NextResponse.json(
-      serializeRecordingState(stopOutcome.stopped, false),
+      serializeRecordingState(stopOutcome.stopped, false, recoveryPending),
     );
   } catch (error) {
     console.error("Failed to update recording state:", error);
