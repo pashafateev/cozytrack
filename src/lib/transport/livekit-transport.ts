@@ -12,6 +12,7 @@ import {
   ConnectionState,
   Room,
   RoomEvent,
+  Track,
   type LocalAudioTrack,
   type RemoteParticipant as LKRemoteParticipant,
   type TrackPublishOptions,
@@ -130,7 +131,10 @@ export class LiveKitTransport implements Transport {
       throw new Error("publishAudio: MediaStream has no audio tracks");
     }
 
-    const publishOptions: TrackPublishOptions = { forceStereo: false };
+    const publishOptions: TrackPublishOptions = {
+      forceStereo: false,
+      source: Track.Source.Microphone,
+    };
     if (options?.audioBitrate !== undefined) {
       publishOptions.audioPreset = { maxBitrate: options.audioBitrate };
     }
