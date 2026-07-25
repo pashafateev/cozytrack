@@ -15,22 +15,41 @@ const GUEST_COOKIE_PREFIX = "cozytrack_guest_"; // + sessionId
 
 const HOST_SESSION_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
 const GUEST_SESSION_TTL_SECONDS = 60 * 60 * 12; // 12 hours
+const HOST_SESSION_RENEW_AFTER_SECONDS = 60 * 60 * 24; // 24 hours
+const GUEST_SESSION_RENEW_AFTER_SECONDS = 60 * 60; // 1 hour
+const HOST_SESSION_ABSOLUTE_CAP_SECONDS = 60 * 60 * 24 * 30; // 30 days
+const GUEST_SESSION_ABSOLUTE_CAP_SECONDS = 60 * 60 * 48; // 48 hours
 const INVITE_TOKEN_TTL_SECONDS = 60 * 60 * 48; // 48 hours
 const RECORDING_UPLOAD_TTL_SECONDS = 60 * 60 * 12; // 12 hours
 const HOST_PARTICIPANT_ID = "host";
 
-export type HostPrincipal = { kind: "host"; participantId: typeof HOST_PARTICIPANT_ID };
+type SessionTiming = {
+  /** JWT issue time. Optional so existing test doubles remain compatible. */
+  issuedAt?: number;
+  /** Original issue time, preserved through sliding renewals. */
+  firstIssuedAt?: number;
+};
+
+export type HostPrincipal = SessionTiming & {
+  kind: "host";
+  participantId: typeof HOST_PARTICIPANT_ID;
+};
 export type GuestPrincipal = {
   kind: "guest";
   sessionId: string;
   name: string;
   participantId: string;
-};
+} & SessionTiming;
 export type Principal = HostPrincipal | GuestPrincipal;
 export type RecordingUploadPrincipal = {
   kind: "recording_upload";
   sessionId: string;
   trackId: string;
+};
+export type SessionCookieRenewal = {
+  value: string;
+  /** Remaining JWT lifetime; use as the refreshed cookie Max-Age. */
+  ttl: number;
 };
 
 function getSecret(): Uint8Array {
@@ -45,28 +64,112 @@ function getSecret(): Uint8Array {
 
 // ---------- Host sessions ----------
 
-export async function issueHostSessionCookie(): Promise<string> {
-  return await new SignJWT({})
+function nowSeconds(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
+function numericDate(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.floor(value)
+    : undefined;
+}
+
+function sessionTiming(payload: {
+  iat?: unknown;
+  firstIssuedAt?: unknown;
+}): SessionTiming {
+  const issuedAt = numericDate(payload.iat);
+  return {
+    issuedAt,
+    // Tokens issued before sliding renewal have no firstIssuedAt claim.
+    // Their original iat becomes the absolute-cap origin on first renewal.
+    firstIssuedAt: numericDate(payload.firstIssuedAt) ?? issuedAt,
+  };
+}
+
+function renewalTtl(
+  principal: SessionTiming,
+  input: {
+    ttl: number;
+    renewAfter: number;
+    absoluteCap: number;
+  },
+): { now: number; firstIssuedAt: number; ttl: number } | null {
+  const { issuedAt, firstIssuedAt } = principal;
+  if (issuedAt === undefined || firstIssuedAt === undefined) return null;
+
+  const now = nowSeconds();
+  if (now - issuedAt < input.renewAfter) return null;
+
+  const absoluteExpiresAt = firstIssuedAt + input.absoluteCap;
+  if (now >= absoluteExpiresAt) return null;
+
+  // Never mint past the absolute cap. Near the cap, refresh only for the
+  // remaining lifetime instead of silently extending the cap by a full TTL.
+  const ttl = Math.min(input.ttl, absoluteExpiresAt - now);
+  if (ttl <= 0) return null;
+  return { now, firstIssuedAt, ttl };
+}
+
+async function signHostSession(
+  issuedAt: number,
+  firstIssuedAt: number,
+  ttl: number,
+): Promise<string> {
+  return await new SignJWT({ firstIssuedAt })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuer("cozytrack")
     .setAudience("cozytrack:host")
     .setSubject("host")
-    .setIssuedAt()
-    .setExpirationTime(`${HOST_SESSION_TTL_SECONDS}s`)
+    .setIssuedAt(issuedAt)
+    .setExpirationTime(issuedAt + ttl)
     .sign(getSecret());
+}
+
+export async function issueHostSessionCookie(): Promise<string> {
+  const issuedAt = nowSeconds();
+  return await signHostSession(
+    issuedAt,
+    issuedAt,
+    HOST_SESSION_TTL_SECONDS,
+  );
 }
 
 export async function verifyHostCookie(token: string | undefined): Promise<HostPrincipal | null> {
   if (!token) return null;
   try {
-    await jwtVerify(token, getSecret(), {
+    const { payload } = await jwtVerify(token, getSecret(), {
       issuer: "cozytrack",
       audience: "cozytrack:host",
     });
-    return { kind: "host", participantId: HOST_PARTICIPANT_ID };
+    return {
+      kind: "host",
+      participantId: HOST_PARTICIPANT_ID,
+      ...sessionTiming(payload),
+    };
   } catch {
     return null;
   }
+}
+
+export async function renewHostSessionCookie(
+  principal: HostPrincipal,
+): Promise<SessionCookieRenewal | null> {
+  const renewal = renewalTtl(principal, {
+    ttl: HOST_SESSION_TTL_SECONDS,
+    renewAfter: HOST_SESSION_RENEW_AFTER_SECONDS,
+    absoluteCap: HOST_SESSION_ABSOLUTE_CAP_SECONDS,
+  });
+  if (!renewal) return null;
+
+  return {
+    value: await signHostSession(
+      renewal.now,
+      renewal.firstIssuedAt,
+      renewal.ttl,
+    ),
+    ttl: renewal.ttl,
+  };
 }
 
 // ---------- Guest invite tokens ----------
@@ -103,20 +206,40 @@ export async function issueGuestSessionCookie(
 ): Promise<{ cookieName: string; value: string; ttl: number; participantId: string }> {
   const participantId =
     existingParticipantId ?? `guest_${globalThis.crypto.randomUUID()}`;
-  const value = await new SignJWT({ sessionId, name, participantId })
-    .setProtectedHeader({ alg: "HS256" })
-    .setIssuer("cozytrack")
-    .setAudience("cozytrack:guest")
-    .setSubject(`guest:${sessionId}`)
-    .setIssuedAt()
-    .setExpirationTime(`${GUEST_SESSION_TTL_SECONDS}s`)
-    .sign(getSecret());
+  const issuedAt = nowSeconds();
+  const value = await signGuestSession(
+    { sessionId, name, participantId },
+    issuedAt,
+    issuedAt,
+    GUEST_SESSION_TTL_SECONDS,
+  );
   return {
     cookieName: guestCookieName(sessionId),
     value,
     ttl: GUEST_SESSION_TTL_SECONDS,
     participantId,
   };
+}
+
+async function signGuestSession(
+  principal: Pick<GuestPrincipal, "sessionId" | "name" | "participantId">,
+  issuedAt: number,
+  firstIssuedAt: number,
+  ttl: number,
+): Promise<string> {
+  return await new SignJWT({
+    sessionId: principal.sessionId,
+    name: principal.name,
+    participantId: principal.participantId,
+    firstIssuedAt,
+  })
+    .setProtectedHeader({ alg: "HS256" })
+    .setIssuer("cozytrack")
+    .setAudience("cozytrack:guest")
+    .setSubject(`guest:${principal.sessionId}`)
+    .setIssuedAt(issuedAt)
+    .setExpirationTime(issuedAt + ttl)
+    .sign(getSecret());
 }
 
 export async function verifyGuestCookie(
@@ -134,10 +257,37 @@ export async function verifyGuestCookie(
     if (typeof payload.participantId !== "string" || payload.participantId.length === 0) {
       return null;
     }
-    return { kind: "guest", sessionId, name, participantId: payload.participantId };
+    return {
+      kind: "guest",
+      sessionId,
+      name,
+      participantId: payload.participantId,
+      ...sessionTiming(payload),
+    };
   } catch {
     return null;
   }
+}
+
+export async function renewGuestSessionCookie(
+  principal: GuestPrincipal,
+): Promise<SessionCookieRenewal | null> {
+  const renewal = renewalTtl(principal, {
+    ttl: GUEST_SESSION_TTL_SECONDS,
+    renewAfter: GUEST_SESSION_RENEW_AFTER_SECONDS,
+    absoluteCap: GUEST_SESSION_ABSOLUTE_CAP_SECONDS,
+  });
+  if (!renewal) return null;
+
+  return {
+    value: await signGuestSession(
+      principal,
+      renewal.now,
+      renewal.firstIssuedAt,
+      renewal.ttl,
+    ),
+    ttl: renewal.ttl,
+  };
 }
 
 export function principalParticipantId(principal: Principal): string {
@@ -287,4 +437,11 @@ export const AUTH_TTLS = {
   guestSession: GUEST_SESSION_TTL_SECONDS,
   invite: INVITE_TOKEN_TTL_SECONDS,
   recordingUpload: RECORDING_UPLOAD_TTL_SECONDS,
+} as const;
+
+export const AUTH_RENEWAL = {
+  hostAfter: HOST_SESSION_RENEW_AFTER_SECONDS,
+  guestAfter: GUEST_SESSION_RENEW_AFTER_SECONDS,
+  hostAbsoluteCap: HOST_SESSION_ABSOLUTE_CAP_SECONDS,
+  guestAbsoluteCap: GUEST_SESSION_ABSOLUTE_CAP_SECONDS,
 } as const;

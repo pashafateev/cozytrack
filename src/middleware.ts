@@ -16,6 +16,8 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   verifyHostCookie,
   verifyGuestCookie,
+  renewHostSessionCookie,
+  renewGuestSessionCookie,
   AUTH_COOKIES,
   isGuestCookieName,
 } from "@/lib/auth";
@@ -81,6 +83,42 @@ function isRecordingUploadEndpoint(pathname: string): boolean {
   );
 }
 
+function setRenewedCookie(
+  response: NextResponse,
+  name: string,
+  value: string,
+  maxAge: number,
+): void {
+  response.cookies.set(name, value, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/",
+    maxAge,
+  });
+}
+
+async function verifyAndRenewGuestCookie(
+  response: NextResponse,
+  cookieName: string,
+  cookieValue: string | undefined,
+  sessionId: string,
+): Promise<boolean> {
+  const guest = await verifyGuestCookie(cookieValue, sessionId);
+  if (!guest) return false;
+
+  const renewal = await renewGuestSessionCookie(guest);
+  if (renewal) {
+    setRenewedCookie(
+      response,
+      cookieName,
+      renewal.value,
+      renewal.ttl,
+    );
+  }
+  return true;
+}
+
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
@@ -95,24 +133,60 @@ export async function middleware(req: NextRequest) {
 
   const hostCookie = req.cookies.get(AUTH_COOKIES.host)?.value;
   const host = await verifyHostCookie(hostCookie);
-  if (host) return NextResponse.next();
+  if (host) {
+    const response = NextResponse.next();
+    const renewal = await renewHostSessionCookie(host);
+    if (renewal) {
+      setRenewedCookie(
+        response,
+        AUTH_COOKIES.host,
+        renewal.value,
+        renewal.ttl,
+      );
+    }
+    return response;
+  }
 
   // Session-scoped route: accept a matching guest cookie.
   const sessionId = extractSessionId(pathname);
   if (sessionId) {
-    const guestCookie = req.cookies.get(AUTH_COOKIES.guest(sessionId))?.value;
-    const guest = await verifyGuestCookie(guestCookie, sessionId);
-    if (guest) return NextResponse.next();
+    const cookieName = AUTH_COOKIES.guest(sessionId);
+    const response = NextResponse.next();
+    if (
+      await verifyAndRenewGuestCookie(
+        response,
+        cookieName,
+        req.cookies.get(cookieName)?.value,
+        sessionId,
+      )
+    ) {
+      return response;
+    }
   }
 
   // Guest-allowed upload endpoints: the route handler inspects the request
-  // body and matches it to the guest cookie. Middleware can't read the body
-  // (streams aren't cloneable here), so we let any request with *some* guest
-  // cookie continue to the handler, which does the real check.
+  // body and matches it to the guest cookie. Middleware can't read the body,
+  // so verify every guest cookie against the session id encoded in its name,
+  // renew the valid ones, and let the route handler enforce request scope.
   if (isGuestAllowedForSessionEndpoint(pathname)) {
     const guestCookies = req.cookies.getAll().filter((c) => isGuestCookieName(c.name));
-    if (guestCookies.length > 0) {
-      return NextResponse.next();
+    const response = NextResponse.next();
+    let hasValidGuest = false;
+    for (const guestCookie of guestCookies) {
+      const guestSessionId = guestCookie.name.slice(
+        AUTH_COOKIES.guestPrefix.length,
+      );
+      if (!guestSessionId) continue;
+      const isValid = await verifyAndRenewGuestCookie(
+        response,
+        guestCookie.name,
+        guestCookie.value,
+        guestSessionId,
+      );
+      hasValidGuest = isValid || hasValidGuest;
+    }
+    if (hasValidGuest) {
+      return response;
     }
   }
 
