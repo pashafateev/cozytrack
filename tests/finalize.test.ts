@@ -109,7 +109,10 @@ vi.mock("@/lib/db", () => {
   };
 });
 
-import { POST } from "@/app/api/sessions/[id]/finalize/route";
+import {
+  POST,
+  maxDuration,
+} from "@/app/api/sessions/[id]/finalize/route";
 import { NextRequest } from "next/server";
 
 function req(): NextRequest {
@@ -125,6 +128,10 @@ beforeEach(() => {
 });
 
 describe("POST /api/sessions/[id]/finalize", () => {
+  it("reserves enough function time for long-track media recovery", () => {
+    expect(maxDuration).toBeGreaterThanOrEqual(300);
+  });
+
   it("returns 404 when the session does not exist", async () => {
     const res = await POST(req(), { params: Promise.resolve({ id: "missing" }) });
     expect(res.status).toBe(404);

@@ -334,6 +334,41 @@ describe("recoverTrack", () => {
     expect(trackStore.get("t1")?.partial).toBe(false);
   });
 
+  it("reads long recovery chunks with bounded concurrency while preserving order", async () => {
+    seedTrack();
+    const chunkCount = 20;
+    for (let partNumber = 0; partNumber < chunkCount; partNumber += 1) {
+      putS3(
+        `sessions/s1/tracks/t1/${partNumber}.webm`,
+        new Uint8Array([partNumber]),
+      );
+    }
+
+    const { getObjectBytes } = (await import("@/lib/s3")) as unknown as {
+      getObjectBytes: ReturnType<typeof vi.fn>;
+    };
+    let activeReads = 0;
+    let maxActiveReads = 0;
+    getObjectBytes.mockImplementation(async (key: string) => {
+      activeReads += 1;
+      maxActiveReads = Math.max(maxActiveReads, activeReads);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      activeReads -= 1;
+      const bytes = s3Objects.get(key);
+      if (!bytes) throw new Error(`missing object ${key}`);
+      return bytes;
+    });
+
+    const result = await recoverTrack("t1");
+
+    expect(result.outcome).toBe("recovered_from_chunks");
+    expect(maxActiveReads).toBeGreaterThan(1);
+    expect(maxActiveReads).toBeLessThanOrEqual(8);
+    expect(
+      s3Objects.get("sessions/s1/tracks/t1/recording.webm"),
+    ).toEqual(new Uint8Array(Array.from({ length: chunkCount }, (_, i) => i)));
+  });
+
   it("flags partial=true when chunks have gaps in the partNumber sequence", async () => {
     seedTrack();
     // Missing partNumber 2 in the middle.
