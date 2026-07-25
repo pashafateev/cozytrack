@@ -230,7 +230,7 @@ beforeEach(() => {
 });
 
 describe("/api/sessions/[id]/recording-state", () => {
-  it("retries stopped-take track recovery after the stop transition lands", async () => {
+  it("acknowledges a durable stop while track recovery remains pending", async () => {
     mocks.takes.set("take-1", {
       id: "take-1",
       sessionId: "s1",
@@ -238,16 +238,24 @@ describe("/api/sessions/[id]/recording-state", () => {
       stoppedAt: null,
       status: "recording",
     });
-    mocks.recoverStoppedTakeTracks.mockRejectedValueOnce(
+    mocks.recoverStoppedTakeTracks.mockRejectedValue(
       new Error("transient recovery failure"),
     );
 
-    const failed = await setRecordingState(
+    const stopped = await setRecordingState(
       request("POST", { active: false, takeId: "take-1" }),
       params(),
     );
 
-    expect(failed.status).toBe(500);
+    expect(stopped.status).toBe(200);
+    await expect(stopped.json()).resolves.toMatchObject({
+      active: false,
+      recoveryPending: true,
+      take: {
+        id: "take-1",
+        status: "stopped",
+      },
+    });
     expect(mocks.takes.get("take-1")?.status).toBe("stopped");
 
     const retried = await setRecordingState(
@@ -256,6 +264,14 @@ describe("/api/sessions/[id]/recording-state", () => {
     );
 
     expect(retried.status).toBe(200);
+    await expect(retried.json()).resolves.toMatchObject({
+      active: false,
+      recoveryPending: true,
+      take: {
+        id: "take-1",
+        status: "stopped",
+      },
+    });
     expect(mocks.recoverStoppedTakeTracks).toHaveBeenCalledTimes(2);
     expect(mocks.recoverStoppedTakeTracks).toHaveBeenCalledWith("take-1");
   });

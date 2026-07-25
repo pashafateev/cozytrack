@@ -46,4 +46,37 @@ describe("StudioPage participant role labels", () => {
       studio.screen.getByRole("button", { name: "Stop recording" }),
     ).toBeTruthy();
   });
+
+  it("broadcasts and stops locally when the durable stop has recovery pending", async () => {
+    const studio = renderHostStudioPage();
+
+    await studio.join();
+
+    fireEvent.click(studio.screen.getByRole("button", { name: "Start recording" }));
+    await studio.screen.findByRole("button", { name: "Stop recording" });
+
+    studio.harness.sendControlMessage.mockClear();
+    studio.harness.recorderStop.mockClear();
+    studio.harness.stopRecordingTake.mockResolvedValueOnce({
+      active: false,
+      sessionStartedAt: null,
+      recoveryPending: true,
+      take: {
+        id: "take-1",
+        sessionId: "session-host",
+        startedAt: "2026-06-27T12:00:00.000Z",
+        stoppedAt: "2026-06-27T12:01:00.000Z",
+        status: "stopped",
+      },
+    });
+
+    fireEvent.click(studio.screen.getByRole("button", { name: "Stop recording" }));
+
+    await waitFor(() => {
+      expect(studio.harness.sendControlMessage).toHaveBeenCalledWith({
+        type: "recording_stop",
+      });
+      expect(studio.harness.recorderStop).toHaveBeenCalled();
+    });
+  });
 });
