@@ -192,7 +192,7 @@ describe("StudioPage exit guard", () => {
     await studio.join();
 
     fireEvent.click(
-      studio.screen.getByRole("checkbox", { name: /two-channel local/i }),
+      studio.screen.getByRole("checkbox", { name: /additional channel/i }),
     );
     await studio.screen.findByText("Local Ch 1");
 
@@ -249,7 +249,7 @@ describe("StudioPage exit guard", () => {
     await studio.join();
 
     fireEvent.click(
-      studio.screen.getByRole("checkbox", { name: /two-channel local/i }),
+      studio.screen.getByRole("checkbox", { name: /additional channel/i }),
     );
     await studio.screen.findByText("Local Ch 1");
 
@@ -295,7 +295,7 @@ describe("StudioPage exit guard", () => {
     await studio.join();
 
     fireEvent.click(
-      studio.screen.getByRole("checkbox", { name: /two-channel local/i }),
+      studio.screen.getByRole("checkbox", { name: /additional channel/i }),
     );
     await studio.screen.findByText("Local Ch 1");
 
@@ -528,7 +528,7 @@ describe("StudioPage exit guard", () => {
     studio: ReturnType<typeof renderHostStudioPage>,
   ) {
     fireEvent.click(
-      studio.screen.getByRole("checkbox", { name: /two-channel local/i }),
+      studio.screen.getByRole("checkbox", { name: /additional channel/i }),
     );
     await studio.screen.findByText("Local Ch 1");
 
