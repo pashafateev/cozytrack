@@ -321,7 +321,7 @@ beforeEach(() => {
   studioPageHarness.enumerateDevices
     .mockReset()
     .mockResolvedValue([audioInput("usb-mic", "Shure MV7")]);
-  studioPageHarness.listBackups.mockClear();
+  studioPageHarness.listBackups.mockReset().mockResolvedValue([]);
   studioPageHarness.audioContexts.length = 0;
   studioPageHarness.startRecordingTake.mockReset().mockResolvedValue({
     active: true,

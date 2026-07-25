@@ -146,8 +146,6 @@ describe("StudioPage exit guard", () => {
 
   it("does not arm when listing local backups fails at mount", async () => {
     const studio = renderHostStudioPage();
-    // Once, not permanent: the helper's beforeEach only mockClear()s this
-    // shared mock, so a persistent rejection would leak into later tests.
     studio.harness.listBackups.mockRejectedValueOnce(new Error("idb wedged"));
 
     await studio.join();
