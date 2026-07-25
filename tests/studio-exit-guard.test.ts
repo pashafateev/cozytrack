@@ -169,6 +169,12 @@ describe("StudioPage exit guard", () => {
     studio.harness.recordingBackupStore.clearBackup.mockRejectedValue(
       new Error("idb wedged"),
     );
+    // verified-upload cleanup now persists the server-confirmed state before
+    // deleting local data. Model the leftover manifest instead of hiding the
+    // cleanup failure behind the default empty list.
+    studio.harness.listBackups.mockResolvedValue([
+      backupManifest({ state: "uploaded" }),
+    ]);
 
     fireEvent.click(
       studio.screen.getByRole("button", { name: "Start recording" }),
