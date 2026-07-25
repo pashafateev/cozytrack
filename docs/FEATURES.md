@@ -1,6 +1,6 @@
 # Cozytrack Roadmap
 
-This roadmap was reconciled against every GitHub issue that was open on July 23, 2026 (52 open issues).
+This roadmap was reconciled against every GitHub issue that was open on July 25, 2026 (53 open issues).
 
 - Every currently open issue appears exactly once as a primary roadmap entry below.
 - No open issues are explicitly excluded right now.
@@ -37,6 +37,7 @@ This roadmap was reconciled against every GitHub issue that was open on July 23,
 - #53 Ambient audio-only session visual: explore a calm screen presence that can coexist with trustworthy meters and later respond subtly to room audio.
 - #81 Recovery-state badges in the dashboard: surface partial and failed recovery outcomes clearly enough that hosts can see which tracks need attention.
 - #183 Observable backup-store studio state: derive the exit guard and recovery panel from recoverable backup snapshots instead of the current hand-maintained `hasUnconfirmedUpload` cache and race-referee bookkeeping.
+- #187 Mobile studio layout pass: decide whether phone-sized viewports should be hard-gated or properly supported, then make the studio chrome, control cluster, overlays, and padding behave predictably on narrow screens.
 
 ### Delivery and repo operations
 
