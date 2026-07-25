@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   takes: new Map<string, RecordingTake>(),
   participantStatuses: new Map<string, RecordingTakeParticipantStatus>(),
   resolvePrincipal: vi.fn(),
+  recoverStoppedTakeTracks: vi.fn(),
   nextTakeId: 1,
 }));
 
@@ -190,6 +191,10 @@ vi.mock("@/lib/auth", async () => {
   };
 });
 
+vi.mock("@/lib/recovery", () => ({
+  recoverStoppedTakeTracks: mocks.recoverStoppedTakeTracks,
+}));
+
 import { NextRequest } from "next/server";
 import {
   GET as getRecordingState,
@@ -221,9 +226,40 @@ beforeEach(() => {
     kind: "host",
     participantId: "host",
   });
+  mocks.recoverStoppedTakeTracks.mockResolvedValue([]);
 });
 
 describe("/api/sessions/[id]/recording-state", () => {
+  it("retries stopped-take track recovery after the stop transition lands", async () => {
+    mocks.takes.set("take-1", {
+      id: "take-1",
+      sessionId: "s1",
+      startedAt: new Date("2026-06-01T12:00:00.000Z"),
+      stoppedAt: null,
+      status: "recording",
+    });
+    mocks.recoverStoppedTakeTracks.mockRejectedValueOnce(
+      new Error("transient recovery failure"),
+    );
+
+    const failed = await setRecordingState(
+      request("POST", { active: false, takeId: "take-1" }),
+      params(),
+    );
+
+    expect(failed.status).toBe(500);
+    expect(mocks.takes.get("take-1")?.status).toBe("stopped");
+
+    const retried = await setRecordingState(
+      request("POST", { active: false, takeId: "take-1" }),
+      params(),
+    );
+
+    expect(retried.status).toBe(200);
+    expect(mocks.recoverStoppedTakeTracks).toHaveBeenCalledTimes(2);
+    expect(mocks.recoverStoppedTakeTracks).toHaveBeenCalledWith("take-1");
+  });
+
   it("lets hosts create, read, and close an active recording take", async () => {
     const startedAt = "2026-06-01T12:00:00.000Z";
 

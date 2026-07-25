@@ -7,6 +7,7 @@ const materializationMocks = vi.hoisted(() => ({
 type Track = {
   id: string;
   sessionId: string;
+  takeId?: string | null;
   s3Key: string;
   status: string;
   partial: boolean;
@@ -36,6 +37,19 @@ function putS3(key: string, bytes: Uint8Array, lastModified?: Date) {
 vi.mock("@/lib/db", () => ({
   db: {
     track: {
+      findMany: vi.fn(
+        async ({ where: { takeId } }: { where: { takeId: string } }) =>
+          Array.from(trackStore.values())
+            .filter((track) => track.takeId === takeId)
+            .map((track) => ({
+              id: track.id,
+              status: track.status,
+              segments: Array.from(segmentStore.values())
+                .filter((segment) => segment.trackId === track.id)
+                .sort((a, b) => a.segmentIndex - b.segmentIndex)
+                .map((segment) => structuredClone(segment)),
+            })),
+      ),
       findUnique: vi.fn(
         async ({
           where: { id },
@@ -218,6 +232,7 @@ vi.mock("@/lib/track-materialization", () => ({
 
 import {
   recoverInterruptedTrackSegments,
+  recoverStoppedTakeTracks,
   recoverTrack,
 } from "@/lib/recovery";
 
@@ -933,5 +948,50 @@ describe("recoverInterruptedTrackSegments", () => {
       recoveredSegmentIds: [],
       partial: true,
     });
+  });
+});
+
+describe("recoverStoppedTakeTracks", () => {
+  it("rematerializes a completed latest segment after stopped-take recovery and retries failures", async () => {
+    seedTrack({
+      takeId: "take-1",
+      status: "complete",
+    });
+    seedSegment({ id: "t1", segmentIndex: 0, status: "recording" });
+    seedSegment({
+      id: "seg-2",
+      segmentIndex: 1,
+      status: "complete",
+      durationMs: 5000,
+    });
+    putS3("sessions/s1/tracks/t1/0.webm", new Uint8Array([0xaa]));
+    putS3("sessions/s1/tracks/t1/1.webm", new Uint8Array([0xbb]));
+    materializationMocks.materializeTrack.mockImplementationOnce(
+      async (trackId: string) => {
+        const track = trackStore.get(trackId);
+        if (track) {
+          trackStore.set(trackId, { ...track, status: "failed" });
+        }
+        return {
+          trackId,
+          status: "failed",
+          s3Key: "sessions/s1/tracks/t1/recording.webm",
+          segmentCount: 2,
+          durationMs: null,
+        };
+      },
+    );
+
+    await expect(recoverStoppedTakeTracks("take-1")).rejects.toThrow(
+      "failed to materialize",
+    );
+    expect(segmentStore.get("t1")?.status).toBe("complete");
+    expect(trackStore.get("t1")?.status).toBe("failed");
+
+    const retried = await recoverStoppedTakeTracks("take-1");
+
+    expect(retried).toEqual(["t1"]);
+    expect(materializationMocks.materializeTrack).toHaveBeenCalledTimes(2);
+    expect(trackStore.get("t1")?.status).toBe("complete");
   });
 });
