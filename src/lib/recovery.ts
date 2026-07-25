@@ -352,6 +352,15 @@ export async function recoverStoppedTakeTracks(
       partial: false,
     };
     if (hasInterruptedOlderSegment) {
+      // Invalidate an already-complete logical artifact before changing any
+      // segment to complete. If recovery or remuxing then fails (or the
+      // process exits between those steps), the next stop retry sees a
+      // non-complete track and rematerializes instead of trusting the old,
+      // truncated artifact.
+      await db.track.updateMany({
+        where: { id: track.id, status: "complete" },
+        data: { status: "uploading" },
+      });
       recovered = await recoverInterruptedTrackSegments(
         track.id,
         latestSegment.segmentIndex,
@@ -359,6 +368,7 @@ export async function recoverStoppedTakeTracks(
     }
 
     const shouldMaterialize =
+      hasInterruptedOlderSegment ||
       recovered.recoveredSegmentIds.length > 0 ||
       recovered.partial ||
       track.status !== "complete";
