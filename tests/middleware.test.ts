@@ -114,6 +114,27 @@ describe("auth middleware", () => {
     expect(res.status).toBe(200);
   });
 
+  it("keeps recording-token fallback when a guest cookie has expired", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const token = await guestToken({
+      sessionId: "session-1",
+      name: "Alice",
+      participantId: "guest_stable",
+      issuedAt: now - 13 * HOUR_SECONDS,
+      firstIssuedAt: now - 13 * HOUR_SECONDS,
+      expiresAt: now - HOUR_SECONDS,
+    });
+    const req = makeReq("http://localhost:3001/api/upload/presign", {
+      "x-cozytrack-recording-token": "recording-token",
+    });
+    req.cookies.set("cozytrack_guest_session-1", token);
+
+    const res = await middleware(req);
+
+    expect(res.status).toBe(200);
+    expect(res.cookies.get("cozytrack_guest_session-1")).toBeUndefined();
+  });
+
   it("keeps upload requests without cookies or recording token unauthorized", async () => {
     const res = await middleware(
       makeReq("http://localhost:3001/api/upload/presign")
@@ -171,6 +192,38 @@ describe("auth middleware", () => {
       participantId: "guest_stable",
       firstIssuedAt: issuedAt,
     });
+  });
+
+  it.each([
+    "/api/upload/presign",
+    "/api/upload/complete",
+    "/api/livekit-token",
+  ])("renews a guest cookie during activity on %s", async (pathname) => {
+    const now = Math.floor(Date.now() / 1000);
+    const issuedAt = now - 2 * HOUR_SECONDS;
+    const token = await guestToken({
+      sessionId: "session-1",
+      name: "Alice",
+      participantId: "guest_stable",
+      issuedAt,
+      firstIssuedAt: issuedAt,
+      expiresAt: now + 10 * HOUR_SECONDS,
+    });
+
+    const req = makeReq(`http://localhost:3001${pathname}`);
+    req.cookies.set("cozytrack_guest_session-1", token);
+    const res = await middleware(req);
+
+    expect(res.status).toBe(200);
+    const renewed = res.cookies.get("cozytrack_guest_session-1")?.value;
+    expect(renewed).toBeTruthy();
+    expect(decodeJwt(renewed!)).toMatchObject({
+      sessionId: "session-1",
+      name: "Alice",
+      participantId: "guest_stable",
+      firstIssuedAt: issuedAt,
+    });
+    expect(decodeJwt(renewed!).iat).toBeGreaterThan(issuedAt);
   });
 
   it("does not renew a session that has reached its absolute cap", async () => {
