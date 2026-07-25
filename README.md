@@ -39,6 +39,25 @@ Storage and services
 
 Recording audio does not need to pass through the app server. The server authorizes uploads, stores metadata, and can attempt recovery from already-uploaded objects if a browser exits at the wrong time.
 
+### Hosting and runtime boundaries
+
+- Vercel hosts the Next.js UI and API control plane: authentication, token
+  minting, session metadata, upload authorization, finalization, and ingest
+  coordination.
+- LiveKit carries realtime room audio, while recording uploads and downloads go
+  directly between browsers or downstream tools and S3 through presigned URLs.
+  Routine media bytes must not be proxied through the Next.js app.
+- Finalize recovery is the current exception: it can read orphaned chunks from
+  S3 and materialize a logical track inline. That path reserves a 300-second
+  function window, reads at most eight chunks concurrently, and caps stitch
+  input at 512 MiB.
+- New media workloads such as waveform extraction, bulk archive creation,
+  aligned-stem generation, or drift correction should not be added
+  synchronously to request handlers. When one of those workloads becomes
+  active—or inline recovery exceeds its duration or resource limits—move the
+  media work behind a durable job/worker while keeping Vercel as the web and
+  control plane.
+
 ## Tech Stack
 
 - **Next.js 15** with App Router and TypeScript
