@@ -19,11 +19,21 @@ type RecordingTakeParticipantStatus = {
   updatedAt: Date;
 };
 
+type Track = {
+  id: string;
+  takeId: string;
+  participantId: string | null;
+  status: string;
+};
+
 const mocks = vi.hoisted(() => ({
   sessions: new Set<string>(),
   takes: new Map<string, RecordingTake>(),
+  tracks: new Map<string, Track>(),
   participantStatuses: new Map<string, RecordingTakeParticipantStatus>(),
   resolvePrincipal: vi.fn(),
+  listParticipants: vi.fn(),
+  recoverTrack: vi.fn(),
   recoverStoppedTakeTracks: vi.fn(),
   nextTakeId: 1,
 }));
@@ -156,6 +166,22 @@ vi.mock("@/lib/db", () => {
         },
       ),
     },
+    track: {
+      findMany: vi.fn(
+        async ({
+          where,
+        }: {
+          where: { takeId: string; status?: { notIn?: string[] } };
+        }) =>
+          Array.from(mocks.tracks.values())
+            .filter(
+              (track) =>
+                track.takeId === where.takeId &&
+                !where.status?.notIn?.includes(track.status),
+            )
+            .map((track) => ({ ...track })),
+      ),
+    },
   };
   let transactionTail = Promise.resolve();
   const transaction = vi.fn(
@@ -192,7 +218,14 @@ vi.mock("@/lib/auth", async () => {
 });
 
 vi.mock("@/lib/recovery", () => ({
+  recoverTrack: mocks.recoverTrack,
   recoverStoppedTakeTracks: mocks.recoverStoppedTakeTracks,
+}));
+
+vi.mock("livekit-server-sdk", () => ({
+  RoomServiceClient: vi.fn(() => ({
+    listParticipants: mocks.listParticipants,
+  })),
 }));
 
 import { NextRequest } from "next/server";
@@ -218,18 +251,66 @@ function request(method: "GET" | "PATCH" | "POST", body?: Record<string, unknown
 beforeEach(() => {
   mocks.sessions.clear();
   mocks.takes.clear();
+  mocks.tracks.clear();
   mocks.participantStatuses.clear();
   mocks.sessions.add("s1");
   mocks.nextTakeId = 1;
   vi.clearAllMocks();
+  vi.stubEnv("LIVEKIT_URL", "ws://127.0.0.1:7880");
+  vi.stubEnv("LIVEKIT_API_KEY", "devkey");
+  vi.stubEnv("LIVEKIT_API_SECRET", "devsecret");
   mocks.resolvePrincipal.mockResolvedValue({
     kind: "host",
     participantId: "host",
+  });
+  mocks.listParticipants.mockResolvedValue([]);
+  mocks.recoverTrack.mockResolvedValue({
+    trackId: "track-guest",
+    outcome: "recovered_from_chunks",
+    partial: false,
+    status: "complete",
+    chunkCount: 1,
+    missingPartNumbers: [],
   });
   mocks.recoverStoppedTakeTracks.mockResolvedValue([]);
 });
 
 describe("/api/sessions/[id]/recording-state", () => {
+  it("recovers an absent participant without touching connected recorders after stop", async () => {
+    mocks.takes.set("take-1", {
+      id: "take-1",
+      sessionId: "s1",
+      startedAt: new Date("2026-06-01T12:00:00.000Z"),
+      stoppedAt: null,
+      status: "recording",
+    });
+    mocks.tracks.set("track-host", {
+      id: "track-host",
+      takeId: "take-1",
+      participantId: "host",
+      status: "recording",
+    });
+    mocks.tracks.set("track-guest", {
+      id: "track-guest",
+      takeId: "take-1",
+      participantId: "guest_disconnected",
+      status: "recording",
+    });
+    mocks.listParticipants.mockResolvedValue([{ identity: "host" }]);
+
+    const stopped = await setRecordingState(
+      request("POST", { active: false, takeId: "take-1" }),
+      params(),
+    );
+
+    expect(stopped.status).toBe(200);
+    expect(mocks.takes.get("take-1")?.status).toBe("stopped");
+    expect(mocks.listParticipants).toHaveBeenCalledWith("s1");
+    expect(mocks.recoverTrack).toHaveBeenCalledTimes(1);
+    expect(mocks.recoverTrack).toHaveBeenCalledWith("track-guest");
+    expect(mocks.recoverTrack).not.toHaveBeenCalledWith("track-host");
+  });
+
   it("acknowledges a durable stop while track recovery remains pending", async () => {
     mocks.takes.set("take-1", {
       id: "take-1",
