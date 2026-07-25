@@ -259,6 +259,48 @@ async function joinGuestStudio(
   });
 }
 
+async function measureRemoteAudioRms(page: Page): Promise<number> {
+  return page.evaluate(async () => {
+    const remoteAudio = Array.from(document.querySelectorAll("audio")).find(
+      (element) => {
+        const stream = element.srcObject as MediaStream | null;
+        return stream?.getAudioTracks().some(
+          (track) => track.readyState === "live",
+        );
+      },
+    );
+    const stream = remoteAudio?.srcObject as MediaStream | null;
+    if (!stream) throw new Error("remote audio stream unavailable");
+
+    const context = new AudioContext();
+    await context.resume();
+    const source = context.createMediaStreamSource(stream);
+    const analyser = context.createAnalyser();
+    const sink = context.createGain();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0;
+    sink.gain.value = 0;
+    source.connect(analyser);
+    analyser.connect(sink).connect(context.destination);
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const samples = new Float32Array(analyser.fftSize);
+      analyser.getFloatTimeDomainData(samples);
+      let squares = 0;
+      for (const sample of samples) {
+        squares += sample * sample;
+      }
+      return Math.sqrt(squares / samples.length);
+    } finally {
+      source.disconnect();
+      analyser.disconnect();
+      sink.disconnect();
+      await context.close();
+    }
+  });
+}
+
 async function assertStoredRecording(
   sessionId: string,
   track: { durationMs: number | null; s3Key: string | null },
@@ -828,6 +870,24 @@ test("publishes the additional host channel as one centered remote track while r
     expect(receivedChannels.differenceRms).toBeLessThan(
       Math.max(receivedChannels.leftRms, receivedChannels.rightRms) * 0.01,
     );
+
+    await test.step("mute and unmute the monitor publication as microphone audio", async () => {
+      await page.getByRole("button", { name: "Mute microphone" }).click();
+      await expect(
+        page.getByRole("button", { name: "Unmute microphone" }),
+      ).toBeVisible();
+      await expect
+        .poll(() => measureRemoteAudioRms(guestPage), { timeout: 30_000 })
+        .toBeLessThan(0.000_1);
+
+      await page.getByRole("button", { name: "Unmute microphone" }).click();
+      await expect(
+        page.getByRole("button", { name: "Mute microphone" }),
+      ).toBeVisible();
+      await expect
+        .poll(() => measureRemoteAudioRms(guestPage), { timeout: 30_000 })
+        .toBeGreaterThan(0.001);
+    });
 
     await page.getByRole("button", { name: "Start recording" }).click();
     await expect(

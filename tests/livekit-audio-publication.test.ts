@@ -51,6 +51,7 @@ describe("LiveKitTransport monitor audio publication", () => {
       audioPreset: { maxBitrate: 128_000 },
       dtx: false,
       forceStereo: false,
+      source: "microphone",
     });
   });
 
