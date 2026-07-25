@@ -129,13 +129,16 @@ describe("auth middleware", () => {
       firstIssuedAt: issuedAt,
       expiresAt: now + 6 * DAY_SECONDS,
     });
-    expect(await verifyHostCookie(token)).not.toBeNull();
+    const principal = await verifyHostCookie(token);
+    expect(principal).toMatchObject({
+      issuedAt,
+      firstIssuedAt: issuedAt,
+    });
 
-    const res = await middleware(
-      makeReq("http://localhost:3001/dashboard", {
-        cookie: `cozytrack_host=${token}`,
-      }),
-    );
+    const req = makeReq("http://localhost:3001/dashboard");
+    req.cookies.set("cozytrack_host", token);
+    expect(req.cookies.get("cozytrack_host")?.value).toBe(token);
+    const res = await middleware(req);
 
     const renewed = res.cookies.get("cozytrack_host")?.value;
     expect(renewed).toBeTruthy();
@@ -156,11 +159,9 @@ describe("auth middleware", () => {
       expiresAt: now + 10 * HOUR_SECONDS,
     });
 
-    const res = await middleware(
-      makeReq("http://localhost:3001/studio/session-1", {
-        cookie: `cozytrack_guest_session-1=${token}`,
-      }),
-    );
+    const req = makeReq("http://localhost:3001/studio/session-1");
+    req.cookies.set("cozytrack_guest_session-1", token);
+    const res = await middleware(req);
 
     const renewed = res.cookies.get("cozytrack_guest_session-1")?.value;
     expect(renewed).toBeTruthy();
@@ -180,11 +181,47 @@ describe("auth middleware", () => {
       expiresAt: now + HOUR_SECONDS,
     });
 
-    const res = await middleware(
-      makeReq("http://localhost:3001/dashboard", {
-        cookie: `cozytrack_host=${token}`,
-      }),
+    const req = makeReq("http://localhost:3001/dashboard");
+    req.cookies.set("cozytrack_host", token);
+    const res = await middleware(req);
+
+    expect(res.status).toBe(200);
+    expect(res.cookies.get("cozytrack_host")).toBeUndefined();
+  });
+
+  it("caps a near-limit renewal at the remaining absolute lifetime", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const firstIssuedAt = now - (30 * DAY_SECONDS - HOUR_SECONDS);
+    const token = await hostToken({
+      issuedAt: now - 25 * HOUR_SECONDS,
+      firstIssuedAt,
+      expiresAt: now + 2 * HOUR_SECONDS,
+    });
+    const req = makeReq("http://localhost:3001/dashboard");
+    req.cookies.set("cozytrack_host", token);
+
+    const res = await middleware(req);
+
+    const renewed = res.cookies.get("cozytrack_host")?.value;
+    expect(renewed).toBeTruthy();
+    expect(decodeJwt(renewed!).exp).toBe(firstIssuedAt + 30 * DAY_SECONDS);
+    expect(res.headers.get("set-cookie")).toContain(
+      `Max-Age=${HOUR_SECONDS}`,
     );
+  });
+
+  it("does not churn a host cookie before the renewal threshold", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const issuedAt = now - 23 * HOUR_SECONDS;
+    const token = await hostToken({
+      issuedAt,
+      firstIssuedAt: issuedAt,
+      expiresAt: now + 6 * DAY_SECONDS,
+    });
+    const req = makeReq("http://localhost:3001/dashboard");
+    req.cookies.set("cozytrack_host", token);
+
+    const res = await middleware(req);
 
     expect(res.status).toBe(200);
     expect(res.cookies.get("cozytrack_host")).toBeUndefined();
@@ -198,11 +235,9 @@ describe("auth middleware", () => {
       expiresAt: now + 6 * DAY_SECONDS,
     });
 
-    const res = await middleware(
-      makeReq("http://localhost:3001/dashboard", {
-        cookie: `cozytrack_host=${token}`,
-      }),
-    );
+    const req = makeReq("http://localhost:3001/dashboard");
+    req.cookies.set("cozytrack_host", token);
+    const res = await middleware(req);
 
     const renewed = res.cookies.get("cozytrack_host")?.value;
     expect(renewed).toBeTruthy();
