@@ -58,12 +58,9 @@ export async function POST(req: NextRequest) {
     if (existingSegment.trackId !== trackId) {
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
-    if (
+    const alreadyComplete =
       existingSegment.status === "complete" &&
-      existingTrack.status === "complete"
-    ) {
-      return NextResponse.json(existingTrack);
-    }
+      existingTrack.status === "complete";
     if (existingSegment.status === "failed") {
       return NextResponse.json(
         { error: "Track segment is terminal" },
@@ -94,6 +91,7 @@ export async function POST(req: NextRequest) {
     const latestSegment = segments[segments.length - 1];
     const latestSegmentComplete = latestSegment.status === "complete";
     let recoveredPartial = false;
+    let recoveredStoppedTake = false;
 
     if (
       latestSegmentComplete &&
@@ -110,7 +108,16 @@ export async function POST(req: NextRequest) {
           existingSegment.segmentIndex,
         );
         recoveredPartial = recovered.partial;
+        recoveredStoppedTake = true;
       }
+    }
+
+    // A completed logical track is normally idempotent, but the latest
+    // segment of a stopped take must still retry interrupted sibling recovery.
+    // A previous attempt can fail after the replacement segment completed but
+    // before invalidating/rematerializing the stale logical artifact.
+    if (alreadyComplete && !recoveredStoppedTake) {
+      return NextResponse.json(existingTrack);
     }
 
     let track;
