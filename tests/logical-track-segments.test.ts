@@ -308,7 +308,10 @@ beforeEach(() => {
     recoveredSegmentIds: [],
     partial: false,
   });
-  mocks.materializeTrack.mockImplementation(async (trackId: string) => {
+  mocks.materializeTrack.mockImplementation(async (
+    trackId: string,
+    options?: { partial?: boolean },
+  ) => {
     const track = mocks.tracks.get(trackId);
     if (!track) throw new Error("track not found");
     const segments = Array.from(mocks.segments.values())
@@ -336,7 +339,7 @@ beforeEach(() => {
       status: "complete",
       s3Key,
       durationMs,
-      partial: false,
+      partial: options?.partial ?? false,
     });
     return {
       trackId,
@@ -1252,7 +1255,7 @@ describe("logical track segments", () => {
         }
         return {
           recoveredSegmentIds: ["logical-track"],
-          partial: false,
+          partial: true,
         };
       },
     );
@@ -1282,7 +1285,10 @@ describe("logical track segments", () => {
     );
     expect(mocks.segments.get("logical-track")?.status).toBe("complete");
     expect(mocks.segments.get("browser-seg-2")?.status).toBe("complete");
-    expect(mocks.materializeTrack).toHaveBeenCalledTimes(1);
+    expect(mocks.materializeTrack).toHaveBeenCalledWith("logical-track", {
+      partial: true,
+    });
+    expect(mocks.tracks.get("logical-track")?.partial).toBe(true);
   });
 
   it("retries stopped-take recovery before completing the logical track", async () => {

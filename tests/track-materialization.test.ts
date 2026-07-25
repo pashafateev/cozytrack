@@ -397,9 +397,47 @@ describe("materializeTrack", () => {
     });
   });
 
-  it("preserves an existing partial marker when rematerialization succeeds", async () => {
-    seedTrack({ status: "failed", partial: true });
-    seedSegment({ id: "track-1", durationMs: 12345 });
+  it("preserves an existing partial marker when rematerialization is retried", async () => {
+    seedTrack({ status: "uploading", partial: true });
+    seedSegment({ id: "track-1", segmentIndex: 0, durationMs: 1000 });
+    seedSegment({ id: "segment-2", segmentIndex: 1, durationMs: 5000 });
+    mocks.remuxSegments.mockRejectedValueOnce(new Error("ffmpeg failed"));
+
+    const failed = await materializeTrack("track-1", {
+      readObjectBytes: mocks.readObjectBytes,
+      writeObjectBytes: mocks.writeObjectBytes,
+      remuxSegments: mocks.remuxSegments,
+    });
+
+    expect(failed.status).toBe("failed");
+    expect(mocks.tracks.get("track-1")).toMatchObject({
+      status: "failed",
+      partial: true,
+    });
+
+    const retried = await materializeTrack("track-1", {
+      readObjectBytes: mocks.readObjectBytes,
+      writeObjectBytes: mocks.writeObjectBytes,
+      remuxSegments: mocks.remuxSegments,
+    });
+
+    expect(retried.status).toBe("complete");
+    expect(mocks.tracks.get("track-1")).toMatchObject({
+      status: "complete",
+      partial: true,
+    });
+  });
+
+  it("does not clear a partial marker written during materialization", async () => {
+    seedTrack({ status: "uploading", partial: false });
+    seedSegment({ id: "track-1", segmentIndex: 0, durationMs: 1000 });
+    seedSegment({ id: "segment-2", segmentIndex: 1, durationMs: 5000 });
+    mocks.remuxSegments.mockImplementationOnce(async () => {
+      const track = mocks.tracks.get("track-1");
+      if (track) {
+        mocks.tracks.set("track-1", { ...track, partial: true });
+      }
+    });
 
     const result = await materializeTrack("track-1", {
       readObjectBytes: mocks.readObjectBytes,

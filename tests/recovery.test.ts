@@ -251,7 +251,7 @@ beforeEach(() => {
         ...track,
         status: "complete",
         s3Key,
-        partial: options?.partial ?? false,
+        partial: track.partial || options?.partial || false,
       });
       return {
         trackId,
@@ -731,6 +731,66 @@ describe("recoverTrack", () => {
       partial: true,
       skipMissingSegments: true,
     });
+  });
+
+  it("retains gapped segment partial state when materialization is retried", async () => {
+    seedTrack({ status: "uploading" });
+    seedSegment({ id: "t1", segmentIndex: 0, status: "complete" });
+    seedSegment({
+      id: "seg-2",
+      segmentIndex: 1,
+      status: "recording",
+      createdAt: new Date(Date.now() - 600_000),
+    });
+    putS3(
+      "sessions/s1/tracks/t1/segments/seg-2/0.webm",
+      new Uint8Array([0xaa]),
+      new Date(Date.now() - 600_000),
+    );
+    putS3(
+      "sessions/s1/tracks/t1/segments/seg-2/2.webm",
+      new Uint8Array([0xcc]),
+      new Date(Date.now() - 600_000),
+    );
+    materializationMocks.materializeTrack.mockResolvedValueOnce({
+      trackId: "t1",
+      status: "failed",
+      s3Key: "sessions/s1/tracks/t1/recording.webm",
+      segmentCount: 2,
+      durationMs: null,
+    });
+
+    const failed = await recoverTrack("t1", {
+      chunkStitchMinAgeMs: 30_000,
+    });
+
+    expect(failed).toMatchObject({
+      outcome: "failed_materialization",
+      partial: true,
+    });
+    expect(trackStore.get("t1")?.partial).toBe(true);
+    expect(segmentStore.get("seg-2")?.status).toBe("complete");
+
+    const retried = await recoverTrack("t1", {
+      chunkStitchMinAgeMs: 30_000,
+    });
+
+    expect(retried).toMatchObject({
+      outcome: "recovered_from_recording",
+      status: "complete",
+      partial: true,
+    });
+    expect(trackStore.get("t1")).toMatchObject({
+      status: "complete",
+      partial: true,
+    });
+    expect(materializationMocks.materializeTrack).toHaveBeenLastCalledWith(
+      "t1",
+      {
+        partial: true,
+        skipMissingSegments: true,
+      },
+    );
   });
 
   it("flags partial when stitching default chunks under a dead newer segment", async () => {
