@@ -160,6 +160,11 @@ function formatParticipantList(names: string[]): string {
   return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
 }
 
+function departureBannerMessage(names: string[]): string {
+  const tracks = names.length === 1 ? "their track" : "their tracks";
+  return `${formatParticipantList(names)} left during recording — ${tracks} may be incomplete.`;
+}
+
 function displayNameFromMetadata(metadata: string | undefined): string | undefined {
   return parseParticipantMetadata(metadata)?.displayName;
 }
@@ -837,6 +842,13 @@ function RoomContent({
   const [notification, setNotification] = useState<string | null>(null);
   const notificationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [hasRecorded, setHasRecorded] = useState(false);
+  // True from a successful take start until the lifecycle reports that every
+  // slot confirmed server-side (onStopSettled), or a backup retry leaves no
+  // recoverable audio behind. This — not backupError/recoveryBackup — feeds
+  // the exit guard: backup state also covers unrelated store failures (mount
+  // listBackups errors, verified-backup cleanup failures) that must not read
+  // as "your audio didn't upload".
+  const [hasUnconfirmedUpload, setHasUnconfirmedUpload] = useState(false);
   const [recoveryBackup, setRecoveryBackup] =
     useState<RecordingBackupManifest | null>(null);
   const recoveryBackupRef = useRef<RecordingBackupManifest | null>(null);
@@ -851,6 +863,39 @@ function RoomContent({
     },
     [],
   );
+
+  // Shared settling step for every event that may resolve (or reveal) locally
+  // backed-up audio: a take finishing clean, a backup retry succeeding, or
+  // the user discarding a backup. The durable store is the only witness to
+  // audio from earlier takes — the in-session surfacing tracks only the
+  // current take's slots — so: surface the next recoverable backup (the
+  // panel holds one at a time) and keep the exit guard armed exactly while
+  // one remains. If the store can't be read, stay armed and surface the
+  // failure so the panel still offers a way forward.
+  //
+  // The epoch discards stale results: a settle races the next take's start
+  // (which pre-arms the guard), and a slow listBackups resolving afterwards
+  // must not overwrite that newer `true` with its old `false`. Every settle
+  // and every take start bumps the epoch; a settle only writes state if the
+  // epoch is still its own when the store answers.
+  const unconfirmedSettleEpochRef = useRef(0);
+  const settleUnconfirmedFromBackupStore = useCallback(async () => {
+    const epoch = ++unconfirmedSettleEpochRef.current;
+    try {
+      const backups = await browserRecordingBackupStore.listBackups(sessionId);
+      if (epoch !== unconfirmedSettleEpochRef.current) return;
+      const leftover =
+        backups.find((item) => isRecoverableBackup(item)) ?? null;
+      setRecoveryBackupSync(leftover);
+      setHasUnconfirmedUpload(leftover !== null);
+    } catch (err) {
+      console.error("Failed to re-check local backups:", err);
+      if (epoch !== unconfirmedSettleEpochRef.current) return;
+      setRecoveryBackupSync(null);
+      setBackupError(backupErrorMessage(err));
+      setHasUnconfirmedUpload(true);
+    }
+  }, [sessionId, setRecoveryBackupSync]);
 
   // Elapsed recording timer
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -923,6 +968,93 @@ function RoomContent({
       if (notificationTimerRef.current) clearTimeout(notificationTimerRef.current);
     };
   }, []);
+
+  // ---- Participant presence (departures / rejoins) ----
+  //
+  // LiveKit absorbs brief network blips server-side before dropping someone
+  // from `remoteParticipants`, so a disappearance here means they genuinely
+  // left the room. Departures outside a take get a transient toast; mid-take
+  // departures get the persistent banner below (their track is at risk).
+  // Names are captured at departure time because the participant — and their
+  // display name — is gone from the room afterwards.
+  //
+  // `departedParticipants` accumulates for the finalize flow: a finalize poll
+  // stuck on a departed participant's track should say "left the session",
+  // not "still uploading". A rejoin removes them again.
+  const [departedParticipants, setDepartedParticipants] = useState<
+    Map<string, string>
+  >(new Map());
+  const departedParticipantsRef = useRef<Map<string, string>>(new Map());
+  const [midRecordingDepartures, setMidRecordingDepartures] = useState<
+    Map<string, string>
+  >(new Map());
+  // Null until the first observation so the initial roster (everyone already
+  // in the room when we join) never reads as a wave of rejoins.
+  const prevRemoteParticipantsRef = useRef<Map<string, string> | null>(null);
+
+  useEffect(() => {
+    const current = new Map<string, string>();
+    for (const participant of remoteParticipants) {
+      current.set(
+        participant.identity,
+        remoteParticipantNames.get(participant.identity) ??
+          participant.identity,
+      );
+    }
+    const prev = prevRemoteParticipantsRef.current;
+    prevRemoteParticipantsRef.current = current;
+    if (prev === null) return;
+
+    // One roster update can drop several participants at once (e.g. a
+    // network partition); the toast holds a single message, so aggregate
+    // the names instead of letting each call overwrite the previous one.
+    const departedNames: string[] = [];
+    for (const [identity, name] of prev) {
+      if (current.has(identity)) continue;
+      const departed = new Map(departedParticipantsRef.current);
+      departed.set(identity, name);
+      departedParticipantsRef.current = departed;
+      setDepartedParticipants(departed);
+      if (studioStateRef.current === "recording") {
+        setMidRecordingDepartures((m) => new Map(m).set(identity, name));
+      } else {
+        departedNames.push(name);
+      }
+    }
+    if (departedNames.length > 0) {
+      showNotification(
+        `${formatParticipantList(departedNames)} left the session`,
+      );
+    }
+
+    const rejoinedNames: string[] = [];
+    for (const [identity, name] of current) {
+      if (prev.has(identity)) continue;
+      if (!departedParticipantsRef.current.has(identity)) continue;
+      const departed = new Map(departedParticipantsRef.current);
+      departed.delete(identity);
+      departedParticipantsRef.current = departed;
+      setDepartedParticipants(departed);
+      setMidRecordingDepartures((m) => {
+        if (!m.has(identity)) return m;
+        const next = new Map(m);
+        next.delete(identity);
+        return next;
+      });
+      rejoinedNames.push(name);
+    }
+    if (rejoinedNames.length > 0) {
+      showNotification(`${formatParticipantList(rejoinedNames)} rejoined`);
+    }
+  }, [remoteParticipants, remoteParticipantNames, showNotification]);
+
+  // The banner warns about the take in progress; once that take stops the
+  // finalize flow owns the messaging (via departedParticipants above).
+  useEffect(() => {
+    if (studioState !== "recording") {
+      setMidRecordingDepartures((m) => (m.size === 0 ? m : new Map()));
+    }
+  }, [studioState]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1580,6 +1712,15 @@ function RoomContent({
         callbacks: {
           onRecoveryBackup: setRecoveryBackupSync,
           onBackupError: setBackupError,
+          onStopSettled: ({ allCompleted }) => {
+            if (!allCompleted) {
+              setHasUnconfirmedUpload(true);
+              return;
+            }
+            // This take confirmed, but an earlier take may have left audio
+            // behind (Codex P1 on #169) — let the store decide.
+            void settleUnconfirmedFromBackupStore();
+          },
           onBackupUnavailable: () =>
             showNotification("Local backup unavailable - remote upload only"),
           onTiming: (event) => {
@@ -1594,6 +1735,7 @@ function RoomContent({
     [
       sessionId,
       setRecoveryBackupSync,
+      settleUnconfirmedFromBackupStore,
       showNotification,
       timingDebug,
       trackerFreezeRecorded,
@@ -1705,6 +1847,15 @@ function RoomContent({
         return false;
       }
 
+      // Arm for the whole startup window, not just from the first resolved
+      // outcome: presign creates server-side tracks while start() is still
+      // in flight, so leaving mid-startup already strands audio (Codex P1 on
+      // #169). The !result.ok branch below settles the flag from rollback
+      // state; onStopSettled owns it once the take is running. Bumping the
+      // epoch invalidates any store re-check still in flight from a previous
+      // take, whose stale empty answer would otherwise disarm this take.
+      unconfirmedSettleEpochRef.current += 1;
+      setHasUnconfirmedUpload(true);
       const result = await recordingLifecycle.start(slotSpecs.specs, {
         sessionStartedAt: sessionStartedAtIso,
         takeId: effectiveTakeId,
@@ -1722,6 +1873,14 @@ function RoomContent({
           return true;
         }
         clearRecordingConfirmationState();
+        // start() awaits rollback before resolving, so the surfaced backup
+        // state is settled here. A rollback that failed to finalize a
+        // started slot keeps its backup — that audio never confirmed, so the
+        // exit guard must arm (Codex P1 on #169). A clean rollback leaves
+        // nothing recoverable and the guard stays down.
+        setHasUnconfirmedUpload(
+          isRecoverableBackup(recoveryBackupRef.current),
+        );
         void broadcastRecordingStatus(
           "failed",
           sessionStartedAtIso,
@@ -1856,8 +2015,8 @@ function RoomContent({
       const recovered = await retryLocalRecordingBackupUpload(latest);
       setRecoveryBackupSync(recovered);
       await browserRecordingBackupStore.clearBackup(recovered.id, "verified-upload");
-      setRecoveryBackupSync(null);
       setHasRecorded(true);
+      await settleUnconfirmedFromBackupStore();
       showNotification("Local backup uploaded");
     } catch (error) {
       const message = backupErrorMessage(error);
@@ -1872,7 +2031,12 @@ function RoomContent({
     } finally {
       setBackupAction("idle");
     }
-  }, [backupAction, setRecoveryBackupSync, showNotification]);
+  }, [
+    backupAction,
+    setRecoveryBackupSync,
+    settleUnconfirmedFromBackupStore,
+    showNotification,
+  ]);
 
   const handleDownloadLocalBackup = useCallback(async () => {
     if (backupAction !== "idle") return;
@@ -1912,13 +2076,17 @@ function RoomContent({
     setBackupError(null);
     try {
       await browserRecordingBackupStore.clearBackup(current.id, "user-confirmed");
-      setRecoveryBackupSync(null);
+      // Discarding is the user resolving this audio: hand the panel the next
+      // recoverable backup and only disarm the exit guard when none remain —
+      // leaving the flag untouched here kept the guard armed forever with no
+      // UI left to resolve it (Codex P1 on #169).
+      await settleUnconfirmedFromBackupStore();
     } catch (error) {
       setBackupError(backupErrorMessage(error));
     } finally {
       setBackupAction("idle");
     }
-  }, [backupAction, setRecoveryBackupSync]);
+  }, [backupAction, settleUnconfirmedFromBackupStore]);
 
   // Synchronous "request in flight" guards. Set true at the top of the click
   // handler before any await so a rapid second click is dropped immediately
@@ -2240,18 +2408,27 @@ function RoomContent({
   ]);
 
 
-  // Block accidental navigation while recording, finalizing, or uploading.
-  // Covers tab close (beforeunload), browser back/forward (popstate), in-app
-  // <a>/Link clicks, and form submits (e.g. the topbar sign-out POST). See
-  // #73 for the live-test repro and #49 for the original tab-close warning
-  // this supersedes.
+  // Block accidental navigation while recording, finalizing, uploading, or
+  // sitting on audio that never confirmed upload. Covers tab close
+  // (beforeunload), browser back/forward (popstate), in-app <a>/Link clicks,
+  // and form submits (e.g. the topbar sign-out POST). See #73 for the
+  // live-test repro and #49 for the original tab-close warning this
+  // supersedes. A failed upload settles the in-flight count, so
+  // hasInflight alone would disarm exactly when leaving loses audio —
+  // hasUnconfirmedUpload (fed by the lifecycle's onStopSettled) keeps the
+  // guard up until every slot confirms server-side. Stale backups from a
+  // previous visit intentionally do not arm it: the recovery panel handles
+  // those, and their audio is durable in IndexedDB either way.
   useNavigationGuard({
     when:
       studioState === "recording" ||
       studioState === "finalizing" ||
-      uploadTracker.hasInflight,
+      uploadTracker.hasInflight ||
+      hasUnconfirmedUpload,
     message:
-      "Recording is in progress and may be lost if you leave. Leave anyway?",
+      studioState === "recording"
+        ? "Recording is in progress and may be lost if you leave. Leave anyway?"
+        : "Your audio hasn't finished uploading and may be lost if you leave. Leave anyway?",
   });
 
   useEffect(() => {
@@ -2544,6 +2721,31 @@ function RoomContent({
             </button>
           </div>
         )}
+        {/* Mid-recording departure card — a departed participant's track may
+            be incomplete, which is consequential enough to outlast a 4s
+            toast. Cleared on dismiss, on rejoin, or when the take stops. */}
+        {midRecordingDepartures.size > 0 && (
+          <div
+            className="flex items-center gap-2.5 px-4 py-3 rounded-[10px] border backdrop-blur-[6px]"
+            style={{
+              background: "rgba(34,26,69,0.92)",
+              borderColor: "rgba(255,179,71,0.28)",
+            }}
+          >
+            <IcoAlert size={14} color="var(--warn)" />
+            <span className="text-[12px] text-warn flex-1">
+              {departureBannerMessage(
+                Array.from(midRecordingDepartures.values()),
+              )}
+            </span>
+            <button
+              onClick={() => setMidRecordingDepartures(new Map())}
+              className="text-[11px] text-warn/70 hover:text-warn underline font-sans"
+            >
+              dismiss
+            </button>
+          </div>
+        )}
         {isHost && twoChannelMode && !twoChannelChipsActive && (
           <div
             role="status"
@@ -2590,6 +2792,22 @@ function RoomContent({
             progress={uploadTracker.progress}
             recordingStopped={studioState !== "recording"}
           />
+          {/* Positive all-clear: guests otherwise have to guess when leaving
+              stops risking their track. Host wording drops the close-tab cue —
+              their next step is finalizing, not leaving. */}
+          {hasRecorded &&
+            studioState === "connected" &&
+            !uploadTracker.hasInflight &&
+            !hasUnconfirmedUpload && (
+              <span
+                className="font-sans text-[10px] text-center px-1 pt-2 max-w-[110px] leading-tight"
+                style={{ color: "var(--ok)" }}
+              >
+                {isHost
+                  ? "All audio uploaded"
+                  : "All audio uploaded — safe to close this tab"}
+              </span>
+            )}
         </div>
       )}
 
@@ -2656,6 +2874,9 @@ function RoomContent({
               <FinishRecordingButton
                 sessionId={sessionId}
                 waitForUploads={uploadTracker.waitForUploads}
+                departedParticipantNames={Array.from(
+                  departedParticipants.values(),
+                )}
               />
             )}
 

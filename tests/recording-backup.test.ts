@@ -277,4 +277,32 @@ describe("recording backup store", () => {
       "not found",
     );
   });
+
+  it("persists server-confirmed state before verified-upload cleanup can fail", async () => {
+    const backend = new MemoryRecordingBackupBackend(true);
+    const store = new RecordingBackupStore(backend);
+    const manifest = await store.startBackup({
+      sessionId: "session-1",
+      trackId: "track-1",
+      participantName: "Alice",
+    });
+    await store.saveChunk({
+      sessionId: "session-1",
+      trackId: "track-1",
+      chunkIndex: 0,
+      chunk: blob("first"),
+    });
+    await store.markBackupAvailable(manifest.id, 5_000);
+    vi.spyOn(backend, "deleteChunk").mockRejectedValueOnce(
+      new Error("IndexedDB cleanup failed"),
+    );
+
+    await expect(
+      store.clearBackup(manifest.id, "verified-upload"),
+    ).rejects.toThrow("IndexedDB cleanup failed");
+
+    expect(await store.getBackup(manifest.id)).toMatchObject({
+      state: "uploaded",
+    });
+  });
 });

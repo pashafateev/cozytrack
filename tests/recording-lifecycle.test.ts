@@ -102,6 +102,7 @@ function makeHarness(
     errors: [] as (string | null)[],
     unavailable: [] as string[],
     timing: [] as Record<string, unknown>[],
+    stopSettled: [] as { allCompleted: boolean }[],
   };
   let clock = 1_000;
   let trackSeq = 0;
@@ -268,6 +269,7 @@ function makeHarness(
       onBackupError: (message) => events.errors.push(message),
       onBackupUnavailable: (spec) => events.unavailable.push(spec.participantName),
       onTiming: (event) => events.timing.push(event),
+      onStopSettled: (outcome) => events.stopSettled.push(outcome),
     },
   });
 
@@ -1015,5 +1017,49 @@ describe("RecordingLifecycleController stop", () => {
     expect(again).toEqual({ ok: true });
     expect(h.recorders).toHaveLength(2);
     expect(h.tracker.reset).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("RecordingLifecycleController stop settlement", () => {
+  it("reports allCompleted when every slot confirms server-side", async () => {
+    const h = makeHarness();
+    await h.controller.start([slotSpec(1), slotSpec(2)], START_OPTS);
+
+    await h.controller.stop();
+
+    expect(h.events.stopSettled).toEqual([{ allCompleted: true }]);
+  });
+
+  it("reports allCompleted false when any slot's completion fails", async () => {
+    const h = makeHarness();
+    h.uploadApi.completeUpload.mockRejectedValueOnce(
+      new Error("complete failed"),
+    );
+    await h.controller.start([slotSpec(1), slotSpec(2)], START_OPTS);
+
+    await h.controller.stop();
+
+    expect(h.events.stopSettled).toEqual([{ allCompleted: false }]);
+  });
+
+  it("keeps allCompleted true when only verified-backup cleanup fails", async () => {
+    // The track is confirmed on the server; a failed local clearBackup is a
+    // housekeeping error and must not read as an unconfirmed upload.
+    const h = makeHarness();
+    h.backupStore.clearBackup.mockRejectedValueOnce(new Error("idb wedged"));
+    await h.controller.start([primarySpec()], START_OPTS);
+
+    const result = await h.controller.stop();
+
+    expect(result.anyCompleted).toBe(true);
+    expect(h.events.stopSettled).toEqual([{ allCompleted: true }]);
+  });
+
+  it("does not fire when there was nothing to stop", async () => {
+    const h = makeHarness();
+
+    await h.controller.stop();
+
+    expect(h.events.stopSettled).toEqual([]);
   });
 });
