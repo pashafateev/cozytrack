@@ -2,7 +2,7 @@
 
 Cozytrack is a self-hosted podcast recording studio built for local-first audio capture. Each participant records their own microphone in the browser, hears the room through LiveKit, and uploads separate WebM/Opus tracks to S3-compatible storage for later mixing.
 
-The product goal is simple: make it obvious what people are recording before the session is over. The longer feature roadmap and issue-backed planning live in [docs/FEATURES.md](docs/FEATURES.md).
+The product goal is simple: make it obvious what people are recording before the session is over. Product planning and future work are tracked in [GitHub Issues](https://github.com/pashafateev/cozytrack/issues).
 
 ## What Works Today
 
@@ -273,7 +273,6 @@ src/lib/
 prisma/schema.prisma        Session and Track models
 scripts/                    Local dev, reset, smoke test, and cleanup scripts
 infra/                      S3 CORS setup files
-docs/FEATURES.md            Roadmap and feature specs
 ```
 
 ## Deployment Notes
