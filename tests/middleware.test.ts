@@ -1,6 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { decodeJwt, SignJWT } from "jose";
 import { NextRequest } from "next/server";
 import { middleware, config as middlewareConfig } from "../src/middleware";
+import { verifyHostCookie } from "@/lib/auth";
+
+const AUTH_SECRET = "test-secret-for-middleware-renewal-123456";
+const secret = new TextEncoder().encode(AUTH_SECRET);
+const HOUR_SECONDS = 60 * 60;
+const DAY_SECONDS = 24 * HOUR_SECONDS;
 
 function makeReq(
   url: string,
@@ -9,9 +16,52 @@ function makeReq(
   return new NextRequest(url, { headers });
 }
 
+async function hostToken(input: {
+  issuedAt: number;
+  expiresAt: number;
+  firstIssuedAt?: number;
+}): Promise<string> {
+  return await new SignJWT(
+    input.firstIssuedAt === undefined
+      ? {}
+      : { firstIssuedAt: input.firstIssuedAt },
+  )
+    .setProtectedHeader({ alg: "HS256" })
+    .setIssuer("cozytrack")
+    .setAudience("cozytrack:host")
+    .setSubject("host")
+    .setIssuedAt(input.issuedAt)
+    .setExpirationTime(input.expiresAt)
+    .sign(secret);
+}
+
+async function guestToken(input: {
+  sessionId: string;
+  name: string;
+  participantId: string;
+  issuedAt: number;
+  expiresAt: number;
+  firstIssuedAt: number;
+}): Promise<string> {
+  return await new SignJWT({
+    sessionId: input.sessionId,
+    name: input.name,
+    participantId: input.participantId,
+    firstIssuedAt: input.firstIssuedAt,
+  })
+    .setProtectedHeader({ alg: "HS256" })
+    .setIssuer("cozytrack")
+    .setAudience("cozytrack:guest")
+    .setSubject(`guest:${input.sessionId}`)
+    .setIssuedAt(input.issuedAt)
+    .setExpirationTime(input.expiresAt)
+    .sign(secret);
+}
+
 describe("auth middleware", () => {
   beforeEach(() => {
     vi.stubEnv("COZYTRACK_API_KEY", "test-secret");
+    vi.stubEnv("AUTH_SECRET", AUTH_SECRET);
     vi.stubEnv("NODE_ENV", "production");
   });
 
@@ -69,6 +119,94 @@ describe("auth middleware", () => {
       makeReq("http://localhost:3001/api/upload/presign")
     );
     expect(res.status).toBe(401);
+  });
+
+  it("renews an active host cookie after the renewal threshold", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const issuedAt = now - 25 * HOUR_SECONDS;
+    const token = await hostToken({
+      issuedAt,
+      firstIssuedAt: issuedAt,
+      expiresAt: now + 6 * DAY_SECONDS,
+    });
+    expect(await verifyHostCookie(token)).not.toBeNull();
+
+    const res = await middleware(
+      makeReq("http://localhost:3001/dashboard", {
+        cookie: `cozytrack_host=${token}`,
+      }),
+    );
+
+    const renewed = res.cookies.get("cozytrack_host")?.value;
+    expect(renewed).toBeTruthy();
+    expect(decodeJwt(renewed!).iat).toBeGreaterThan(issuedAt);
+    expect(decodeJwt(renewed!).firstIssuedAt).toBe(issuedAt);
+    expect(res.headers.get("set-cookie")).toContain(`Max-Age=${7 * DAY_SECONDS}`);
+  });
+
+  it("renews a guest cookie without changing participant identity or name", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const issuedAt = now - 2 * HOUR_SECONDS;
+    const token = await guestToken({
+      sessionId: "session-1",
+      name: "Alice",
+      participantId: "guest_stable",
+      issuedAt,
+      firstIssuedAt: issuedAt,
+      expiresAt: now + 10 * HOUR_SECONDS,
+    });
+
+    const res = await middleware(
+      makeReq("http://localhost:3001/studio/session-1", {
+        cookie: `cozytrack_guest_session-1=${token}`,
+      }),
+    );
+
+    const renewed = res.cookies.get("cozytrack_guest_session-1")?.value;
+    expect(renewed).toBeTruthy();
+    expect(decodeJwt(renewed!)).toMatchObject({
+      sessionId: "session-1",
+      name: "Alice",
+      participantId: "guest_stable",
+      firstIssuedAt: issuedAt,
+    });
+  });
+
+  it("does not renew a session that has reached its absolute cap", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const token = await hostToken({
+      issuedAt: now - 25 * HOUR_SECONDS,
+      firstIssuedAt: now - 31 * DAY_SECONDS,
+      expiresAt: now + HOUR_SECONDS,
+    });
+
+    const res = await middleware(
+      makeReq("http://localhost:3001/dashboard", {
+        cookie: `cozytrack_host=${token}`,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.cookies.get("cozytrack_host")).toBeUndefined();
+  });
+
+  it("adds firstIssuedAt when renewing a cookie issued before sliding sessions", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const issuedAt = now - 25 * HOUR_SECONDS;
+    const token = await hostToken({
+      issuedAt,
+      expiresAt: now + 6 * DAY_SECONDS,
+    });
+
+    const res = await middleware(
+      makeReq("http://localhost:3001/dashboard", {
+        cookie: `cozytrack_host=${token}`,
+      }),
+    );
+
+    const renewed = res.cookies.get("cozytrack_host")?.value;
+    expect(renewed).toBeTruthy();
+    expect(decodeJwt(renewed!).firstIssuedAt).toBe(issuedAt);
   });
 });
 
