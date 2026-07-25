@@ -75,6 +75,29 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function retryPendingStopRecovery(
+  path: string,
+  body: Record<string, unknown>,
+  maxAttempts: number,
+  baseDelay: number,
+): Promise<void> {
+  for (let attempt = 2; attempt <= maxAttempts; attempt += 1) {
+    await delay(baseDelay * (attempt - 1));
+
+    try {
+      const state = await jsonRequest<RecordingTakeState>(path, "POST", body);
+      if (!state.recoveryPending) return;
+    } catch (error) {
+      if (!isRetryableStopError(error)) {
+        console.error("Stopped take recovery retry failed", error);
+        return;
+      }
+    }
+  }
+
+  console.error("Stopped take recovery remained pending after retry attempts");
+}
+
 // Read the authoritative recording state for a session. Used by the studio
 // page's reconnect catch-up: a participant returning mid-take asks whether a
 // take is still `recording` and, if so, resumes it. GET has no side effects, so
@@ -119,20 +142,30 @@ export async function stopRecordingTake(
 ): Promise<RecordingTakeState> {
   const maxAttempts = Math.max(1, options.maxAttempts ?? STOP_MAX_ATTEMPTS);
   const path = `/api/sessions/${encodeURIComponent(sessionId)}/recording-state`;
+  const body = {
+    active: false,
+    ...(options.takeId ? { takeId: options.takeId } : {}),
+  };
+  const baseDelay = options.retryDelayMs ?? STOP_RETRY_BASE_MS;
 
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      return await jsonRequest<RecordingTakeState>(path, "POST", {
-        active: false,
-        ...(options.takeId ? { takeId: options.takeId } : {}),
-      });
+      const state = await jsonRequest<RecordingTakeState>(path, "POST", body);
+      if (state.recoveryPending && attempt < maxAttempts) {
+        void retryPendingStopRecovery(
+          path,
+          body,
+          maxAttempts - attempt + 1,
+          baseDelay,
+        );
+      }
+      return state;
     } catch (error) {
       lastError = error;
       if (attempt >= maxAttempts || !isRetryableStopError(error)) {
         throw error;
       }
-      const baseDelay = options.retryDelayMs ?? STOP_RETRY_BASE_MS;
       await delay(baseDelay * attempt);
     }
   }
