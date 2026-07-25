@@ -29,7 +29,10 @@ describe("StudioPage participant role labels", () => {
     fireEvent.click(studio.screen.getByRole("button", { name: "Stop recording" }));
 
     await waitFor(() => {
-      expect(studio.harness.stopRecordingTake).toHaveBeenCalledWith("session-host");
+      expect(studio.harness.stopRecordingTake).toHaveBeenCalledWith(
+        "session-host",
+        { takeId: "take-1" },
+      );
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
