@@ -3,6 +3,11 @@ import { db } from "@/lib/db";
 import { withSessionLock } from "@/lib/session-lock";
 import { recoverTrack } from "@/lib/recovery";
 
+// Finalize can recover a long orphaned recording before it marks the session
+// ready. Opt into a media-appropriate function window instead of inheriting a
+// short platform default that can terminate recovery with a 504.
+export const maxDuration = 300;
+
 export async function POST(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }

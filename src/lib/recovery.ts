@@ -42,6 +42,7 @@ export interface RecoverTrackOptions {
 }
 
 const DEFAULT_MAX_STITCH_BYTES = 512 * 1024 * 1024;
+const CHUNK_READ_CONCURRENCY = 8;
 
 type ChunkPart = {
   partNumber: number;
@@ -93,8 +94,20 @@ async function stitchSegmentChunks(input: {
   const partial = missing.length > 0 || forcePartial;
 
   const chunkBytes: Uint8Array[] = [];
-  for (const part of parts) {
-    chunkBytes.push(await getObjectBytes(part.key));
+  for (
+    let start = 0;
+    start < parts.length;
+    start += CHUNK_READ_CONCURRENCY
+  ) {
+    const batch = await Promise.all(
+      parts
+        .slice(start, start + CHUNK_READ_CONCURRENCY)
+        .map((part) => getObjectBytes(part.key)),
+    );
+    // Promise.all preserves input order, and batches are appended in part
+    // order, so the merged WebM remains deterministic while S3 latency is
+    // amortized across a bounded number of requests.
+    chunkBytes.push(...batch);
   }
 
   const totalBytes = chunkBytes.reduce((sum, b) => sum + b.byteLength, 0);
