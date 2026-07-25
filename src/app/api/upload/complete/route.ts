@@ -105,20 +105,11 @@ export async function POST(req: NextRequest) {
         select: { status: true },
       });
       if (take?.status === "stopped") {
-        try {
-          const recovered = await recoverInterruptedTrackSegments(
-            trackId,
-            existingSegment.segmentIndex,
-          );
-          recoveredPartial = recovered.partial;
-        } catch (error) {
-          // The newest completed segment remains usable. Preserve older chunks
-          // for a later/manual recovery rather than failing this completion.
-          console.error(
-            `[complete] failed to recover interrupted segments for track=${trackId}:`,
-            error,
-          );
-        }
+        const recovered = await recoverInterruptedTrackSegments(
+          trackId,
+          existingSegment.segmentIndex,
+        );
+        recoveredPartial = recovered.partial;
       }
     }
 
