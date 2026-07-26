@@ -124,6 +124,41 @@ describe("stopRecordingTake durability", () => {
     );
   });
 
+  it("retries pending recovery when the stop succeeds on its final attempt", async () => {
+    const pendingState = {
+      active: false,
+      sessionStartedAt: null,
+      recoveryPending: true,
+      take: {
+        id: "take-1",
+        sessionId: "s1",
+        startedAt: "2026-07-25T12:00:00.000Z",
+        stoppedAt: "2026-07-25T12:05:00.000Z",
+        status: "stopped",
+      },
+    };
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ error: "one" }, 503))
+      .mockResolvedValueOnce(jsonResponse({ error: "two" }, 503))
+      .mockResolvedValueOnce(jsonResponse({ error: "three" }, 503))
+      .mockResolvedValueOnce(jsonResponse({ error: "four" }, 503))
+      .mockResolvedValueOnce(jsonResponse(pendingState, 200))
+      .mockResolvedValueOnce(
+        jsonResponse({ ...pendingState, recoveryPending: false }, 200),
+      );
+
+    const result = await stopRecordingTake("s1", {
+      takeId: "take-1",
+      maxAttempts: 5,
+      retryDelayMs: 0,
+    });
+
+    expect(result).toEqual(pendingState);
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(6);
+    });
+  });
+
   it("gives up after exhausting attempts and throws the last error", async () => {
     fetchMock.mockResolvedValue(jsonResponse({ error: "still down" }, 500));
 

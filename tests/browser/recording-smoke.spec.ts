@@ -1101,6 +1101,7 @@ test("recovers a guest that disconnects during stop", async ({
   browser,
   page,
 }) => {
+  test.setTimeout(180_000);
   const hostName = "Disconnect Stop Host";
   const guestName = "Disconnect Stop Guest";
   const guestContext = await browser.newContext({
@@ -1154,6 +1155,18 @@ test("recovers a guest that disconnects during stop", async ({
         track: { sessionId, participantName: guestName },
       },
     });
+    await expect
+      .poll(
+        async () =>
+          (
+            await db.recordingTakeParticipantStatus.findFirst({
+              where: { takeId: take.id, participantName: guestName },
+              select: { recordingStatus: true },
+            })
+          )?.recordingStatus,
+        { timeout: 30_000 },
+      )
+      .toBe("recording");
 
     let stopRequestHeld = false;
     await page.route(
@@ -1201,8 +1214,39 @@ test("recovers a guest that disconnects during stop", async ({
         .toMatchObject({
           status: "stopped",
           stoppedAt: expect.any(Date),
-        });
+      });
     });
+
+    const returningGuestPage = await test.step(
+      "reopen the stopped guest in the same context",
+      async () => {
+        const returningPage = await guestContext.newPage();
+        const stoppedState = returningPage.waitForResponse((response) => {
+          const request = response.request();
+          return (
+            request.method() === "GET" &&
+            new URL(response.url()).pathname ===
+              `/api/sessions/${sessionId}/recording-state`
+          );
+        });
+        await joinGuestStudio(
+          returningPage,
+          inviteUrl,
+          sessionId,
+          guestName,
+        );
+        const stoppedStateBody = (await (await stoppedState).json()) as {
+          active?: boolean;
+        };
+        expect(stoppedStateBody.active).toBe(false);
+        await expect(
+          returningPage.getByRole("status", {
+            name: "Recording in progress",
+          }),
+        ).toBeHidden();
+        return returningPage;
+      },
+    );
 
     await test.step("recover every existing track and stored WebM", async () => {
       await expect
@@ -1228,7 +1272,7 @@ test("recovers a guest that disconnects during stop", async ({
               ),
             }));
           },
-          { timeout: 60_000 },
+          { timeout: 90_000 },
         )
         .toEqual(
           [guestName, hostName].sort().map((participantName) => ({
@@ -1249,25 +1293,6 @@ test("recovers a guest that disconnects during stop", async ({
     });
 
     await test.step("keep the returning guest idle without a new segment", async () => {
-      const returningGuestPage = await guestContext.newPage();
-      const stoppedState = returningGuestPage.waitForResponse((response) => {
-        const request = response.request();
-        return (
-          request.method() === "GET" &&
-          new URL(response.url()).pathname ===
-            `/api/sessions/${sessionId}/recording-state`
-        );
-      });
-      await joinGuestStudio(
-        returningGuestPage,
-        inviteUrl,
-        sessionId,
-        guestName,
-      );
-      const stoppedStateBody = (await (await stoppedState).json()) as {
-        active?: boolean;
-      };
-      expect(stoppedStateBody.active).toBe(false);
       await expect(
         returningGuestPage.getByRole("status", {
           name: "Recording in progress",

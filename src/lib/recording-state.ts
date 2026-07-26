@@ -152,11 +152,18 @@ export async function stopRecordingTake(
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       const state = await jsonRequest<RecordingTakeState>(path, "POST", body);
-      if (state.recoveryPending && attempt < maxAttempts) {
+      if (state.recoveryPending) {
+        // Media recovery is separate from making the stop durable. Even when
+        // the stop only succeeds on its final HTTP attempt, give the now-
+        // idempotent stopped take at least one request that can own recovery.
+        const recoveryAttempts = Math.max(
+          2,
+          maxAttempts - attempt + 1,
+        );
         void retryPendingStopRecovery(
           path,
           body,
-          maxAttempts - attempt + 1,
+          recoveryAttempts,
           baseDelay,
         );
       }
