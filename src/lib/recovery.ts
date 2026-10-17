@@ -1,4 +1,7 @@
 import { db } from "@/lib/db";
+import { randomUUID } from "node:crypto";
+import { logServerUploadDiagnostic } from "@/lib/upload-diagnostics-server";
+import type { UploadDiagnosticEvent } from "@/lib/upload-diagnostic-event";
 import {
   getObjectBytes,
   listTrackChunkParts,
@@ -254,66 +257,99 @@ export async function recoverInterruptedTrackSegments(
     partial = true;
   };
 
+  const attemptId = randomUUID();
   for (const segment of interrupted) {
-    const sourceKey = trackSegmentSourceRecordingKey(
-      track.sessionId,
-      trackId,
-      segment.id,
-    );
-    let sourceReady = await trackSegmentSourceRecordingExists(
-      track.sessionId,
-      trackId,
-      segment.id,
-    );
-
-    if (!sourceReady) {
-      const parts = await listTrackSegmentChunkParts(
+    const startedAt = Date.now();
+    const log = (
+      outcome: UploadDiagnosticEvent["outcome"],
+      details: { bytes?: number; recoveryOutcome?: RecoveryOutcome; errorCategory?: "unknown" } = {},
+    ) => logServerUploadDiagnostic({
+      attemptId, sessionId: track.sessionId, trackId, segmentId: segment.id,
+      kind: "retry", stage: "recovery", outcome, partial,
+      elapsedMs: Date.now() - startedAt, ...details,
+    });
+    log("started");
+    try {
+      const sourceKey = trackSegmentSourceRecordingKey(
         track.sessionId,
         trackId,
         segment.id,
       );
-      if (parts.length === 0) continue;
+      let sourceReady = await trackSegmentSourceRecordingExists(
+        track.sessionId,
+        trackId,
+        segment.id,
+      );
 
-      const merged = await mergeChunkParts(parts, options.maxStitchBytes);
-      if (!merged.ok) {
-        await persistPartial();
-        console.warn(
-          `[recovery] track=${trackId} interrupted segment=${segment.id} chunks total ${merged.totalSize} bytes exceeds cap ${
-            options.maxStitchBytes ?? DEFAULT_MAX_STITCH_BYTES
-          }; marking track partial and leaving chunks recoverable`,
+      const usedExistingSource = sourceReady;
+      let recoveredBytes: number | undefined;
+
+      if (!sourceReady) {
+        const parts = await listTrackSegmentChunkParts(
+          track.sessionId,
+          trackId,
+          segment.id,
         );
+        if (parts.length === 0) {
+          log("unknown", { bytes: 0 });
+          continue;
+        }
+
+        const merged = await mergeChunkParts(parts, options.maxStitchBytes);
+        if (!merged.ok) {
+          await persistPartial();
+          console.warn(
+            `[recovery] track=${trackId} interrupted segment=${segment.id} chunks total ${merged.totalSize} bytes exceeds cap ${
+              options.maxStitchBytes ?? DEFAULT_MAX_STITCH_BYTES
+            }; marking track partial and leaving chunks recoverable`,
+          );
+          log("retained", { bytes: merged.totalSize, recoveryOutcome: "failed_too_large" });
+          continue;
+        }
+
+        if (merged.missingPartNumbers.length > 0) {
+          // Persist the gap before writing the immutable source. If a later S3,
+          // database, or materialization step fails, retry must retain the
+          // partial marker after this segment becomes complete.
+          await persistPartial();
+        }
+        await putObjectBytes(sourceKey, merged.bytes);
+        recoveredBytes = merged.bytes.byteLength;
+        sourceReady = true;
+      }
+
+      if (!sourceReady) {
+        log("unknown");
         continue;
       }
-
-      if (merged.missingPartNumbers.length > 0) {
-        // Persist the gap before writing the immutable source. If a later S3,
-        // database, or materialization step fails, retry must retain the
-        // partial marker after this segment becomes complete.
-        await persistPartial();
+      // Once another completed segment will be added to the source set, the
+      // existing logical artifact is stale. Invalidate it before committing the
+      // segment transition so a crash or remux failure leaves a durable retry
+      // signal for either upload completion or stopped-take recovery.
+      await db.track.updateMany({
+        where: { id: trackId, status: "complete" },
+        data: { status: "uploading" },
+      });
+      const updated = await db.trackSegment.updateMany({
+        where: {
+          id: segment.id,
+          trackId,
+          status: { notIn: ["complete", "failed"] },
+        },
+        data: { status: "complete", completedAt: new Date() },
+      });
+      if (updated.count > 0) {
+        recoveredSegmentIds.push(segment.id);
+        log(usedExistingSource ? "already_exists" : "succeeded", {
+          bytes: recoveredBytes,
+          recoveryOutcome: usedExistingSource ? "recovered_from_recording" : "recovered_from_chunks",
+        });
+      } else {
+        log("unknown");
       }
-      await putObjectBytes(sourceKey, merged.bytes);
-      sourceReady = true;
-    }
-
-    if (!sourceReady) continue;
-    // Once another completed segment will be added to the source set, the
-    // existing logical artifact is stale. Invalidate it before committing the
-    // segment transition so a crash or remux failure leaves a durable retry
-    // signal for either upload completion or stopped-take recovery.
-    await db.track.updateMany({
-      where: { id: trackId, status: "complete" },
-      data: { status: "uploading" },
-    });
-    const updated = await db.trackSegment.updateMany({
-      where: {
-        id: segment.id,
-        trackId,
-        status: { notIn: ["complete", "failed"] },
-      },
-      data: { status: "complete", completedAt: new Date() },
-    });
-    if (updated.count > 0) {
-      recoveredSegmentIds.push(segment.id);
+    } catch (error) {
+      log("failed", { errorCategory: "unknown" });
+      throw error;
     }
   }
 
@@ -332,7 +368,9 @@ export async function recoverStoppedTakeTracks(
     where: { takeId },
     select: {
       id: true,
+      sessionId: true,
       status: true,
+      partial: true,
       segments: {
         orderBy: { segmentIndex: "asc" },
         select: {
@@ -344,6 +382,7 @@ export async function recoverStoppedTakeTracks(
     },
   });
   const rematerializedTrackIds: string[] = [];
+  const attemptId = randomUUID();
 
   for (const track of tracks) {
     const latestSegment = track.segments[track.segments.length - 1];
@@ -373,10 +412,29 @@ export async function recoverStoppedTakeTracks(
       track.status !== "complete";
     if (!shouldMaterialize) continue;
 
-    const materialized = await materializeTrack(
-      track.id,
-      recovered.partial ? { partial: true } : {},
-    );
+    const startedAt = Date.now();
+    const log = (
+      outcome: UploadDiagnosticEvent["outcome"],
+      details: { materializationStatus?: Awaited<ReturnType<typeof materializeTrack>>["status"]; errorCategory?: "unknown" } = {},
+    ) => logServerUploadDiagnostic({
+      attemptId, sessionId: track.sessionId, trackId: track.id,
+      segmentId: latestSegment.id, kind: "retry", stage: "materialize", outcome,
+      partial: track.partial || recovered.partial, elapsedMs: Date.now() - startedAt, ...details,
+    });
+    log("started");
+    let materialized;
+    try {
+      materialized = await materializeTrack(
+        track.id,
+        recovered.partial ? { partial: true } : {},
+      );
+    } catch (error) {
+      log("failed", { errorCategory: "unknown" });
+      throw error;
+    }
+    log(materialized.status === "complete" ? "succeeded" : "failed", {
+      materializationStatus: materialized.status,
+    });
     if (materialized.status !== "complete") {
       throw new Error(
         `Stopped take ${takeId} failed to materialize track ${track.id}: ${materialized.status}`,
@@ -395,6 +453,42 @@ export async function recoverTrack(
   trackId: string,
   options: RecoverTrackOptions = {}
 ): Promise<RecoveryResult> {
+  const attemptId = randomUUID();
+  const startedAt = Date.now();
+  const scope: { sessionId?: string; segmentId?: string } = {};
+  const log = (outcome: UploadDiagnosticEvent["outcome"], result?: RecoveryResult) => {
+    if (!scope.sessionId) return;
+    logServerUploadDiagnostic({
+      attemptId, sessionId: scope.sessionId, trackId, segmentId: scope.segmentId,
+      kind: "retry", stage: "recovery", outcome, elapsedMs: Date.now() - startedAt,
+      ...(result ? {
+        recoveryOutcome: result.outcome, partial: result.partial,
+        trackStatus: result.status as UploadDiagnosticEvent["trackStatus"],
+      } : outcome === "failed" ? { errorCategory: "unknown" as const } : {}),
+    });
+  };
+  try {
+    const result = await recoverTrackInternal(trackId, options, (sessionId, segmentId) => {
+      const first = !scope.sessionId;
+      scope.sessionId = sessionId;
+      scope.segmentId = segmentId;
+      if (first) log("started");
+    });
+    log(result.outcome === "already_complete" ? "already_exists" :
+      result.outcome === "skipped_active" ? "unknown" :
+        result.outcome.startsWith("failed_") ? "failed" : "succeeded", result);
+    return result;
+  } catch (error) {
+    log("failed");
+    throw error;
+  }
+}
+
+async function recoverTrackInternal(
+  trackId: string,
+  options: RecoverTrackOptions,
+  setDiagnosticScope: (sessionId: string, segmentId?: string) => void,
+): Promise<RecoveryResult> {
   const track = await db.track.findUnique({
     where: { id: trackId },
     select: { id: true, sessionId: true, status: true, partial: true },
@@ -403,6 +497,7 @@ export async function recoverTrack(
   if (!track) {
     throw new Error(`Track ${trackId} not found`);
   }
+  setDiagnosticScope(track.sessionId);
 
   if (track.status === "complete") {
     return {
@@ -433,6 +528,7 @@ export async function recoverTrack(
 
   if (segments.length > 0) {
     const newest = segments[0];
+    setDiagnosticScope(sessionId, newest.id);
     const newestRecoverable =
       newest.status === "complete" ||
       (await trackSegmentRecordingExists(sessionId, trackId, newest.id));
@@ -491,6 +587,7 @@ export async function recoverTrack(
 
     const candidates = newestRecoverable ? [newest] : segments.slice(1);
     for (const segment of candidates) {
+      setDiagnosticScope(sessionId, segment.id);
       const recovered =
         segment === newest ||
         segment.status === "complete" ||
@@ -599,6 +696,7 @@ export async function recoverTrack(
   }
 
   // The stitched chunks belong to the default segment (same id as the track).
+  setDiagnosticScope(sessionId, trackId);
   return await stitchSegmentChunks({
     sessionId,
     trackId,
