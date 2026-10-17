@@ -114,6 +114,22 @@ describe("auth middleware", () => {
     expect(res.status).toBe(200);
   });
 
+  it("lets recording diagnostics validate token scope in the route", async () => {
+    const res = await middleware(makeReq("http://localhost:3001/api/upload/diagnostics", {
+      "x-cozytrack-recording-token": "recording-token",
+    }));
+    expect(res.status).toBe(200);
+    expect((await middleware(makeReq("http://localhost:3001/api/upload/diagnostics"))).status).toBe(401);
+  });
+
+  it("lets a valid guest reach the diagnostic ownership check", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const token = await guestToken({ sessionId: "session-1", name: "Alice", participantId: "guest-1", issuedAt: now, firstIssuedAt: now, expiresAt: now + HOUR_SECONDS });
+    const req = makeReq("http://localhost:3001/api/upload/diagnostics");
+    req.cookies.set("cozytrack_guest_session-1", token);
+    expect((await middleware(req)).status).toBe(200);
+  });
+
   it("keeps recording-token fallback when a guest cookie has expired", async () => {
     const now = Math.floor(Date.now() / 1000);
     const token = await guestToken({

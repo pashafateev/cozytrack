@@ -6,6 +6,7 @@ import Link from "next/link";
 import { Topbar } from "@/components/ui/Topbar";
 import { Button, ButtonLink } from "@/components/ui/Button";
 import { Waveform } from "@/components/ui/Waveform";
+import { UploadDiagnosticsDownload } from "@/components/UploadDiagnosticsDownload";
 import {
   IcoChevron,
   IcoDownload,
@@ -328,7 +329,8 @@ export default function SessionDetailPage() {
         </div>
 
         {/* Download all — blocked on cozytrack#26 (zip-all endpoint) */}
-        <div className="flex justify-end">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <UploadDiagnosticsDownload sessionId={sessionId} />
           <Button
             variant="primary"
             size="md"

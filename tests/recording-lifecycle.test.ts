@@ -339,6 +339,8 @@ describe("RecordingLifecycleController start", () => {
         takeId: "take-1",
         localTrackSlotId: undefined,
       },
+      undefined,
+      expect.objectContaining({ kind: "chunk", trackId: "requested-1", partNumber: 0 }),
     );
     // Backup is keyed to the server-corrected segment id and carries the token.
     expect(h.backupStore.startBackup).toHaveBeenCalledWith({
@@ -591,6 +593,7 @@ describe("RecordingLifecycleController chunk pipeline", () => {
       undefined,
       { segmentId: "segment-primary" },
       "token-primary",
+      expect.objectContaining({ kind: "chunk", segmentId: "segment-primary", partNumber: 0 }),
     );
     // Backup state changes surfaced along the way.
     expect(h.events.recovery.length).toBeGreaterThanOrEqual(2);
@@ -661,7 +664,11 @@ describe("RecordingLifecycleController stop", () => {
       60_000,
       "token-primary",
       "segment-primary",
+      expect.objectContaining({ kind: "final", segmentId: "segment-primary", attemptId: expect.any(String) }),
     );
+    const context = (h.uploadApi.completeUpload.mock.calls[0] as unknown[])[5];
+    expect((h.uploadApi.getPresignedUploadUrl.mock.calls[0] as unknown[])[6]).toBe(context);
+    expect((h.uploadApi.uploadChunk.mock.calls[0] as unknown[])[2]).toBe(context);
     // A fully verified upload leaves no surfaced backup or error behind.
     expect(h.events.recovery.at(-1)).toBeNull();
     expect(h.events.errors.at(-1)).toBeNull();

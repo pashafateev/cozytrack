@@ -38,6 +38,11 @@ import {
   type StartRecordingBackupInput,
 } from "@/lib/recording-backup";
 import type { DeviceInfo, PresignedUploadTarget, TrackInitInfo } from "@/lib/upload";
+import {
+  createUploadDiagnosticContext,
+  recordUploadDiagnostic,
+  type UploadDiagnosticContext,
+} from "@/lib/upload-diagnostics";
 
 /** The final merged recording.webm is uploaded under this part number. */
 export const FINAL_RECORDING_PART_NUMBER = 9999;
@@ -58,6 +63,7 @@ export interface RecordingUploadApi {
     participantName?: string,
     trackInit?: TrackInitInfo,
     recordingToken?: string,
+    diagnosticContext?: UploadDiagnosticContext,
   ): Promise<PresignedUploadTarget>;
   getPresignedUploadUrl(
     sessionId: string,
@@ -66,14 +72,16 @@ export interface RecordingUploadApi {
     participantName?: string,
     trackInit?: TrackInitInfo,
     recordingToken?: string,
+    diagnosticContext?: UploadDiagnosticContext,
   ): Promise<string>;
-  uploadChunk(url: string, chunk: Blob): Promise<void>;
+  uploadChunk(url: string, chunk: Blob, diagnosticContext?: UploadDiagnosticContext): Promise<void>;
   completeUpload(
     sessionId: string,
     trackId: string,
     durationMs?: number,
     recordingToken?: string,
     segmentId?: string,
+    diagnosticContext?: UploadDiagnosticContext,
   ): Promise<void>;
 }
 
@@ -402,6 +410,11 @@ export class RecordingLifecycleController {
           takeId: options.takeId ?? undefined,
           localTrackSlotId: spec.localTrackSlotId,
         },
+        undefined,
+        createUploadDiagnosticContext({
+          sessionId: this.deps.sessionId, trackId: requestedTrackId,
+          segmentId: requestedTrackId, kind: "chunk", partNumber: 0,
+        }),
       );
     } catch (err) {
       console.error("Failed to initialize upload:", err);
@@ -567,6 +580,10 @@ export class RecordingLifecycleController {
 
     const uploadPromise = (async () => {
       const savedBackup = await backupSave;
+      const context = createUploadDiagnosticContext({
+        sessionId: this.deps.sessionId, trackId: slot.trackId, segmentId: slot.segmentId,
+        kind: "chunk", partNumber: index, recordingToken: slot.uploadToken,
+      });
       try {
         const url = await this.deps.uploadApi.getPresignedUploadUrl(
           this.deps.sessionId,
@@ -575,8 +592,9 @@ export class RecordingLifecycleController {
           undefined,
           { segmentId: slot.segmentId },
           slot.uploadToken,
+          context,
         );
-        await this.deps.uploadApi.uploadChunk(url, chunk);
+        await this.deps.uploadApi.uploadChunk(url, chunk, context);
       } catch (uploadErr) {
         if (savedBackup) {
           try {
@@ -627,6 +645,10 @@ export class RecordingLifecycleController {
     blob: Blob,
     durationMs: number,
   ): Promise<boolean> {
+    const context = createUploadDiagnosticContext({
+      sessionId: this.deps.sessionId, trackId: slot.trackId, segmentId: slot.segmentId,
+      kind: "final", partNumber: FINAL_RECORDING_PART_NUMBER, recordingToken: slot.uploadToken,
+    });
     this.deps.callbacks?.onTiming?.({
       event: "record-stop",
       t: this.now(),
@@ -664,8 +686,9 @@ export class RecordingLifecycleController {
         undefined,
         { segmentId: slot.segmentId },
         slot.uploadToken,
+        context,
       );
-      await this.deps.uploadApi.uploadChunk(url, blob);
+      await this.deps.uploadApi.uploadChunk(url, blob, context);
     })();
 
     try {
@@ -683,6 +706,7 @@ export class RecordingLifecycleController {
         durationMs,
         slot.uploadToken,
         slot.segmentId,
+        context,
       );
       if (slot.backupId) {
         try {
@@ -690,16 +714,19 @@ export class RecordingLifecycleController {
             slot.backupId,
             "verified-upload",
           );
+          recordUploadDiagnostic(context, { stage: "backup", outcome: "cleared" });
           this.surfaceManifest(slot.key, null);
           this.surfaceError(slot.key, null);
         } catch (backupErr) {
           console.error("Failed to clear uploaded local backup:", backupErr);
+          recordUploadDiagnostic(context, { stage: "backup", outcome: "retained", errorCategory: "storage" });
           this.surfaceError(slot.key, backupErrorMessage(backupErr));
         }
       }
       return true;
     } catch (err) {
       console.error(`Failed to finalize recording slot ${slot.key}:`, err);
+      if (slot.backupId) recordUploadDiagnostic(context, { stage: "backup", outcome: "retained" });
       await this.handleSlotFailure(slot, err);
       return false;
     }
