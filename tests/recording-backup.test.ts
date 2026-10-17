@@ -11,6 +11,16 @@ function blob(value: string): Blob {
 }
 
 describe("recording backup store", () => {
+  it("preserves the initial storage failure without attempting a second state write", async () => {
+    const store = new RecordingBackupStore(new MemoryRecordingBackupBackend(true));
+    const manifest = await store.startBackup({ sessionId: "session-1", trackId: "track-1", participantName: "Alice" });
+    const failure = new Error("storage unavailable");
+    vi.spyOn(store, "markBackupUploading").mockRejectedValueOnce(failure);
+    const markFailed = vi.spyOn(store, "markBackupFailed").mockRejectedValue(new Error("second write failed"));
+    await expect(retryLocalRecordingBackupUpload(manifest, { backupStore: store })).rejects.toBe(failure);
+    expect(markFailed).not.toHaveBeenCalled();
+  });
+
   it("persists a manifest with chunk upload state and recovery metadata", async () => {
     const store = new RecordingBackupStore(
       new MemoryRecordingBackupBackend(true),
@@ -112,11 +122,17 @@ describe("recording backup store", () => {
     const uploadChunk = vi.fn().mockResolvedValue(undefined);
     const completeUpload = vi.fn().mockResolvedValue(undefined);
 
+    const diagnosticContext = {
+      sessionId: "session-1", trackId: "track-1", segmentId: "track-1",
+      attemptId: "retry-attempt", kind: "retry" as const,
+    };
+
     const retried = await retryLocalRecordingBackupUpload(failed, {
       backupStore: store,
       getPresignedUploadUrl,
       uploadChunk,
       completeUpload,
+      diagnosticContext,
     });
 
     expect(getPresignedUploadUrl).toHaveBeenCalledWith(
@@ -126,10 +142,12 @@ describe("recording backup store", () => {
       undefined,
       { segmentId: "track-1" },
       "recording-token",
+      diagnosticContext,
     );
     expect(uploadChunk).toHaveBeenCalledWith(
       "https://s3.example/final",
       expect.any(Blob),
+      diagnosticContext,
     );
     const uploadedBlob = uploadChunk.mock.calls[0][1] as Blob;
     expect(await uploadedBlob.text()).toBe("firstsecond");
@@ -139,6 +157,7 @@ describe("recording backup store", () => {
       undefined,
       "recording-token",
       "track-1",
+      diagnosticContext,
     );
     expect(retried.state).toBe("available");
     await expect(store.buildRecordingBlob(manifest.id)).resolves.toBeInstanceOf(
@@ -196,6 +215,7 @@ describe("recording backup store", () => {
       undefined,
       { segmentId: "seg-2" },
       "recording-token",
+      expect.objectContaining({ kind: "retry", segmentId: "seg-2", attemptId: expect.any(String) }),
     );
     expect(completeUpload).toHaveBeenCalledWith(
       "session-1",
@@ -203,6 +223,7 @@ describe("recording backup store", () => {
       undefined,
       "recording-token",
       "seg-2",
+      expect.objectContaining({ kind: "retry", segmentId: "seg-2", attemptId: expect.any(String) }),
     );
   });
 

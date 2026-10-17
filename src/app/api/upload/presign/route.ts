@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { withSessionLock } from "@/lib/session-lock";
+import { UploadRouteDiagnostics } from "@/lib/upload-diagnostics-server";
 import {
   trackRecordingKey,
   trackSegmentPartKey,
@@ -272,8 +273,16 @@ async function ensureLogicalTrackAndSegment(input: {
 }
 
 export async function POST(req: NextRequest) {
+  const diagnostics = new UploadRouteDiagnostics("presign");
+  const response = await presign(req, diagnostics);
+  diagnostics.finish(response.status);
+  return response;
+}
+
+async function presign(req: NextRequest, diagnostics: UploadRouteDiagnostics) {
   try {
     const body = await req.json();
+    diagnostics.setScope(body);
     const {
       sessionId,
       trackId,
@@ -313,6 +322,7 @@ export async function POST(req: NextRequest) {
       if (principal.kind === "guest" && principal.sessionId !== sessionId) {
         return NextResponse.json({ error: "forbidden" }, { status: 403 });
       }
+      diagnostics.start();
 
       const existingSession = await db.session.findUnique({
         where: { id: sessionId },
@@ -390,6 +400,8 @@ export async function POST(req: NextRequest) {
         }
         logicalTrackId = locked.track.id;
         segmentId = locked.segment.id;
+        diagnostics.updateScope(logicalTrackId, segmentId);
+        diagnostics.trackStatus = locked.track.status;
       } catch (error) {
         if (
           error instanceof Error &&
@@ -455,6 +467,7 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ error: "unauthorized" }, { status: 401 });
         }
       }
+      diagnostics.start();
 
       // The S3 key below is built from caller-supplied ids, and the PUT
       // happens before /api/upload/complete validates anything — so the
@@ -470,6 +483,7 @@ export async function POST(req: NextRequest) {
       if (existingTrack.sessionId !== sessionId) {
         return NextResponse.json({ error: "forbidden" }, { status: 403 });
       }
+      diagnostics.trackStatus = existingTrack.status;
       const existingSegment = await db.trackSegment.findUnique({
         where: { id: segmentId },
         select: { trackId: true, status: true },
