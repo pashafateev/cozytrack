@@ -616,8 +616,17 @@ export class RecordingBackupStore {
       throw new Error("Recording backup cleanup requires an explicit reason");
     }
 
-    const manifest = await this.backend.getManifest(id);
+    let manifest = await this.backend.getManifest(id);
     if (!manifest) return;
+
+    // The server has already confirmed the canonical recording before the
+    // lifecycle requests verified-upload cleanup. Persist that fact before
+    // deleting local chunks: if IndexedDB/OPFS cleanup fails partway through,
+    // the leftover manifest must not look recoverable and re-arm the exit
+    // guard for audio that is already safe remotely.
+    if (reason === "verified-upload") {
+      manifest = await this.markBackupUploaded(id);
+    }
 
     for (const chunk of manifest.chunks) {
       await this.backend.deleteChunk(
