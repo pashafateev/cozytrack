@@ -15,7 +15,7 @@ The product goal is simple: make it obvious what people are recording before the
 - Host-controlled start/stop; guests follow the host's recording lifecycle.
 - Chunked direct-to-S3 uploads through presigned URLs, plus browser-local recording backup for retry/recovery.
 - Session finalization once all tracks are complete, with per-track downloads.
-- External ingest endpoints for downstream tools such as podline's `sd ct-ingest`.
+- External ingest endpoints for downstream tools such as podline's `pod ct-ingest`.
 - Cleanup scripts for processed sessions and orphaned S3 prefixes.
 
 ## Architecture
