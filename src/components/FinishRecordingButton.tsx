@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { stopRecordingTake } from "@/lib/recording-state";
+import { PodlineIngestCommand } from "@/components/PodlineIngestCommand";
 
 interface ActiveTake {
   id: string;
@@ -35,7 +36,6 @@ export function FinishRecordingButton({
   onReady?: () => void;
 }) {
   const [state, setState] = useState<FinishState>({ kind: "idle" });
-  const [copied, setCopied] = useState(false);
 
   const isMountedRef = useRef(true);
   const abortRef = useRef<AbortController | null>(null);
@@ -156,19 +156,6 @@ export function FinishRecordingButton({
     await runFinalize();
   }, [runFinalize, safeSetState, sessionId, state]);
 
-  const copyId = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(sessionId);
-      if (!isMountedRef.current) return;
-      setCopied(true);
-      setTimeout(() => {
-        if (isMountedRef.current) setCopied(false);
-      }, 1500);
-    } catch (err) {
-      console.error("Clipboard copy failed:", err);
-    }
-  }, [sessionId]);
-
   if (state.kind === "ready") {
     return (
       <div
@@ -176,25 +163,7 @@ export function FinishRecordingButton({
         style={{ background: "var(--card)", borderColor: "rgba(70,214,140,0.35)" }}
       >
         <p className="text-ok font-medium">Ready for ingest</p>
-        <div className="flex items-center gap-2">
-          <code
-            className="px-3 py-1.5 rounded-[8px] border text-text font-mono text-sm select-all"
-            style={{ background: "var(--bg)", borderColor: "var(--border)" }}
-          >
-            {sessionId}
-          </code>
-          <button
-            onClick={copyId}
-            className="px-3 py-1.5 rounded-[8px] border text-text-2 text-xs hover:text-text"
-            style={{ background: "var(--card-hi)", borderColor: "var(--border-hi)" }}
-          >
-            {copied ? "Copied" : "Copy"}
-          </button>
-        </div>
-        <p className="text-text-3 text-xs">
-          Run on your laptop:{" "}
-          <code className="text-text-2">sd ct-ingest {sessionId}</code>
-        </p>
+        <PodlineIngestCommand key={sessionId} sessionId={sessionId} />
       </div>
     );
   }

@@ -6,6 +6,7 @@ import Link from "next/link";
 import { Topbar } from "@/components/ui/Topbar";
 import { Button, ButtonLink } from "@/components/ui/Button";
 import { Waveform } from "@/components/ui/Waveform";
+import { PodlineIngestCommand } from "@/components/PodlineIngestCommand";
 import {
   IcoChevron,
   IcoDownload,
@@ -188,6 +189,10 @@ export default function SessionDetailPage() {
             Open Studio
           </ButtonLink>
           <InviteButton sessionId={session.id} />
+        </div>
+
+        <div className="mb-7 rounded-panel border border-[color:var(--border)] bg-card p-4">
+          <PodlineIngestCommand key={session.id} sessionId={session.id} />
         </div>
 
         {/* Notes (local-only for now) */}
