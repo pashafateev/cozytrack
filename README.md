@@ -108,6 +108,8 @@ npm run dev:local
 
 `dev:local` starts Docker services with the local MinIO profile, creates the bucket, pushes the Prisma schema, and starts Next.js on port `3001`. It always overrides storage settings to use local MinIO, even if `.env.local` contains cloud-backed S3 values.
 
+Local development and CI build MinIO and its bucket setup client from pinned upstream source in `docker/minio/Dockerfile`. The first build takes a few minutes; Docker caches it for subsequent runs.
+
 Open [http://localhost:3001](http://localhost:3001), sign in with `HOST_PASSWORD`, then create a session.
 
 The MinIO console is available at [http://localhost:9001](http://localhost:9001) with the `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` values from `.env.local` or `.env.example`.

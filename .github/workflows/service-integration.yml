@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/service-integration.yml"
+      - "docker/minio/**"
       - "package.json"
       - "package-lock.json"
       - "prisma/**"
@@ -23,6 +24,7 @@ on:
       - main
     paths:
       - ".github/workflows/service-integration.yml"
+      - "docker/minio/**"
       - "package.json"
       - "package-lock.json"
       - "prisma/**"
@@ -87,12 +89,13 @@ jobs:
 
       - name: Start MinIO
         run: |
+          docker build -t cozytrack-minio-ci ./docker/minio
           docker run --rm -d \
             --name cozytrack-minio \
             -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio:latest server /data
+            cozytrack-minio-ci server /data
 
       - name: Wait for MinIO
         run: |
