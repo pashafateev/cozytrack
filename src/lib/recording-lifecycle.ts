@@ -150,6 +150,15 @@ export interface RecordingLifecycleCallbacks {
   onBackupUnavailable?(spec: RecordingSlotSpec): void;
   /** Structured timing diagnostics (issue #7's ?timing=1 instrumentation). */
   onTiming?(event: Record<string, unknown>): void;
+  /**
+   * A stop finished finalizing every slot. `allCompleted` is true only when
+   * every slot's track confirmed server-side (completeUpload acked) — local
+   * backup housekeeping failures do not affect it. Not fired by a no-op stop.
+   * This is the authoritative "is any of this take's audio unconfirmed"
+   * signal; backup manifests/errors also cover unrelated store failures, so
+   * they must not be used for that.
+   */
+  onStopSettled?(outcome: { allCompleted: boolean }): void;
 }
 
 export interface RecordingLifecycleDeps {
@@ -361,6 +370,11 @@ export class RecordingLifecycleController {
           );
         }),
       );
+      this.deps.callbacks?.onStopSettled?.({
+        allCompleted: outcomes.every(
+          (outcome) => outcome.status === "fulfilled" && outcome.value === true,
+        ),
+      });
       return {
         stopped: true,
         anyCompleted: outcomes.some(

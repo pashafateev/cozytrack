@@ -15,6 +15,12 @@ type AuthMeResponse =
   | { role: "guest"; name: string }
   | { role: "host" };
 
+export type RemoteParticipantStub = {
+  identity: string;
+  name?: string;
+  metadata?: string;
+};
+
 type ControlMessageHandler = (
   message: ControlMessage,
   sender: { identity: string; metadata?: string },
@@ -31,6 +37,17 @@ const studioPageHarness = vi.hoisted(() => ({
   route: {
     sessionId: "session-guest",
   },
+  // Backing store for the useRemoteParticipants mock. Tests mutate it through
+  // setRemoteParticipants (wrapped in act) — the listeners let the mocked hook
+  // re-render subscribers exactly like the real LiveKit hook would.
+  remoteParticipants: [] as Array<{
+    identity: string;
+    name?: string;
+    metadata?: string;
+  }>,
+  remoteParticipantsListeners: new Set<() => void>(),
+  navigationGuard: vi.fn(),
+  retryLocalRecordingBackupUpload: vi.fn(),
   getToken: vi.fn(async () => "livekit-token"),
   sendControlMessage: vi.fn(async (_message: { type: string }) => undefined),
   onControlMessage: vi.fn((_handler: ControlMessageHandler) => vi.fn()),
@@ -45,7 +62,7 @@ const studioPageHarness = vi.hoisted(() => ({
   unpublishAudio: vi.fn(async () => undefined),
   getUserMedia: vi.fn(),
   enumerateDevices: vi.fn(),
-  listBackups: vi.fn(async () => []),
+  listBackups: vi.fn(async (): Promise<unknown[]> => []),
   audioContexts: [] as unknown[],
   startRecordingTake: vi.fn(),
   stopRecordingTake: vi.fn(),
@@ -91,8 +108,9 @@ vi.mock("@livekit/components-react", () => {
   // mocked module first loads). The real LiveKit hooks memoize these, and
   // studio effects depend on them — returning fresh objects/arrays each render
   // turns those effects into re-render loops once any synchronous setState
-  // fires.
-  const remoteParticipants: unknown[] = [];
+  // fires. useRemoteParticipants reads the harness store through
+  // useSyncExternalStore: the snapshot is the same array reference until a
+  // test replaces it via setRemoteParticipants, so it stays just as stable.
   const localParticipant = {
     localParticipant: {
       republishAllTracks: studioPageHarness.republishAllTracks,
@@ -128,7 +146,16 @@ vi.mock("@livekit/components-react", () => {
     },
     RoomAudioRenderer: () => null,
     useConnectionState: () => studioPageHarness.roomConnectionState,
-    useRemoteParticipants: () => remoteParticipants,
+    useRemoteParticipants: () =>
+      React.useSyncExternalStore(
+        (listener) => {
+          studioPageHarness.remoteParticipantsListeners.add(listener);
+          return () => {
+            studioPageHarness.remoteParticipantsListeners.delete(listener);
+          };
+        },
+        () => studioPageHarness.remoteParticipants,
+      ),
     useLocalParticipant: () => localParticipant,
   };
 });
@@ -213,7 +240,9 @@ vi.mock("@/lib/recording-backup", () => ({
 }));
 
 vi.mock("@/lib/recording-backup-upload", () => ({
-  retryLocalRecordingBackupUpload: vi.fn(),
+  retryLocalRecordingBackupUpload: (
+    ...args: unknown[]
+  ) => studioPageHarness.retryLocalRecordingBackupUpload(...args),
 }));
 
 vi.mock("@/hooks/useMicMonitor", () => ({
@@ -237,7 +266,8 @@ vi.mock("@/hooks/useTimingDiagnostics", () => ({
 }));
 
 vi.mock("@/hooks/useNavigationGuard", () => ({
-  useNavigationGuard: vi.fn(),
+  useNavigationGuard: (options: { when: boolean; message: string }) =>
+    studioPageHarness.navigationGuard(options),
 }));
 
 export function mediaStream(): MediaStream {
@@ -288,6 +318,10 @@ function audioInput(deviceId: string, label: string): MediaDeviceInfo {
 beforeEach(() => {
   studioPageHarness.authMeResponse = { role: "guest", name: "Guest Alice" };
   studioPageHarness.route.sessionId = "session-guest";
+  studioPageHarness.remoteParticipants = [];
+  studioPageHarness.remoteParticipantsListeners.clear();
+  studioPageHarness.navigationGuard.mockClear();
+  studioPageHarness.retryLocalRecordingBackupUpload.mockReset();
   studioPageHarness.getToken.mockClear();
   studioPageHarness.sendControlMessage.mockReset().mockResolvedValue(undefined);
   studioPageHarness.onControlMessage.mockReset().mockReturnValue(vi.fn());
@@ -304,7 +338,7 @@ beforeEach(() => {
   studioPageHarness.enumerateDevices
     .mockReset()
     .mockResolvedValue([audioInput("usb-mic", "Shure MV7")]);
-  studioPageHarness.listBackups.mockClear();
+  studioPageHarness.listBackups.mockReset().mockResolvedValue([]);
   studioPageHarness.audioContexts.length = 0;
   studioPageHarness.startRecordingTake.mockReset().mockResolvedValue({
     active: true,
@@ -404,6 +438,20 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
+
+/**
+ * Replace the mocked room's remote participant list and notify the
+ * useRemoteParticipants subscribers, mirroring a LiveKit join/leave. Call
+ * inside act(): `act(() => setRemoteParticipants([...]))`.
+ */
+export function setRemoteParticipants(
+  participants: RemoteParticipantStub[],
+): void {
+  studioPageHarness.remoteParticipants = participants;
+  for (const listener of studioPageHarness.remoteParticipantsListeners) {
+    listener();
+  }
+}
 
 export function renderGuestStudioPage({
   name = "Guest Alice",
