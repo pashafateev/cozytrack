@@ -54,6 +54,10 @@ import {
 import { retryLocalRecordingBackupUpload } from "@/lib/recording-backup-upload";
 import { getToken, LIVEKIT_URL } from "@/lib/livekit";
 import {
+  resolveLiveKitConnectionError,
+  type LiveKitConnectionErrorKind,
+} from "@/lib/livekit-connection-error";
+import {
   useTransport,
   isHostSender,
   parseParticipantMetadata,
@@ -3065,6 +3069,32 @@ export default function StudioPage() {
   const [mics, setMics] = useState<MediaDeviceInfo[]>([]);
   const [token, setToken] = useState("");
   const [connecting, setConnecting] = useState(false);
+  const [connectionError, setConnectionError] = useState<LiveKitConnectionErrorKind | null>(null);
+  const connectionErrorCheck = useRef<AbortController | null>(null);
+
+  useEffect(() => () => connectionErrorCheck.current?.abort(), []);
+
+  // LiveKit's connection effect depends on onError: keep its identity stable
+  // across error updates so displaying a failure does not trigger another join.
+  const handleConnectionError = useCallback((error: Error) => {
+    connectionErrorCheck.current?.abort();
+    const controller = new AbortController();
+    connectionErrorCheck.current = controller;
+    setConnectionError("connection-failed");
+    void resolveLiveKitConnectionError(error, {
+      serverUrl: LIVEKIT_URL,
+      token,
+      signal: controller.signal,
+    }).then((kind) => {
+      if (!controller.signal.aborted) setConnectionError(kind);
+    });
+  }, [token]);
+
+  const handleConnected = useCallback(() => {
+    connectionErrorCheck.current?.abort();
+    setConnectionError(null);
+  }, []);
+
   const [monitorEnabled, setMonitorEnabled] = useState(false);
   const [monitorVolume, setMonitorVolume] = useState(70);
   const [isMobile, setIsMobile] = useState(false);
@@ -3326,6 +3356,20 @@ export default function StudioPage() {
 
   return (
     <div className="animate-page-enter min-h-screen bg-bg flex flex-col">
+      {connectionError && (
+        <div role="alert" className="border-b border-rec/30 bg-bg px-4 py-3 text-sm text-text">
+          <p className="font-semibold text-rec">
+            {connectionError === "minutes-limit"
+              ? "Live audio unavailable: connection-minute limit reached"
+              : "Could not connect to live audio"}
+          </p>
+          <p className="mt-1 text-text-2">
+            {connectionError === "minutes-limit"
+              ? "This studio's LiveKit project has used all available connection minutes. Contact the project owner to restore capacity before trying again."
+              : "Check your connection and try joining again. If this continues, contact the project owner."}
+          </p>
+        </div>
+      )}
       <LiveKitRoom
         serverUrl={LIVEKIT_URL}
         token={token}
@@ -3338,6 +3382,8 @@ export default function StudioPage() {
           },
         }}
         connect={true}
+        onError={handleConnectionError}
+        onConnected={handleConnected}
         className="flex flex-col flex-1 min-h-0"
       >
         <RoomAudioRenderer />

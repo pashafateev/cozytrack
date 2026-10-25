@@ -39,6 +39,7 @@ const studioPageHarness = vi.hoisted(() => ({
   autoConnectRoom: true,
   roomConnectionState: "connected" as MockRoomConnectionState,
   roomOnConnected: undefined as (() => void) | undefined,
+  roomOnError: undefined as ((error: Error) => void) | undefined,
   liveKitAudioProp: undefined as unknown,
   republishAllTracks: vi.fn(async () => undefined),
   publishAudio: vi.fn(async () => undefined),
@@ -104,13 +105,16 @@ vi.mock("@livekit/components-react", () => {
     LiveKitRoom: ({
       children,
       onConnected,
+      onError,
       audio,
     }: {
       children: ReactNode;
       onConnected?: () => void;
+      onError?: (error: Error) => void;
       audio?: unknown;
     }) => {
       studioPageHarness.liveKitAudioProp = audio;
+      studioPageHarness.roomOnError = onError;
       React.useEffect(() => {
         studioPageHarness.roomOnConnected = onConnected;
         if (studioPageHarness.autoConnectRoom) onConnected?.();
@@ -296,6 +300,7 @@ beforeEach(() => {
   studioPageHarness.autoConnectRoom = true;
   studioPageHarness.roomConnectionState = "connected";
   studioPageHarness.roomOnConnected = undefined;
+  studioPageHarness.roomOnError = undefined;
   studioPageHarness.liveKitAudioProp = undefined;
   studioPageHarness.republishAllTracks.mockClear();
   studioPageHarness.publishAudio.mockReset().mockResolvedValue(undefined);
