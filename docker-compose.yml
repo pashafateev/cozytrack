@@ -28,7 +28,7 @@ services:
       - "6379:6379"
 
   minio:
-    image: quay.io/minio/minio:latest
+    build: ./docker/minio
     profiles:
       - local-storage
     ports:
@@ -43,7 +43,7 @@ services:
     command: server /data --console-address ":9001"
 
   minio-init:
-    image: quay.io/minio/mc:latest
+    build: ./docker/minio
     profiles:
       - local-storage
     depends_on:
@@ -59,7 +59,7 @@ services:
     command: ["/scripts/minio-bucket.sh", "provision"]
 
   minio-mc:
-    image: quay.io/minio/mc:latest
+    build: ./docker/minio
     profiles:
       - tools
     depends_on:

@@ -20,11 +20,14 @@ function response(body: unknown, status: number): Response {
 }
 
 let fetchMock: ReturnType<typeof vi.fn>;
+let writeClipboard: ReturnType<typeof vi.fn<(data: string) => Promise<void>>>;
 
 beforeEach(() => {
   fetchMock = vi.fn();
   vi.stubGlobal("fetch", fetchMock);
   vi.stubGlobal("confirm", vi.fn(() => true));
+  writeClipboard = vi.fn<(data: string) => Promise<void>>().mockResolvedValue(undefined);
+  vi.spyOn(navigator.clipboard, "writeText").mockImplementation(writeClipboard);
   mocks.stopRecordingTake.mockReset().mockResolvedValue({
     active: false,
     sessionStartedAt: null,
@@ -34,6 +37,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -45,6 +49,42 @@ function renderButton() {
     }),
   );
 }
+
+describe("FinishRecordingButton ingest command", () => {
+  it("shows and copies the full pod command after finalization succeeds", async () => {
+    fetchMock.mockResolvedValueOnce(response({ id: "session-1", status: "ready" }, 200));
+    renderButton();
+    expect(screen.queryByText("pod ct-ingest session-1")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Finish recording" }));
+
+    expect(await screen.findByText("pod ct-ingest session-1")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /copy/i }));
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeTruthy();
+    expect(writeClipboard).toHaveBeenCalledWith("pod ct-ingest session-1");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith("/api/sessions/session-1/finalize", {
+      method: "POST",
+      signal: expect.any(AbortSignal),
+    });
+  });
+
+  it("leaves the command available when copying after finalization is denied", async () => {
+    fetchMock.mockResolvedValueOnce(response({ id: "session-1", status: "ready" }, 200));
+    writeClipboard.mockRejectedValueOnce(new Error("Clipboard permission denied"));
+    renderButton();
+    fireEvent.click(screen.getByRole("button", { name: "Finish recording" }));
+    await screen.findByText("pod ct-ingest session-1");
+
+    fireEvent.click(screen.getByRole("button", { name: /copy/i }));
+
+    expect((await screen.findByRole("status")).textContent).toMatch(/select and copy the command/i);
+    expect(writeClipboard).toHaveBeenCalledWith("pod ct-ingest session-1");
+    expect(screen.getByText("pod ct-ingest session-1")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^copied$/i })).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("FinishRecordingButton unfinished-take recovery", () => {
   it("stops blind polling and never ends the take automatically", async () => {

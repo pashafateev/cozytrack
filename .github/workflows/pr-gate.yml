@@ -38,6 +38,7 @@ jobs:
 
             const touchesServiceIntegration = (name) =>
               name === ".github/workflows/service-integration.yml" ||
+              name.startsWith("docker/minio/") ||
               name === "package.json" ||
               name === "package-lock.json" ||
               name === "vitest.integration.config.ts" ||
@@ -59,6 +60,7 @@ jobs:
               name === "next.config.ts" ||
               name === "playwright.config.ts" ||
               name === "docker-compose.yml" ||
+              name.startsWith("docker/minio/") ||
               name === "livekit.yaml" ||
               name.startsWith("prisma/") ||
               name === "scripts/minio-bucket.sh" ||
