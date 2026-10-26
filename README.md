@@ -174,6 +174,60 @@ Bucket CORS setup for real S3 lives in [infra/README.md](infra/README.md).
 
 Finalize is idempotent. If uploads are still pending, it returns `409` with the pending tracks and the studio keeps polling. During finalize, the server also attempts best-effort recovery for stuck tracks by checking for final `recording.webm` objects or stitching uploaded chunks.
 
+### Upload diagnostics
+
+Use **More options → Download diagnostics** in the studio, or **Download
+diagnostics** on the finished session page, to export upload history for that
+session from the current browser. Guests can export their own browser's history
+from the studio. The JSON contains diagnostic events, not audio. It does not
+fetch other participants' browser histories or recover a recording.
+
+History is stored separately from the audio backup and remains available after
+a successful upload clears that backup. The browser retains up to 300 events
+from the last seven days; clearing site data or browser storage eviction can
+remove them sooner. When persistent storage is unavailable, only the current
+page's in-memory history is available. Export an incident promptly from the
+browser that experienced it.
+
+For server correlation, open the Vercel project's **Logs**, select the relevant
+environment and time window, search for **`[UPLOAD]`**, then narrow by
+`sessionId`, `trackId`, or `attemptId` from the exported JSON. Log records with
+`source: "server"` describe server observations; `source: "browser"` records
+contain reports received from a browser. The event's `at` is its original
+timestamp, while `receivedAt` is the server receipt timestamp, both in UTC epoch
+milliseconds. Browser clocks can differ and offline reports can arrive late;
+correlate by IDs before comparing timestamps. Availability of Vercel logs depends
+on the project's log retention settings.
+
+Reporting is best effort and uses authenticated, bounded requests. A missing
+server log does not prove an operation never happened: offline events and early
+presign failures may exist only locally. Undelivered events are retried when the
+browser comes online or another upload event is recorded, without an automatic
+retry loop. Diagnostic history and log payloads exclude audio, credentials,
+recording tokens, signed URLs, participant names, and raw error messages.
+A generic `network` failure identifies the failed stage;
+it cannot identify which network intermediary reset the connection.
+
+Read outcomes separately: a successful PUT (for example, HTTP `200`), an
+accepted create-only PUT returning `412` (`already_exists`), and an HTTP `200`
+from `/api/upload/complete` describe different observations. For completion,
+inspect `trackStatus` and server materialization events as well. None of these
+alone verifies the stored bytes or proves recording completeness. Diagnostics
+improve incident evidence; they do not fix connection resets or change audio
+recovery guarantees.
+
+To check the flow manually in a local test session:
+
+1. Record a short clip, block the S3/MinIO host in browser developer tools, then
+   stop recording. Keep the app server reachable so the stop can complete.
+2. Disconnect the browser's network, export diagnostics while offline, and
+   confirm the failed upload stage remains in the JSON. Use the separate local
+   audio backup controls for audio recovery.
+3. Reconnect, remove the storage-host block, and retry the local upload. Confirm
+   later diagnostic delivery in
+   `[UPLOAD]` logs, then export again and check that the original failure and
+   retry history remain even after the audio backup panel disappears.
+
 ## Auth Model
 
 Cozytrack is intentionally locked down:

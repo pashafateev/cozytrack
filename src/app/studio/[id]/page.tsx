@@ -52,6 +52,10 @@ import {
   type RecordingSlotSpec,
 } from "@/lib/recording-lifecycle";
 import { retryLocalRecordingBackupUpload } from "@/lib/recording-backup-upload";
+import {
+  createUploadDiagnosticContext,
+  recordUploadDiagnostic,
+} from "@/lib/upload-diagnostics";
 import { getToken, LIVEKIT_URL } from "@/lib/livekit";
 import {
   resolveLiveKitConnectionError,
@@ -84,6 +88,7 @@ import { FinishRecordingButton } from "@/components/FinishRecordingButton";
 import { useUploadProgress } from "@/hooks/useUploadProgress";
 import { useNavigationGuard } from "@/hooks/useNavigationGuard";
 import { UploadProgressBar } from "@/components/UploadProgressBar";
+import { UploadDiagnosticsDownload } from "@/components/UploadDiagnosticsDownload";
 
 import { Aurora } from "@/components/ui/Aurora";
 import { Button } from "@/components/ui/Button";
@@ -1852,18 +1857,30 @@ function RoomContent({
     const current = recoveryBackupRef.current;
     if (!isRecoverableBackup(current)) return;
 
+    const diagnosticContext = createUploadDiagnosticContext({
+      sessionId: current.sessionId,
+      trackId: current.trackId,
+      segmentId: current.segmentId ?? current.trackId,
+      kind: "retry",
+      recordingToken: current.recordingToken,
+    });
     setBackupAction("retrying");
     setBackupError(null);
     try {
       const latest =
         (await browserRecordingBackupStore.getBackup(current.id)) ?? current;
-      const recovered = await retryLocalRecordingBackupUpload(latest);
+      diagnosticContext.recordingToken = latest.recordingToken;
+      const recovered = await retryLocalRecordingBackupUpload(latest, {
+        diagnosticContext,
+      });
       setRecoveryBackupSync(recovered);
       await browserRecordingBackupStore.clearBackup(recovered.id, "verified-upload");
+      recordUploadDiagnostic(diagnosticContext, { stage: "backup", outcome: "cleared" });
       setRecoveryBackupSync(null);
       setHasRecorded(true);
       showNotification("Local backup uploaded");
     } catch (error) {
+      recordUploadDiagnostic(diagnosticContext, { stage: "backup", outcome: "retained" });
       const message = backupErrorMessage(error);
       setBackupError(message);
       try {
@@ -2839,6 +2856,7 @@ function RoomContent({
                     backdropFilter: "blur(8px)",
                   }}
                 >
+                  <UploadDiagnosticsDownload sessionId={sessionId} />
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-[12px] text-text-2">Preview quality</span>
                     <span
@@ -2959,6 +2977,7 @@ function RoomContent({
                   backdropFilter: "blur(8px)",
                 }}
               >
+                <UploadDiagnosticsDownload sessionId={sessionId} />
                 <button
                   type="button"
                   onClick={toggleMute}

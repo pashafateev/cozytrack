@@ -72,6 +72,7 @@ function isGuestAllowedForSessionEndpoint(pathname: string): boolean {
   return (
     pathname === "/api/upload/presign" ||
     pathname === "/api/upload/complete" ||
+    pathname === "/api/upload/diagnostics" ||
     pathname === "/api/livekit-token"
   );
 }
@@ -79,7 +80,8 @@ function isGuestAllowedForSessionEndpoint(pathname: string): boolean {
 function isRecordingUploadEndpoint(pathname: string): boolean {
   return (
     pathname === "/api/upload/presign" ||
-    pathname === "/api/upload/complete"
+    pathname === "/api/upload/complete" ||
+    pathname === "/api/upload/diagnostics"
   );
 }
 

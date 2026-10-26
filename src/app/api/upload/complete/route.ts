@@ -4,10 +4,19 @@ import { deleteTrackSegmentChunks } from "@/lib/s3";
 import { resolvePrincipal, verifyRecordingUploadToken } from "@/lib/auth";
 import { materializeTrack } from "@/lib/track-materialization";
 import { recoverInterruptedTrackSegments } from "@/lib/recovery";
+import { UploadRouteDiagnostics } from "@/lib/upload-diagnostics-server";
 
 export async function POST(req: NextRequest) {
+  const diagnostics = new UploadRouteDiagnostics("complete");
+  const response = await complete(req, diagnostics);
+  diagnostics.finish(response.status);
+  return response;
+}
+
+async function complete(req: NextRequest, diagnostics: UploadRouteDiagnostics) {
   try {
     const body = await req.json();
+    diagnostics.setScope(body);
     const { sessionId, trackId, durationMs } = body;
     const segmentId =
       typeof body?.segmentId === "string" && body.segmentId.length > 0
@@ -37,6 +46,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "unauthorized" }, { status: 401 });
       }
     }
+    diagnostics.start();
 
     const existingTrack = await db.track.findUnique({
       where: { id: trackId },
@@ -47,6 +57,7 @@ export async function POST(req: NextRequest) {
     if (existingTrack.sessionId !== sessionId) {
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
+    diagnostics.trackStatus = existingTrack.status;
 
     const existingSegment = await db.trackSegment.findUnique({
       where: { id: segmentId },
@@ -117,15 +128,18 @@ export async function POST(req: NextRequest) {
     // A previous attempt can fail after the replacement segment completed but
     // before invalidating/rematerializing the stale logical artifact.
     if (alreadyComplete && !recoveredStoppedTake) {
+      diagnostics.outcome = "already_exists";
       return NextResponse.json(existingTrack);
     }
 
     let track;
     if (latestSegmentComplete) {
       if (recoveredPartial) {
-        await materializeTrack(trackId, { partial: true });
+        const materialized = await materializeTrack(trackId, { partial: true });
+        diagnostics.materialized(materialized.status);
       } else {
-        await materializeTrack(trackId);
+        const materialized = await materializeTrack(trackId);
+        diagnostics.materialized(materialized.status);
       }
       track = await db.track.findUnique({ where: { id: trackId } });
     } else {
@@ -139,6 +153,7 @@ export async function POST(req: NextRequest) {
       });
       track = await db.track.findUnique({ where: { id: trackId } });
     }
+    diagnostics.trackStatus = track?.status;
 
     // After segment completion, recording.webm is the authoritative artifact
     // for that segment. Chunk files are temporary crash-safety uploads and can
