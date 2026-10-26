@@ -30,6 +30,7 @@
     "@aws-sdk/s3-request-presigner": "^3.600.0",
     "@livekit/components-react": "^2.6.0",
     "@prisma/client": "^6.19.3",
+    "client-zip": "^2.5.1",
     "ffmpeg-static": "^5.3.0",
     "jose": "^6.2.2",
     "livekit-client": "^2.6.0",
@@ -48,6 +49,7 @@
     "@types/react-dom": "^19.0.0",
     "@types/recordrtc": "^5.6.0",
     "@types/uuid": "^10.0.0",
+    "@types/yauzl": "^3.4.0",
     "@vitest/coverage-v8": "^4.1.5",
     "eslint": "^9.0.0",
     "eslint-config-next": "^15.0.0",
@@ -56,6 +58,7 @@
     "prisma": "^6.0.0",
     "tailwindcss": "^3.4.0",
     "typescript": "^5.6.0",
-    "vitest": "^4.1.5"
+    "vitest": "^4.1.5",
+    "yauzl": "^3.4.0"
   }
 }
