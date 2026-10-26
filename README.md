@@ -15,8 +15,25 @@ The product goal is simple: make it obvious what people are recording before the
 - Host-controlled start/stop; guests follow the host's recording lifecycle.
 - Chunked direct-to-S3 uploads through presigned URLs, plus browser-local recording backup for retry/recovery.
 - Session finalization once all tracks are complete, with per-track downloads.
+- Download All Tracks bundles completed, available tracks into one ZIP in the browser.
 - External ingest endpoints for downstream tools such as podline's `pod ct-ingest`.
 - Cleanup scripts for processed sessions and orphaned S3 prefixes.
+
+### Bulk track downloads
+
+On a saved session, **Download All Tracks** downloads a ZIP with one recording per
+completed, available track. Unfinished and failed tracks, tracks without a recording
+key, and purged recordings are excluded; the page shows when only some tracks are
+available. Files are numbered and named for the participant, so repeated names or
+multiple takes remain distinct. If any selected recording cannot be fetched, the
+download fails rather than saving a silently incomplete ZIP.
+
+Audio is fetched directly from S3 using the existing host-only download API for
+authorization. The browser assembles the archive locally without recompressing the
+recordings or proxying audio through the app server. Keep the session page open
+until preparation finishes. The resulting archive is held as a browser Blob before
+the download starts, so very large sessions may exceed browser storage or memory
+limits; individual track downloads remain available.
 
 ## Architecture
 
