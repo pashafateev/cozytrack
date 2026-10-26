@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSession } from "@/lib/sessions";
+import { getIngestSession } from "@/lib/sessions";
 
 export async function GET(
   _req: NextRequest,
@@ -7,7 +7,7 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    return await getSession(id);
+    return await getIngestSession(id);
   } catch (error) {
     console.error("Failed to get session:", error);
     return NextResponse.json(

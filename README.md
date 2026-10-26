@@ -193,6 +193,36 @@ Downstream processors can discover and download ready sessions through `/api/ing
 X-API-Key: <COZYTRACK_API_KEY>
 ```
 
+### Session-detail metadata
+
+`GET /api/ingest/sessions/:id` retains all existing session and track scalar
+fields, including each track's nullable `takeId` and `participantId`, `partial`,
+status, duration, storage key, and purge/device/creation metadata. It adds:
+
+| Field | Meaning |
+| --- | --- |
+| `recordingTakes[]` | All takes, including empty or active takes, ordered by `startedAt` ascending, then `id` ascending. Each contains only `id`, `startedAt`, `stoppedAt`, and `status`. |
+| `recordingTakes[].startedAt` / `stoppedAt` | ISO 8601 timestamps; `stoppedAt` may be `null`. These are lifecycle timestamps, not sample-accurate audio positions. |
+| `recordingTakes[].status` | Authoritative take lifecycle state (`recording` or `stopped`), independent of the top-level session status. |
+| `tracks[].segmentCount` | Number of all known recorder-segment rows for the logical track, including incomplete segments. |
+| `tracks[].incompleteSegmentCount` | Number of those segments whose status is anything other than `complete`. |
+
+A materialized track can have multiple complete segments with `partial=false`;
+the segment count still exposes that known reconnect/restart evidence. A zero
+count means there are no known segment rows, as can happen for legacy tracks;
+it does not prove there were no interruptions. Neither `partial=false` nor
+these counts guarantee complete or aligned audio.
+
+Older deployments may omit take lifecycle or segment summaries. Consumers must
+treat missing metadata as **unknown**, not invent a stopped take, a segment
+count, or a healthy `false` value. Deploy this additive API before downstream
+Podline multipart ingest relies on it; no schema migration is required.
+
+The browser's `GET /api/sessions/:id` response is unchanged. Ingest detail remains
+a read-only, API-key-gated metadata request: it does not finalize or stop takes,
+return audio download URLs, or export individual segment timestamps/storage
+metadata.
+
 After a session has been processed, raw recording files can be purged:
 
 ```http
