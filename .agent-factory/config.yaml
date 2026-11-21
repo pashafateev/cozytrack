@@ -20,11 +20,39 @@ sources:
         BucketName: cozytrack
         FilterId: EntireBucket
     pagination: Follow all pages of list-metrics before reporting the metric list.
+  - id: livekit-room-analytics
+    provider: custom
+    type: telemetry
+    scope: LiveKit Cloud project cozytrack (p_10q7rfuoo65)
+    integration: LiveKit CLI with the existing user-auth session
+    read_tool: lk analytics session list; lk analytics session get
+    arguments:
+      project: cozytrack
+      authentication: --user-auth
+      output: --json
+      list_window: --since 14d
+      list_limit: 100
+      detail_metrics:
+        - numParticipants
+        - connectionSeconds
+        - bandwidthIn
+        - bandwidthOut
+        - quality
+        - publishBps
+        - publishFps
+        - subscribeBps
+        - subscribeFps
+      detail_requires: hasDetailData is true
+      omit: participant identities and room identifiers from summaries
+      agent_observability: not applicable; CozyTrack uses LiveKit rooms, not LiveKit Agents
+    pagination: >-
+      Follow pageInfo.nextCursor with --cursor until exhausted. Fetch session
+      details with lk analytics session get only when hasDetailData is true.
 
 workflows:
   collect:
     enabled: true
-    sources: [s3-request-metrics]
+    sources: [s3-request-metrics, livekit-room-analytics]
     implement:
       mode: never
     reply:
@@ -43,3 +71,14 @@ skill_prompts:
     credentials, denied access, or unavailable network access as unknown, not
     as zero activity. Request a fresh sign-in when the session expires. Do not
     create AWS resources, change settings, or use GetMetricData as a substitute.
+
+    For LiveKit, use the CLI's user-auth session for project cozytrack; never
+    use the app's API key or secret. List room sessions for the requested window
+    with `lk analytics session list --project cozytrack --user-auth --json`,
+    using `--since` (default 14d), and follow every `pageInfo.nextCursor` with
+    `--cursor`. Fetch details with `lk analytics session get` only when
+    `hasDetailData` is true. Summarize counts, connection time, bandwidth,
+    quality, and publish/subscribe rates; omit room names, session IDs, and
+    participant identities. Do not fetch transcripts, logs, traces, or
+    recordings. If the CLI session expires or access/network fails, report the
+    data as unknown and request a fresh LiveKit sign-in; never use app secrets.
