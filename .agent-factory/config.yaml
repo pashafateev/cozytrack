@@ -129,12 +129,24 @@ skill_prompts:
     Saturday runs using the configured 50-minute lookback and error, warning,
     and fatal levels; the connected Hobby-plan reader rejects a one-hour
     lookback. The 50-minute queries overlap by 20 minutes. Each heartbeat runs
-    in the same CozyTrack thread: compare the current tool response with the
-    previous run's response in that thread and deduplicate internally by
-    timestamp and request ID. Never include request IDs in reports. If the
-    previous response is unavailable, say the overlap may contain duplicates
-    instead of reporting a deduplicated new-record count. Exclude entries
-    timestamped before 07:00 from the recording-period count.
+    in the same CozyTrack thread: compare the current tool response with prior
+    overlapping responses in that thread. Prefer a stable log-entry ID when
+    the response provides one. Otherwise fingerprint timestamp, request ID,
+    level, and message while preserving occurrence counts: subtract previously
+    seen occurrences rather than dropping every matching fingerprint. This
+    keeps distinct messages with the same timestamp and request ID. For
+    example, retain both an error and warning if their level or message differs;
+    for identical fingerprints, subtract only the previously seen occurrence
+    count. Never include request IDs, fingerprints, or raw messages in reports. If prior
+    responses are unavailable, say overlap may contain duplicates instead of
+    reporting a deduplicated new-record count.
+
+    Convert returned timestamps to America/Los_Angeles and filter entries to
+    [07:00, 13:00) before deduplicating, counting, or summarizing. Include
+    07:00; exclude 13:00 and later. For a 13:04 run, include a 12:59 record and
+    exclude a 13:02 record. If a timestamp is missing or cannot be parsed,
+    exclude that entry from the session count and report the count as
+    incomplete.
 
     Use 07:00 America/Los_Angeles as the initial recording coverage boundary.
     Track every successful, non-truncated query as an interval from its request
