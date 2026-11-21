@@ -162,9 +162,10 @@ skill_prompts:
     Convert returned timestamps to America/Los_Angeles and filter entries to
     [07:00, 13:00) before deduplicating, counting, or summarizing. Include
     07:00; exclude 13:00 and later. For a 13:04 run, include a 12:59 record and
-    exclude a 13:02 record. If a timestamp is missing or cannot be parsed,
-    exclude that entry from the session count and report the count as
-    incomplete.
+    exclude a 13:02 record. If any returned entry has a missing or unparseable
+    timestamp, exclude that entry from the session count, mark its query
+    interval incomplete, and do not add it to the fully covered union. Report
+    the known count as incomplete.
 
     Use 07:00 America/Los_Angeles as the initial recording coverage boundary.
     Derive coverage intervals from the exact `since` and `until` values sent to
@@ -175,8 +176,12 @@ skill_prompts:
     `since` to be less than 60 minutes. If `since` is 60 minutes old or older
     when the query begins, treat the read as partial or unavailable and do not
     credit any part as fully covered, even if the tool returns records. For
-    example, a 13:15 final run with `since` at 12:10 has an expired leading
-    interval; report 12:10–12:15 as unknown rather than crediting 12:10–13:00.
+    an expired or malformed read, recompute unknown spans from the complement
+    of the fully covered interval union; do not report already-covered time as
+    unknown. For example, a 13:15 final run with `since` at 12:10 earns no
+    coverage credit. If the last complete query covers through 12:30, report
+    only 12:30–13:00 as unknown; if no prior complete query covers 12:10–12:30,
+    report that span as unknown too.
     Compute gaps from the union of all successful, non-truncated query
     intervals. Report only spans missing from that union. Do not extend an
     existing gap to the start of a later query or use an unresolved gap's
