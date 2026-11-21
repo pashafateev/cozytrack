@@ -41,7 +41,7 @@ sources:
       projectId: prj_oBcDPKOrXkCHblQanqAIs2UiInOg
       teamId: team_cV75nqs8hYPQfneydlF12E09
       environment: production
-      since: 59m
+      since: 50m
       level: [error, warning, fatal]
       limit: 100
     pagination: No cursor is exposed; report a 100-record result as truncated.
@@ -67,7 +67,7 @@ sources:
       project: cozytrack
       authentication: --user-auth
       output: --json
-      list_window: --since 14d
+      list_window: --since 7d
       list_limit: 100
       detail_metrics: [numParticipants, connectionSeconds, bandwidthIn, bandwidthOut, quality, publishBps, publishFps, subscribeBps, subscribeFps]
       detail_requires: hasDetailData is true
@@ -81,10 +81,11 @@ sources:
     type: telemetry
     scope: Neon cozytrack project bold-frog-42699850, production branch br-sparkling-haze-akwoyzzu, us-west-2
     integration: Neon MCP
-    read_tool: mcp__codex_apps__neon_get_default_branch
+    read_tool: mcp__codex_apps__neon_get_branch
     arguments:
       project_id: bold-frog-42699850
-    pagination: Single current branch snapshot; this is not a historical usage series.
+      branch_id: br-sparkling-haze-akwoyzzu
+    pagination: Verify returned branch ID and production name; this is not a historical usage series.
 
 workflows:
   collect:
@@ -117,19 +118,24 @@ skill_prompts:
     Do not use runtime logs as a seven-day history: this project's Hobby-plan
     retention is one hour.
 
-    For vercel-recording-runtime-logs, query production runtime logs hourly on
-    Saturdays from 07:00 through 13:00 America/Los_Angeles, including the 13:00
-    check to cover the noon hour. Use the configured 59-minute lookback and
-    error, warning, and fatal levels. Keep the one-minute overlap deduplicated
-    across adjacent runs.
+    For vercel-recording-runtime-logs, query production runtime logs on
+    Saturdays every 30 minutes from 07:00 through 12:30, followed by a final
+    13:00 America/Los_Angeles check to cover the noon hour. Use the configured
+    50-minute lookback and error, warning, and fatal levels; the connected
+    Hobby-plan reader rejects a one-hour lookback. The 50-minute queries overlap
+    by 20 minutes. Deduplicate repeated entries across adjacent runs and exclude
+    entries timestamped before 07:00 from the recording-period count.
     Return counts and only short sanitized message summaries; omit request IDs,
     user data, room/session identifiers, secrets, and query strings. The tool
     has no cursor; if it returns 100 records, report the read as truncated.
     A successful empty response means zero matching records. If the query fails
     or falls outside the one-hour retention window, report it as unavailable.
 
-    For Neon, read the configured production branch snapshot and label its
-    compute, active-time, logical-size, and transfer fields as current snapshot
+    For Neon, call neon_get_branch with the configured production branch ID
+    br-sparkling-haze-akwoyzzu and project bold-frog-42699850. Verify that the
+    returned branch ID matches and its name is production; otherwise report
+    unavailable. Label its compute, active-time, logical-size, and transfer
+    fields as current snapshot
     values, not monthly billing totals. The historical consumption endpoint is
     unavailable on the current plan. Database logs are not enabled in this
     region, and pg_stat_statements is not installed; do not install extensions
@@ -137,7 +143,7 @@ skill_prompts:
 
     For LiveKit, use the authenticated local CLI user session and project
     cozytrack. List room sessions with `lk analytics session list --project
-    cozytrack --user-auth --json --since 14d --limit 100`, follow every
+    cozytrack --user-auth --json --since 7d --limit 100`, follow every
     `pageInfo.nextCursor` with `--cursor`, and fetch details using
     `lk analytics session get` only when `hasDetailData` is true. Summarize
     participant counts, connection seconds, bandwidth, quality, and publish /
