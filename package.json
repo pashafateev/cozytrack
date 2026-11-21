@@ -19,6 +19,7 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit --incremental false",
     "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:mutation": "node scripts/run-mutation-tests.mjs",
     "test:browser": "bash ./scripts/test-browser-smoke.sh",
     "db:migrate": "prisma migrate dev",
     "db:generate": "prisma generate",
@@ -42,6 +43,8 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.60.0",
+    "@stryker-mutator/core": "^10.1.1",
+    "@stryker-mutator/vitest-runner": "^10.1.1",
     "@testing-library/react": "^16.3.2",
     "@types/node": "22.19.17",
     "@types/react": "^19.0.0",
