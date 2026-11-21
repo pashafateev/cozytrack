@@ -20,11 +20,64 @@ sources:
         BucketName: cozytrack
         FilterId: EntireBucket
     pagination: Follow all pages of list-metrics before reporting the metric list.
+  - id: vercel-runtime-errors
+    provider: custom
+    type: error
+    scope: Vercel project cozytrack (prj_oBcDPKOrXkCHblQanqAIs2UiInOg), team team_cV75nqs8hYPQfneydlF12E09
+    integration: Vercel MCP
+    read_tool: mcp__codex_apps__vercel_get_runtime_errors
+    arguments:
+      projectId: prj_oBcDPKOrXkCHblQanqAIs2UiInOg
+      teamId: team_cV75nqs8hYPQfneydlF12E09
+      since: 7d
+    pagination: The tool returns aggregated error groups for a maximum seven-day window.
+  - id: vercel-pageviews
+    provider: custom
+    type: telemetry
+    scope: Production pageviews for Vercel project cozytrack (prj_oBcDPKOrXkCHblQanqAIs2UiInOg)
+    integration: Vercel MCP
+    read_tool: mcp__codex_apps__vercel_count_pageviews
+    arguments:
+      projectId: prj_oBcDPKOrXkCHblQanqAIs2UiInOg
+      teamId: team_cV75nqs8hYPQfneydlF12E09
+      since: now minus seven days as an ISO timestamp
+      until: current UTC timestamp
+    pagination: Single aggregate response; no pagination.
+  - id: livekit-room-analytics
+    provider: custom
+    type: telemetry
+    scope: LiveKit Cloud project cozytrack (p_10q7rfuoo65)
+    integration: LiveKit Cloud CLI using the existing user-auth session
+    read_tool: lk analytics session list; lk analytics session get
+    arguments:
+      project: cozytrack
+      authentication: --user-auth
+      output: --json
+      list_window: --since 14d
+      list_limit: 100
+      detail_metrics: [numParticipants, connectionSeconds, bandwidthIn, bandwidthOut, quality, publishBps, publishFps, subscribeBps, subscribeFps]
+      detail_requires: hasDetailData is true
+      omit: participant identities and room identifiers from summaries
+      agent_observability: not applicable; CozyTrack uses LiveKit rooms, not LiveKit Agents
+    pagination: >-
+      Follow pageInfo.nextCursor with --cursor until exhausted. Fetch session
+      details with lk analytics session get only when hasDetailData is true.
+  - id: neon-production-snapshot
+    provider: custom
+    type: telemetry
+    scope: Neon cozytrack project bold-frog-42699850, production branch br-sparkling-haze-akwoyzzu, us-west-2
+    integration: Neon MCP
+    read_tool: mcp__codex_apps__neon_get_default_branch
+    arguments:
+      project_id: bold-frog-42699850
+    pagination: Single current branch snapshot; this is not a historical usage series.
 
 workflows:
   collect:
     enabled: true
-    sources: [s3-request-metrics]
+    schedule: weekly on Monday at 9:00 AM America/Los_Angeles
+    window: last 7 days
+    sources: [s3-request-metrics, livekit-room-analytics, vercel-runtime-errors, vercel-pageviews, neon-production-snapshot]
     implement:
       mode: never
     reply:
@@ -34,7 +87,7 @@ workflows:
 
 skill_prompts:
   factory-collect: |
-    This source is for manual, read-only collection. Use the dedicated AWS CLI
+    This workflow is for scheduled, read-only collection. Use the dedicated AWS CLI
     profile, never root or application credentials. List the bucket and filter's
     metrics and use GetMetricStatistics for the relevant time window. Use the
     correct metric statistic and units, and include the window and timezone in
@@ -43,3 +96,31 @@ skill_prompts:
     credentials, denied access, or unavailable network access as unknown, not
     as zero activity. Request a fresh sign-in when the session expires. Do not
     create AWS resources, change settings, or use GetMetricData as a substitute.
+
+    For Vercel, query the configured project's aggregated runtime errors and
+    production pageviews for the last seven days. Report the exact window; a
+    successful zero result is distinct from an unavailable or denied query.
+    Do not use runtime logs as a seven-day history: this project's Hobby-plan
+    retention is one hour.
+
+    For Neon, read the configured production branch snapshot and label its
+    compute, active-time, logical-size, and transfer fields as current snapshot
+    values, not monthly billing totals. The historical consumption endpoint is
+    unavailable on the current plan. Database logs are not enabled in this
+    region, and pg_stat_statements is not installed; do not install extensions
+    or change database settings for collection.
+
+    For LiveKit, use the authenticated local CLI user session and project
+    cozytrack. List room sessions with `lk analytics session list --project
+    cozytrack --user-auth --json --since 14d --limit 100`, follow every
+    `pageInfo.nextCursor` with `--cursor`, and fetch details using
+    `lk analytics session get` only when `hasDetailData` is true. Summarize
+    participant counts, connection seconds, bandwidth, quality, and publish /
+    subscribe rates. CozyTrack uses LiveKit rooms, not LiveKit Agents, so do not
+    query agent-exported OpenTelemetry metrics. Omit room names, session IDs,
+    participant identities, transcripts, recordings, and logs. If the CLI
+    session is expired, the project is inaccessible, or the API cannot be
+    reached, report the source as unavailable; do not run interactive sign-in
+    from a scheduled job. Never reuse CozyTrack's application room credentials
+    from Vercel environment variables. Keep collection read-only; implementation,
+    replies, and issue closure remain disabled.
