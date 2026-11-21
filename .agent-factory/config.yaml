@@ -1,0 +1,45 @@
+version: 1
+timezone: America/Los_Angeles
+
+repositories:
+  - id: cozytrack
+    provider: github
+    remote: pashafateev/cozytrack
+
+sources:
+  - id: s3-request-metrics
+    provider: custom
+    type: telemetry
+    scope: AWS/S3 request metrics for cozytrack, EntireBucket, us-west-2
+    integration: AWS CLI using the cozytrack-factory-metrics profile
+    read_tool: aws cloudwatch list-metrics and get-metric-statistics
+    arguments:
+      region: us-west-2
+      namespace: AWS/S3
+      dimensions:
+        BucketName: cozytrack
+        FilterId: EntireBucket
+    pagination: Follow all pages of list-metrics before reporting the metric list.
+
+workflows:
+  collect:
+    enabled: true
+    sources: [s3-request-metrics]
+    implement:
+      mode: never
+    reply:
+      mode: never
+    close:
+      mode: never
+
+skill_prompts:
+  factory-collect: |
+    This source is for manual, read-only collection. Use the dedicated AWS CLI
+    profile, never root or application credentials. List the bucket and filter's
+    metrics and use GetMetricStatistics for the relevant time window. Use the
+    correct metric statistic and units, and include the window and timezone in
+    any report. ListMetrics only lists recently active metrics, so it is not a
+    complete monthly usage or billing report. Treat missing datapoints, expired
+    credentials, denied access, or unavailable network access as unknown, not
+    as zero activity. Request a fresh sign-in when the session expires. Do not
+    create AWS resources, change settings, or use GetMetricData as a substitute.
