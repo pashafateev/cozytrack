@@ -2,7 +2,15 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 
 const baseSha = process.env.MUTATION_BASE_SHA?.trim();
-const isValidBaseSha = baseSha && !/^0+$/.test(baseSha);
+const hasBaseSha = Boolean(baseSha) && !/^0+$/.test(baseSha);
+// A force-push can leave github.event.before pointing at a commit that is no longer fetchable.
+const isReachableCommit = (sha) =>
+  spawnSync("git", ["cat-file", "-e", `${sha}^{commit}`], { stdio: "ignore" }).status === 0;
+const isValidBaseSha = hasBaseSha && isReachableCommit(baseSha);
+
+if (hasBaseSha && !isValidBaseSha) {
+  console.log(`Mutation base SHA ${baseSha} is not in the local history; running the full configured mutation suite.`);
+}
 
 let mutationArgs = ["run", "--incremental"];
 const asMutationPattern = (file) =>
@@ -89,12 +97,17 @@ if (isValidBaseSha) {
   if (unitTestSupportChanged) {
     mutationArgs.push("--force");
   }
-} else {
+} else if (!hasBaseSha) {
   console.log("No mutation base SHA provided; running the full configured mutation suite.");
 }
 
-const strykerBin = process.platform === "win32" ? "node_modules/.bin/stryker.cmd" : "node_modules/.bin/stryker";
-const result = spawnSync(strykerBin, mutationArgs, { env: process.env, stdio: "inherit" });
+// Run Stryker's JS entry point with the current Node binary. Spawning the .cmd shim on Windows
+// without a shell is rejected by Node (EINVAL) since the CVE-2024-27980 fix.
+const strykerEntry = "node_modules/@stryker-mutator/core/bin/stryker.js";
+const result = spawnSync(process.execPath, [strykerEntry, ...mutationArgs], {
+  env: process.env,
+  stdio: "inherit",
+});
 
 if (result.error) {
   throw result.error;
