@@ -135,6 +135,17 @@ skill_prompts:
     previous response is unavailable, say the overlap may contain duplicates
     instead of reporting a deduplicated new-record count. Exclude entries
     timestamped before 07:00 from the recording-period count.
+
+    Track the covered interval for every successful query as its request time
+    minus 50 minutes through its request time, and merge overlapping intervals.
+    Before counting a later run, compare its interval start with the latest
+    contiguous covered end. If the new interval starts later, report the exact
+    uncovered span as unknown; an empty response does not make that gap zero.
+    Do not advance coverage after a failed or unavailable query. For example,
+    if a successful query ends at 07:00 and the next query starts at 07:10,
+    report 07:00–07:10 as unknown. If the prior successful result or its
+    interval bounds are unavailable in the thread, report only the current
+    query window and say full-session coverage is unknown.
     Return counts and only short sanitized message summaries; omit request IDs,
     user data, room/session identifiers, secrets, and query strings. The tool
     has no cursor; if it returns 100 records, report the read as truncated.
