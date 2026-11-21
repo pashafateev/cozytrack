@@ -118,8 +118,10 @@ skill_prompts:
     retention is one hour.
 
     For vercel-recording-runtime-logs, query production runtime logs hourly on
-    Saturdays using the configured 59-minute lookback and error, warning, and
-    fatal levels. Keep the one-minute overlap deduplicated across adjacent runs.
+    Saturdays from 07:00 through 13:00 America/Los_Angeles, including the 13:00
+    check to cover the noon hour. Use the configured 59-minute lookback and
+    error, warning, and fatal levels. Keep the one-minute overlap deduplicated
+    across adjacent runs.
     Return counts and only short sanitized message summaries; omit request IDs,
     user data, room/session identifiers, secrets, and query strings. The tool
     has no cursor; if it returns 100 records, report the read as truncated.
