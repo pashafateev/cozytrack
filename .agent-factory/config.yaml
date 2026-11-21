@@ -92,7 +92,7 @@ workflows:
     enabled: true
     schedule: weekly on Saturday at 9:00 PM America/Los_Angeles
     window: last 7 days
-    sources: [s3-request-metrics, livekit-room-analytics, vercel-runtime-errors, vercel-recording-runtime-logs, vercel-pageviews, neon-production-snapshot]
+    sources: [s3-request-metrics, livekit-room-analytics, vercel-runtime-errors, vercel-pageviews, neon-production-snapshot]
     implement:
       mode: never
     reply:
@@ -118,13 +118,23 @@ skill_prompts:
     Do not use runtime logs as a seven-day history: this project's Hobby-plan
     retention is one hour.
 
-    For vercel-recording-runtime-logs, query production runtime logs on
-    Saturdays every 30 minutes from 07:00 through 12:30, followed by a final
-    13:00 America/Los_Angeles check to cover the noon hour. Use the configured
-    50-minute lookback and error, warning, and fatal levels; the connected
-    Hobby-plan reader rejects a one-hour lookback. The 50-minute queries overlap
-    by 20 minutes. Deduplicate repeated entries across adjacent runs and exclude
-    entries timestamped before 07:00 from the recording-period count.
+    Raw runtime logs are excluded from the 9:00 PM weekly workflow because this
+    project's Hobby-plan retention is one hour. A separate pair of active
+    Codex host schedules collects them every 30 minutes Saturday from 07:00
+    through 12:30, plus a final 13:00 America/Los_Angeles check. These schedules
+    live in the Codex host, not this repository; verify their active status
+    there before relying on log coverage.
+
+    For vercel-recording-runtime-logs, query production runtime logs in those
+    Saturday runs using the configured 50-minute lookback and error, warning,
+    and fatal levels; the connected Hobby-plan reader rejects a one-hour
+    lookback. The 50-minute queries overlap by 20 minutes. Each heartbeat runs
+    in the same CozyTrack thread: compare the current tool response with the
+    previous run's response in that thread and deduplicate internally by
+    timestamp and request ID. Never include request IDs in reports. If the
+    previous response is unavailable, say the overlap may contain duplicates
+    instead of reporting a deduplicated new-record count. Exclude entries
+    timestamped before 07:00 from the recording-period count.
     Return counts and only short sanitized message summaries; omit request IDs,
     user data, room/session identifiers, secrets, and query strings. The tool
     has no cursor; if it returns 100 records, report the read as truncated.
