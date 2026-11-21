@@ -75,7 +75,7 @@ sources:
 workflows:
   collect:
     enabled: true
-    schedule: weekly on Monday at 9:00 AM America/Los_Angeles
+    schedule: weekly on Saturday at 9:00 PM America/Los_Angeles
     window: last 7 days
     sources: [s3-request-metrics, livekit-room-analytics, vercel-runtime-errors, vercel-pageviews, neon-production-snapshot]
     implement:
