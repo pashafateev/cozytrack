@@ -100,7 +100,8 @@ permissions:
 jobs:
   browser-smoke:
     name: Browser recording smoke
-    runs-on: ubuntu-latest
+    # Playwright 1.60 cannot install Chromium deps on ubuntu-latest (26.04); unpin after upgrading Playwright.
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Check out repository

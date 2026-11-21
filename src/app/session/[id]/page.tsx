@@ -8,6 +8,7 @@ import { Button, ButtonLink } from "@/components/ui/Button";
 import { Waveform } from "@/components/ui/Waveform";
 import { UploadDiagnosticsDownload } from "@/components/UploadDiagnosticsDownload";
 import { PodlineIngestCommand } from "@/components/PodlineIngestCommand";
+import { DownloadAllTracks } from "@/components/DownloadAllTracks";
 import {
   IcoChevron,
   IcoDownload,
@@ -21,6 +22,7 @@ interface Track {
   id: string;
   participantName: string;
   s3Key: string;
+  s3PurgedAt: string | null;
   durationMs: number | null;
   format: string;
   status: string;
@@ -333,17 +335,14 @@ export default function SessionDetailPage() {
           )}
         </div>
 
-        {/* Download all — blocked on cozytrack#26 (zip-all endpoint) */}
         <div className="flex flex-wrap items-start justify-between gap-3">
           <UploadDiagnosticsDownload sessionId={sessionId} />
-          <Button
-            variant="primary"
-            size="md"
-            disabled
-            title="Bulk zip download tracked in #26 — download individual tracks for now"
-          >
-            <IcoDownload size={13} color="currentColor" /> Download All Tracks
-          </Button>
+          <DownloadAllTracks
+            key={session.id}
+            sessionId={session.id}
+            sessionName={session.name}
+            tracks={session.tracks}
+          />
         </div>
       </div>
     </div>
