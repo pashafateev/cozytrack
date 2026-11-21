@@ -171,6 +171,12 @@ skill_prompts:
     the tool, clipped to 07:00–13:00 America/Los_Angeles. Do not recompute the
     interval from the actual request time when a scheduled run is delayed.
     Track only successful, non-truncated query intervals.
+    Before crediting an interval, require the actual query start time minus
+    `since` to be less than 60 minutes. If `since` is 60 minutes old or older
+    when the query begins, treat the read as partial or unavailable and do not
+    credit any part as fully covered, even if the tool returns records. For
+    example, a 13:15 final run with `since` at 12:10 has an expired leading
+    interval; report 12:10–12:15 as unknown rather than crediting 12:10–13:00.
     Compute gaps from the union of all successful, non-truncated query
     intervals. Report only spans missing from that union. Do not extend an
     existing gap to the start of a later query or use an unresolved gap's
@@ -200,14 +206,17 @@ skill_prompts:
     matching records only for the query interval it fully covers; uncovered
     periods remain unknown.
     After each heartbeat, write a compact coverage ledger in this thread with
-    the scheduled slot, exact `since`/`until` bounds in Pacific time, the fully
-    covered interval added (or none), remaining gaps, and failed/truncated
-    status. Do not include log contents, request IDs, or fingerprints in the
-    ledger. The 21:00 weekly workflow must read this ledger, recompute the union
-    of fully covered intervals, and audit the full 07:00–13:00 period even if
-    the 13:00 heartbeat is missing, failed, or truncated. Report all remaining
-    spans as unknown and do not query raw logs again at 21:00. If ledger entries
-    are unavailable, say coverage is unknown instead of assuming zero.
+    the full coverage date as YYYY-MM-DD in America/Los_Angeles, scheduled slot,
+    exact `since`/`until` bounds in Pacific time, fully covered interval added
+    (or none), remaining gaps, and failed/truncated/expired status. Do not
+    include log contents, request IDs, or fingerprints in the ledger. The
+    21:00 weekly workflow must select only ledger entries for the current
+    Saturday date in America/Los_Angeles, recompute their union, and audit the
+    full 07:00–13:00 period even if the 13:00 heartbeat is missing, failed, or
+    truncated. A complete prior Saturday must never count toward this Saturday.
+    Report all remaining spans as unknown and do not query raw logs again at
+    21:00. If ledger entries are unavailable, say coverage is unknown instead
+    of assuming zero.
     Return counts and only short sanitized message summaries; omit request IDs,
     user data, room/session identifiers, secrets, and query strings. The tool
     has no cursor; if it returns 100 records, report the read as truncated and
