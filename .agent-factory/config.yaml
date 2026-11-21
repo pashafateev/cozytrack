@@ -1,0 +1,32 @@
+version: 1
+timezone: America/Los_Angeles
+
+sources:
+  - id: livekit-room-analytics
+    provider: custom
+    type: telemetry
+    scope: LiveKit Cloud project cozytrack (p_10q7rfuoo65)
+    integration: LiveKit CLI with the existing user-auth session
+    read_tool: lk analytics session list; lk analytics session get
+    arguments:
+      project: cozytrack
+      authentication: --user-auth
+      output: --json
+      list_window: --since 14d
+      list_limit: 100
+      detail_metrics:
+        - numParticipants
+        - connectionSeconds
+        - bandwidthIn
+        - bandwidthOut
+        - quality
+        - publishBps
+        - publishFps
+        - subscribeBps
+        - subscribeFps
+      detail_requires: hasDetailData is true
+      omit: participant identities and room identifiers from summaries
+      agent_observability: not applicable; CozyTrack uses LiveKit rooms, not LiveKit Agents
+    pagination: >-
+      Follow pageInfo.nextCursor with --cursor until exhausted. Fetch session
+      details with lk analytics session get only when hasDetailData is true.
