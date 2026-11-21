@@ -31,6 +31,20 @@ sources:
       teamId: team_cV75nqs8hYPQfneydlF12E09
       since: 7d
     pagination: The tool returns aggregated error groups for a maximum seven-day window.
+  - id: vercel-recording-runtime-logs
+    provider: custom
+    type: error
+    scope: Production runtime logs for Vercel project cozytrack (prj_oBcDPKOrXkCHblQanqAIs2UiInOg)
+    integration: Vercel MCP
+    read_tool: mcp__codex_apps__vercel_get_runtime_logs
+    arguments:
+      projectId: prj_oBcDPKOrXkCHblQanqAIs2UiInOg
+      teamId: team_cV75nqs8hYPQfneydlF12E09
+      environment: production
+      since: 59m
+      level: [error, warning, fatal]
+      limit: 100
+    pagination: No cursor is exposed; report a 100-record result as truncated.
   - id: vercel-pageviews
     provider: custom
     type: telemetry
@@ -77,7 +91,7 @@ workflows:
     enabled: true
     schedule: weekly on Saturday at 9:00 PM America/Los_Angeles
     window: last 7 days
-    sources: [s3-request-metrics, livekit-room-analytics, vercel-runtime-errors, vercel-pageviews, neon-production-snapshot]
+    sources: [s3-request-metrics, livekit-room-analytics, vercel-runtime-errors, vercel-recording-runtime-logs, vercel-pageviews, neon-production-snapshot]
     implement:
       mode: never
     reply:
@@ -102,6 +116,15 @@ skill_prompts:
     successful zero result is distinct from an unavailable or denied query.
     Do not use runtime logs as a seven-day history: this project's Hobby-plan
     retention is one hour.
+
+    For vercel-recording-runtime-logs, query production runtime logs hourly on
+    Saturdays using the configured 59-minute lookback and error, warning, and
+    fatal levels. Keep the one-minute overlap deduplicated across adjacent runs.
+    Return counts and only short sanitized message summaries; omit request IDs,
+    user data, room/session identifiers, secrets, and query strings. The tool
+    has no cursor; if it returns 100 records, report the read as truncated.
+    A successful empty response means zero matching records. If the query fails
+    or falls outside the one-hour retention window, report it as unavailable.
 
     For Neon, read the configured production branch snapshot and label its
     compute, active-time, logical-size, and transfer fields as current snapshot
