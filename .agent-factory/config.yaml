@@ -137,31 +137,42 @@ skill_prompts:
     timestamped before 07:00 from the recording-period count.
 
     Use 07:00 America/Los_Angeles as the initial recording coverage boundary.
-    Track each successful, non-truncated query as an interval from its request
-    time minus 50 minutes through its request time, clipped to the recording
-    boundary, and merge overlapping intervals. If the first successful query
-    starts after 07:00, report the span from 07:00 to that query's start as
-    unknown. Before counting a later run, compare its interval start with the
-    latest contiguous covered end. If the new interval starts later, report the
-    exact uncovered span as unknown; an empty response does not make that gap
-    zero. Do not advance coverage after a failed or unavailable query.
+    Track every successful, non-truncated query as an interval from its request
+    time minus 50 minutes through its request time, clipped to 07:00–13:00.
+    Compute gaps from the union of all successful, non-truncated query
+    intervals. Report only spans missing from that union. Do not extend an
+    existing gap to the start of a later query or use an unresolved gap's
+    start as the reference point. If the first successful query starts after
+    07:00, report the span from 07:00 to that query's start as unknown. For
+    example, if the 07:00 and 07:30 runs fail and the first successful 08:00
+    query starts at 07:10, report 07:00–07:10 as unknown. After a missed 07:30
+    run, an 08:00 query starting at 07:10 leaves 07:00–07:10 unknown; an 08:30
+    query starting at 07:40 expands known coverage through 08:30 but does not
+    widen that gap to 07:40. Do not advance coverage after a failed or
+    unavailable query.
 
-    A 100-record response is truncated and does not advance the fully covered
-    interval. Report 100 returned records as truncated, not as an exact total.
+    A 100-record response is truncated and does not advance fully covered
+    intervals. Report 100 returned records as truncated, not as an exact total.
     A later non-truncated query establishes coverage only for its own interval;
-    do not fill earlier unknown spans from a capped read. For example, if a
-    successful query ends at 07:00 and the next query starts at 07:10, report
-    07:00–07:10 as unknown. If the prior successful result or its interval
-    bounds are unavailable in the thread, report only the current query window
-    and say full-session coverage is unknown.
+    it may fill any part of a prior gap inside that interval. For example, if a
+    07:30 query is capped and the 08:00 query starting at 07:10 is not capped,
+    only 07:10–08:00 becomes known; keep 07:00–07:10 unknown. If prior results
+    or their interval bounds are unavailable in the thread, treat only the
+    current non-truncated query as known coverage and report the rest as
+    unknown.
+
+    The final 13:00 heartbeat must audit uncovered spans through 13:00 even if
+    its query fails or is truncated. A failed or capped final query does not
+    advance coverage; for example, if the last complete query ends at 12:30,
+    report 12:30–13:00 as unknown. A successful empty response means zero
+    matching records only for the query interval it fully covers; uncovered
+    periods remain unknown.
     Return counts and only short sanitized message summaries; omit request IDs,
     user data, room/session identifiers, secrets, and query strings. The tool
     has no cursor; if it returns 100 records, report the read as truncated and
     preserve its interval as incomplete.
-    A successful empty response means zero matching records for its fully
-    covered query interval only; uncovered periods remain unknown. If the query
-    fails or falls outside the one-hour retention window, report it as
-    unavailable.
+    If the query fails or falls outside the one-hour retention window, report
+    it as unavailable.
 
     For Neon, call neon_get_branch with the configured production branch ID
     br-sparkling-haze-akwoyzzu and project bold-frog-42699850. Verify that the
