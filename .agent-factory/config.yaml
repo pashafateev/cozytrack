@@ -136,21 +136,32 @@ skill_prompts:
     instead of reporting a deduplicated new-record count. Exclude entries
     timestamped before 07:00 from the recording-period count.
 
-    Track the covered interval for every successful query as its request time
-    minus 50 minutes through its request time, and merge overlapping intervals.
-    Before counting a later run, compare its interval start with the latest
-    contiguous covered end. If the new interval starts later, report the exact
-    uncovered span as unknown; an empty response does not make that gap zero.
-    Do not advance coverage after a failed or unavailable query. For example,
-    if a successful query ends at 07:00 and the next query starts at 07:10,
-    report 07:00–07:10 as unknown. If the prior successful result or its
-    interval bounds are unavailable in the thread, report only the current
-    query window and say full-session coverage is unknown.
+    Use 07:00 America/Los_Angeles as the initial recording coverage boundary.
+    Track each successful, non-truncated query as an interval from its request
+    time minus 50 minutes through its request time, clipped to the recording
+    boundary, and merge overlapping intervals. If the first successful query
+    starts after 07:00, report the span from 07:00 to that query's start as
+    unknown. Before counting a later run, compare its interval start with the
+    latest contiguous covered end. If the new interval starts later, report the
+    exact uncovered span as unknown; an empty response does not make that gap
+    zero. Do not advance coverage after a failed or unavailable query.
+
+    A 100-record response is truncated and does not advance the fully covered
+    interval. Report 100 returned records as truncated, not as an exact total.
+    A later non-truncated query establishes coverage only for its own interval;
+    do not fill earlier unknown spans from a capped read. For example, if a
+    successful query ends at 07:00 and the next query starts at 07:10, report
+    07:00–07:10 as unknown. If the prior successful result or its interval
+    bounds are unavailable in the thread, report only the current query window
+    and say full-session coverage is unknown.
     Return counts and only short sanitized message summaries; omit request IDs,
     user data, room/session identifiers, secrets, and query strings. The tool
-    has no cursor; if it returns 100 records, report the read as truncated.
-    A successful empty response means zero matching records. If the query fails
-    or falls outside the one-hour retention window, report it as unavailable.
+    has no cursor; if it returns 100 records, report the read as truncated and
+    preserve its interval as incomplete.
+    A successful empty response means zero matching records for its fully
+    covered query interval only; uncovered periods remain unknown. If the query
+    fails or falls outside the one-hour retention window, report it as
+    unavailable.
 
     For Neon, call neon_get_branch with the configured production branch ID
     br-sparkling-haze-akwoyzzu and project bold-frog-42699850. Verify that the
