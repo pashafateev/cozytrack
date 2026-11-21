@@ -167,8 +167,10 @@ skill_prompts:
     incomplete.
 
     Use 07:00 America/Los_Angeles as the initial recording coverage boundary.
-    Track every successful, non-truncated query as an interval from its request
-    time minus 50 minutes through its request time, clipped to 07:00–13:00.
+    Derive coverage intervals from the exact `since` and `until` values sent to
+    the tool, clipped to 07:00–13:00 America/Los_Angeles. Do not recompute the
+    interval from the actual request time when a scheduled run is delayed.
+    Track only successful, non-truncated query intervals.
     Compute gaps from the union of all successful, non-truncated query
     intervals. Report only spans missing from that union. Do not extend an
     existing gap to the start of a later query or use an unresolved gap's
@@ -197,6 +199,15 @@ skill_prompts:
     report 12:30–13:00 as unknown. A successful empty response means zero
     matching records only for the query interval it fully covers; uncovered
     periods remain unknown.
+    After each heartbeat, write a compact coverage ledger in this thread with
+    the scheduled slot, exact `since`/`until` bounds in Pacific time, the fully
+    covered interval added (or none), remaining gaps, and failed/truncated
+    status. Do not include log contents, request IDs, or fingerprints in the
+    ledger. The 21:00 weekly workflow must read this ledger, recompute the union
+    of fully covered intervals, and audit the full 07:00–13:00 period even if
+    the 13:00 heartbeat is missing, failed, or truncated. Report all remaining
+    spans as unknown and do not query raw logs again at 21:00. If ledger entries
+    are unavailable, say coverage is unknown instead of assuming zero.
     Return counts and only short sanitized message summaries; omit request IDs,
     user data, room/session identifiers, secrets, and query strings. The tool
     has no cursor; if it returns 100 records, report the read as truncated and
