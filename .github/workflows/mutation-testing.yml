@@ -1,0 +1,67 @@
+name: Mutation testing
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  mutation:
+    name: Mutation test suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      MUTATION_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+      AUTH_SECRET: cozytrack-ci-auth-secret-32-characters
+      HOST_PASSWORD: cozytrack-ci-password
+      DATABASE_URL: postgresql://cozytrack:cozytrack@localhost:5432/cozytrack
+      DIRECT_DATABASE_URL: postgresql://cozytrack:cozytrack@localhost:5432/cozytrack
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: cozytrack-local-livekit-secret-32
+      LIVEKIT_URL: ws://localhost:7880
+      NEXT_PUBLIC_LIVEKIT_URL: ws://localhost:7880
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: cozytrack-ci
+      AWS_SECRET_ACCESS_KEY: cozytrack-ci
+      S3_BUCKET_NAME: cozytrack-ci-test
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Restore mutation baseline
+        uses: actions/cache@v4
+        with:
+          path: reports/stryker-incremental.json
+          key: stryker-${{ runner.os }}-${{ hashFiles('package.json', 'package-lock.json', 'stryker.config.json', 'vitest.config.ts', 'tsconfig.json', 'scripts/run-mutation-tests.mjs', '.github/workflows/mutation-testing.yml') }}-${{ github.event.pull_request.number || github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            stryker-${{ runner.os }}-${{ hashFiles('package.json', 'package-lock.json', 'stryker.config.json', 'vitest.config.ts', 'tsconfig.json', 'scripts/run-mutation-tests.mjs', '.github/workflows/mutation-testing.yml') }}-${{ github.event.pull_request.number || github.ref_name }}-
+            stryker-${{ runner.os }}-${{ hashFiles('package.json', 'package-lock.json', 'stryker.config.json', 'vitest.config.ts', 'tsconfig.json', 'scripts/run-mutation-tests.mjs', '.github/workflows/mutation-testing.yml') }}-${{ github.event.pull_request.base.ref || 'main' }}-
+
+      - name: Run mutation tests
+        run: npm run test:mutation
+
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-report
+          path: |
+            reports/mutation.html
+            reports/mutation.json
+          if-no-files-found: ignore
